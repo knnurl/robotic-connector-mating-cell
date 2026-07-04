@@ -81,14 +81,22 @@ The controller needs TF from the TCP to the camera **optical** frame. A
 tape-measure guess caps your roll/pitch accuracy at several degrees; calibrate
 it.
 
+Use the built-in tool (robot driver + `cam_pub` must be running):
+
+```bash
+ros2 run roscam handeye_calib --ros-args -p base_frame:=rv5as_base -p tcp_frame:=rv5as_default_tcp
+```
+
 1. Fix a marker/board in the workspace where it stays put.
-2. Move the robot to 10–15 diverse poses (vary all rotations, keep the
-   marker in view). At each pose record:
-   - `T_base→tcp` — e.g. `ros2 run tf2_ros tf2_echo <base> <tcp>`
-   - `T_cam→marker` — echo `/aruco/pose_raw`
-3. Solve with `cv2.calibrateHandEye` (eye-in-hand form), or use the MoveIt
-   Hand-Eye Calibration GUI which automates steps 2–3.
-4. Publish the result as a static TF (put it in your bringup):
+2. Jog the robot to 10–15 **diverse** poses (vary all rotations, keep the
+   marker in view); press Enter at each to record a sample. Samples are
+   saved to `handeye_samples.yaml` as you go.
+3. Press `s` to solve. The tool runs four solvers (Tsai, Park, Horaud,
+   Daniilidis), reports each one's consistency residual, picks the best, and
+   prints a ready-to-paste `static_transform_publisher` command. Residual
+   should be a few mm and well under 1°. Re-solve offline any time with
+   `ros2 run roscam handeye_calib --solve handeye_samples.yaml`.
+4. Publish the printed static TF (put it in your bringup):
 
 ```bash
 ros2 run tf2_ros static_transform_publisher \
@@ -202,6 +210,17 @@ Watch the controller log: it prints the phase and the live 6-DOF error
    logs `Marker not visible / stale`; uncover → resumes.
 3. Real hardware, insertion enabled, reduced `insert_speed` → full mate;
    verify the log latches `MATED` and nothing moves afterwards.
+
+### Operator reset
+
+`MATED` and `FAULT` are latched — the controller commands no motion until
+reset. After removing the mated connector / clearing the fault:
+
+```bash
+ros2 service call /connector_mating_node/reset std_srvs/srv/Trigger
+```
+
+The sequence restarts at `WAIT_FOR_VISION`.
 
 ---
 

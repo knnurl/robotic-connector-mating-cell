@@ -28,11 +28,14 @@
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <moveit/move_group_interface/move_group_interface.h>
+#include <std_srvs/srv/trigger.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Transform.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
+
+#include "melfa_rv5as_masterclass/mating_geometry.hpp"
 
 using namespace std::chrono_literals;
 
@@ -123,6 +126,18 @@ public:
                 std::lock_guard<std::mutex> lock(pose_mutex_);
                 latest_pose_ = *msg;
                 latest_pose_arrival_ = std::chrono::steady_clock::now();
+            });
+
+        // Operator recovery: unlatch FAULT/MATED and restart the sequence
+        // (e.g. after clearing a jam or removing the mated connector).
+        reset_srv_ = node_->create_service<std_srvs::srv::Trigger>(
+            "~/reset",
+            [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+                   std::shared_ptr<std_srvs::srv::Trigger::Response> resp) {
+                reset_requested_ = true;
+                resp->success = true;
+                resp->message = "Reset requested: sequence restarts at WAIT_FOR_VISION.";
+                RCLCPP_WARN(LOGGER, "Reset requested via service.");
             });
 
         planning_frame_ = move_group_.getPlanningFrame();
@@ -232,19 +247,11 @@ private:
         tf2::Transform t_planning_marker;
         tf2::fromMsg(marker_in_planning.pose, t_planning_marker);
 
-        // Goal in the marker frame: hover standoff_height above the connector
-        // point, tool Z pointing into the surface (marker frame rotated by
-        // 180 deg about X), optionally yawed about the marker normal.
-        tf2::Vector3 goal_position(
-            params_.connector_offset_x,
-            params_.connector_offset_y,
-            params_.connector_offset_z + params_.standoff_height_m);
-        tf2::Quaternion q_flip, q_yaw;
-        q_flip.setRPY(M_PI, 0.0, 0.0);
-        q_yaw.setRPY(0.0, 0.0, params_.tool_yaw_offset_deg * M_PI / 180.0);
-        tf2::Transform t_marker_goal(q_yaw * q_flip, goal_position);
-
-        return t_planning_marker * t_marker_goal;
+        return mating_geometry::standoff_goal(
+            t_planning_marker,
+            params_.connector_offset_x, params_.connector_offset_y,
+            params_.connector_offset_z, params_.standoff_height_m,
+            params_.tool_yaw_offset_deg * M_PI / 180.0);
     }
 
     tf2::Transform current_tcp_pose()
@@ -252,50 +259,6 @@ private:
         tf2::Transform t;
         tf2::fromMsg(move_group_.getCurrentPose(eef_link_).pose, t);
         return t;
-    }
-
-    // 6-DOF error between current TCP pose and goal.
-    static void pose_error(const tf2::Transform &current, const tf2::Transform &goal,
-                           tf2::Vector3 &pos_err, tf2::Quaternion &rot_err, double &rot_angle)
-    {
-        pos_err = goal.getOrigin() - current.getOrigin();
-        rot_err = goal.getRotation() * current.getRotation().inverse();
-        rot_err.normalize();
-        rot_angle = rot_err.getAngle();  // in [0, 2*pi]
-        if (rot_angle > M_PI) {
-            rot_angle = 2.0 * M_PI - rot_angle;
-        }
-    }
-
-    // Clamp the pose error to per-cycle limits and return the commanded pose.
-    static tf2::Transform clamped_target(const tf2::Transform &current,
-                                         const tf2::Vector3 &pos_err,
-                                         const tf2::Quaternion &rot_err,
-                                         double max_step_m, double max_step_rad)
-    {
-        tf2::Vector3 step = pos_err;
-        const double dist = step.length();
-        if (dist > max_step_m) {
-            step *= max_step_m / dist;
-        }
-
-        double angle = rot_err.getAngle();
-        tf2::Vector3 axis = rot_err.getAxis();
-        if (angle > M_PI) {  // take the short way
-            angle = 2.0 * M_PI - angle;
-            axis = -axis;
-        }
-        tf2::Quaternion q_step;
-        if (angle > 1e-6) {
-            q_step.setRotation(axis, std::min(angle, max_step_rad));
-        } else {
-            q_step = tf2::Quaternion::getIdentity();
-        }
-
-        tf2::Transform target;
-        target.setOrigin(current.getOrigin() + step);
-        target.setRotation((q_step * current.getRotation()).normalized());
-        return target;
     }
 
     bool plan_is_sane(const moveit::planning_interface::MoveGroupInterface::Plan &plan)
@@ -356,6 +319,13 @@ private:
     // One state-machine cycle.
     void step()
     {
+        if (reset_requested_.exchange(false)) {
+            RCLCPP_WARN(LOGGER, "Resetting controller state (was %s).", phase_name(phase_));
+            aligned_cycles_ = 0;
+            consecutive_plan_failures_ = 0;
+            set_phase(Phase::WAIT_FOR_VISION);
+        }
+
         if (phase_ == Phase::MATED || phase_ == Phase::FAULT) {
             RCLCPP_INFO_THROTTLE(LOGGER, *node_->get_clock(), 10000,
                                  "Phase %s - no motion will be commanded.",
@@ -386,7 +356,7 @@ private:
         tf2::Vector3 pos_err;
         tf2::Quaternion rot_err;
         double rot_angle = 0.0;
-        pose_error(current, *goal, pos_err, rot_err, rot_angle);
+        mating_geometry::pose_error(current, *goal, pos_err, rot_err, rot_angle);
 
         const double pos_dist = pos_err.length();
         const double rot_deg = rot_angle * 180.0 / M_PI;
@@ -400,7 +370,7 @@ private:
                 set_phase(Phase::ALIGN_FINE);
                 return;
             }
-            const auto target = clamped_target(
+            const auto target = mating_geometry::clamped_target(
                 current, pos_err, rot_err,
                 params_.coarse_max_step_m,
                 params_.coarse_max_step_deg * M_PI / 180.0);
@@ -429,7 +399,7 @@ private:
                 set_phase(Phase::ALIGN_COARSE);
                 return;
             }
-            const auto target = clamped_target(
+            const auto target = mating_geometry::clamped_target(
                 current, pos_err, rot_err,
                 params_.fine_max_step_m,
                 params_.fine_max_step_deg * M_PI / 180.0);
@@ -443,10 +413,8 @@ private:
             // on is expected and does not abort the stroke.
             RCLCPP_INFO(LOGGER, "Committing insertion: %.1f mm along tool Z at %.0f%% speed.",
                         params_.insertion_depth_m * 1000.0, params_.insert_speed * 100.0);
-            const tf2::Vector3 tool_z =
-                tf2::quatRotate(current.getRotation(), tf2::Vector3(0, 0, 1));
-            tf2::Transform target = current;
-            target.setOrigin(current.getOrigin() + tool_z * params_.insertion_depth_m);
+            const auto target =
+                mating_geometry::insertion_target(current, params_.insertion_depth_m);
             if (move_lin(target, params_.insert_speed)) {
                 RCLCPP_INFO(LOGGER, "Insertion stroke complete - connector mated.");
                 set_phase(Phase::MATED);
@@ -471,6 +439,8 @@ private:
     tf2_ros::Buffer tf_buffer_;
     tf2_ros::TransformListener tf_listener_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_srv_;
+    std::atomic<bool> reset_requested_{false};
 
     Params params_;
     std::string planning_frame_;

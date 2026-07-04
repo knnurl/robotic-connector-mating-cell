@@ -22,6 +22,7 @@ setup(
     entry_points={
         'console_scripts': [
             'cam_pub = roscam.cam_pub:main',
+            'handeye_calib = roscam.handeye_calib:main',
         ],
     },
 )
