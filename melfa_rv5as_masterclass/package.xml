@@ -2,9 +2,9 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>melfa_rv5as_masterclass</name>
-  <version>1.0.0</version>
-  <description>ROS-I AP Annual Summit 2024 Masterclass</description>
-  <maintainer email="Muyao.Liu@asia.meap.com">Liu Muyao</maintainer>
+  <version>1.1.0</version>
+  <description>Connector-mating motion control for the MELFA RV-5AS (based on the ROS-I AP Annual Summit 2024 Masterclass)</description>
+  <maintainer email="k.ural1@salford.ac.uk">Kadir Ural</maintainer>
   <license>Apache License 2.0</license>
 
   <!-- Build tool dependencies -->
@@ -12,20 +12,17 @@
 
   <!-- Runtime dependencies -->
   <depend>rclcpp</depend>
-  <depend>rclpy</depend>
-  <depend>python3</depend>
-  <depend>python3-colcon-common-extensions</depend>
   <depend>moveit_ros_planning_interface</depend>
-  <depend>moveit_core</depend>
-  <depend>melfa_msgs</depend>
-  <depend>melfa_masterclass_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
   <depend>std_msgs</depend>
 
-  <!-- Additional Python dependencies -->
-  <exec_depend>opencv-python</exec_depend>
-  <exec_depend>pyrealsense2</exec_depend>
-  <exec_depend>numpy</exec_depend>
-  <exec_depend>pyyaml</exec_depend>
+  <depend>melfa_masterclass_msgs</depend>
+  <!-- melfa_msgs is only present on the robot PC; plc_/hmi_ are built
+       conditionally when it is found (see CMakeLists.txt) -->
+  <!-- <depend>melfa_msgs</depend> -->
 
   <!-- Testing dependencies -->
   <test_depend>ament_lint_auto</test_depend>
@@ -36,4 +33,3 @@
     <build_type>ament_cmake</build_type>
   </export>
 </package>
-

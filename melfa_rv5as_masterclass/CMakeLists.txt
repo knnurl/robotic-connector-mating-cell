@@ -7,52 +7,48 @@ endif()
 
 # Find dependencies
 find_package(ament_cmake REQUIRED)
-find_package(rclpy REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(moveit_ros_planning_interface REQUIRED)
-find_package(melfa_msgs REQUIRED)
-find_package(melfa_masterclass_msgs REQUIRED)
-find_package(shape_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 
-# Add C++ executables
-add_executable(plc_ src/plc_.cpp)
-target_include_directories(plc_ PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>)
-target_compile_features(plc_ PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
-ament_target_dependencies(plc_ rclcpp melfa_msgs melfa_masterclass_msgs std_msgs)
+# The MELFA GPIO stack only exists on the robot PC; build the PLC/HMI
+# nodes conditionally so the rest of the package compiles anywhere.
+find_package(melfa_msgs QUIET)
+find_package(melfa_masterclass_msgs QUIET)
 
-add_executable(hmi_ src/hmi_.cpp)
-target_include_directories(hmi_ PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>)
-target_compile_features(hmi_ PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
-ament_target_dependencies(hmi_ rclcpp melfa_msgs melfa_masterclass_msgs std_msgs)
+set(INSTALL_TARGETS "")
+
+if(melfa_msgs_FOUND AND melfa_masterclass_msgs_FOUND)
+  add_executable(plc_ src/plc_.cpp)
+  target_compile_features(plc_ PUBLIC cxx_std_17)
+  ament_target_dependencies(plc_ rclcpp melfa_msgs melfa_masterclass_msgs std_msgs)
+
+  add_executable(hmi_ src/hmi_.cpp)
+  target_compile_features(hmi_ PUBLIC cxx_std_17)
+  ament_target_dependencies(hmi_ rclcpp melfa_msgs melfa_masterclass_msgs std_msgs)
+
+  list(APPEND INSTALL_TARGETS plc_ hmi_)
+else()
+  message(WARNING "melfa_msgs / melfa_masterclass_msgs not found - skipping plc_ and hmi_")
+endif()
 
 add_executable(pick_n_place_ src/pick_n_place_.cpp)
-target_include_directories(pick_n_place_ PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>)
-target_compile_features(pick_n_place_ PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
-ament_target_dependencies(pick_n_place_ rclcpp moveit_ros_planning_interface melfa_msgs melfa_masterclass_msgs std_msgs)
+target_compile_features(pick_n_place_ PUBLIC cxx_std_17)
+ament_target_dependencies(pick_n_place_ rclcpp moveit_ros_planning_interface std_msgs)
 
 add_executable(move_l src/move_l.cpp)
-target_include_directories(move_l PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>)
-target_compile_features(move_l PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
-ament_target_dependencies(move_l rclcpp moveit_ros_planning_interface melfa_msgs melfa_masterclass_msgs std_msgs)
+target_compile_features(move_l PUBLIC cxx_std_17)
+ament_target_dependencies(move_l
+  rclcpp moveit_ros_planning_interface geometry_msgs tf2 tf2_ros tf2_geometry_msgs)
 
-# Install Python script for cam_pub
-
-install(PROGRAMS
-  scripts/cam_pub.py
-  DESTINATION lib/${PROJECT_NAME}
-)
+list(APPEND INSTALL_TARGETS pick_n_place_ move_l)
 
 # Install C++ binaries
-install(TARGETS plc_ hmi_ pick_n_place_ move_l
+install(TARGETS ${INSTALL_TARGETS}
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -1,11 +1,43 @@
 /**:
-   ros__parameters:
-    planning_group:
-      rv5as
-    
+  ros__parameters:
+    planning_group: rv5as
+
     FLANGE_FRAME_ID: rv5as_hand_flange
     EEF_FRAME_ID: rv5as_default_tcp
     BASE_FRAME_ID: rv5as_base
 
-    velocity_scaling: 0.05
-    acceleration_scaling: 0.05
+    # --- Vision input -------------------------------------------------------
+    pose_topic: /aruco/pose
+    control_period_s: 0.4        # state machine cycle time (s)
+    vision_timeout_s: 0.6        # marker pose older than this = stale, hold
+
+    # --- Target geometry (marker frame; teach on the physical cell) ---------
+    # Position of the connector mate point relative to the marker centre.
+    # Marker frame: X/Y in the marker plane, Z out of the work surface.
+    connector_offset_x: 0.0
+    connector_offset_y: 0.0
+    connector_offset_z: 0.0
+    tool_yaw_offset_deg: 0.0     # extra tool yaw about the marker normal
+    standoff_height_m: 0.08      # alignment hover height above the connector
+    insertion_depth_m: 0.06      # committed insertion stroke from standoff
+
+    # --- Phase behaviour ----------------------------------------------------
+    # Fast approach
+    coarse_max_step_m: 0.05      # per-cycle translation clamp
+    coarse_max_step_deg: 5.0     # per-cycle rotation clamp
+    coarse_speed: 0.25           # velocity scaling factor
+    coarse_pos_tol_m: 0.02       # switch to fine alignment below this
+    coarse_rot_tol_deg: 5.0
+    # Fine alignment
+    fine_max_step_m: 0.01
+    fine_max_step_deg: 1.5
+    fine_speed: 0.08
+    fine_pos_tol_m: 0.0025       # insertion armed below this...
+    fine_rot_tol_deg: 1.0
+    align_hold_cycles: 3         # ...held for this many consecutive cycles
+    # Slow insertion
+    insert_speed: 0.03
+
+    # --- Safety guards ------------------------------------------------------
+    max_joint_jump_rad: 0.8      # reject plans with joint jumps beyond this
+    max_consecutive_plan_failures: 5
