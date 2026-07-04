@@ -59,6 +59,17 @@ struct Params
     double control_period_s{0.4};
     double vision_timeout_s{0.6};
 
+    // Motion backend. Any MoveIt planning pipeline works for alignment, but
+    // ALIGN/INSERT assume straight-line TCP motion: prefer a Cartesian/LIN
+    // planner (Pilz LIN where available).
+    std::string planning_pipeline{"pilz_industrial_motion_planner"};
+    std::string planner_id{"LIN"};
+    double accel_scaling{0.1};
+
+    // Calibration/teach mode: when false the sequence stops after fine
+    // alignment is achieved and only reports; no insertion stroke.
+    bool enable_insertion{true};
+
     // Where the connector sits relative to the marker, expressed in the
     // marker frame (X/Y in the marker plane, Z out of the surface). Teach
     // these on the physical cell.
@@ -119,9 +130,9 @@ public:
         RCLCPP_INFO(LOGGER, "Planning frame: %s, end effector: %s",
                     planning_frame_.c_str(), eef_link_.c_str());
 
-        move_group_.setPlanningPipelineId("pilz_industrial_motion_planner");
-        move_group_.setPlannerId("LIN");
-        move_group_.setMaxAccelerationScalingFactor(0.1);
+        move_group_.setPlanningPipelineId(params_.planning_pipeline);
+        move_group_.setPlannerId(params_.planner_id);
+        move_group_.setMaxAccelerationScalingFactor(params_.accel_scaling);
         move_group_.setGoalPositionTolerance(0.001);
         move_group_.setGoalOrientationTolerance(0.01);
     }
@@ -152,6 +163,10 @@ private:
         get("pose_topic", p.pose_topic);
         get("control_period_s", p.control_period_s);
         get("vision_timeout_s", p.vision_timeout_s);
+        get("planning_pipeline", p.planning_pipeline);
+        get("planner_id", p.planner_id);
+        get("accel_scaling", p.accel_scaling);
+        get("enable_insertion", p.enable_insertion);
         get("connector_offset_x", p.connector_offset_x);
         get("connector_offset_y", p.connector_offset_y);
         get("connector_offset_z", p.connector_offset_z);
@@ -396,7 +411,15 @@ private:
             if (pos_dist < params_.fine_pos_tol_m &&
                 rot_deg < params_.fine_rot_tol_deg) {
                 if (++aligned_cycles_ >= params_.align_hold_cycles) {
-                    set_phase(Phase::INSERT);
+                    if (params_.enable_insertion) {
+                        set_phase(Phase::INSERT);
+                    } else {
+                        RCLCPP_INFO_THROTTLE(
+                            LOGGER, *node_->get_clock(), 5000,
+                            "Aligned (%.1f mm, %.2f deg) - insertion disabled "
+                            "(enable_insertion=false), holding at standoff.",
+                            pos_dist * 1000.0, rot_deg);
+                    }
                 }
                 return;
             }

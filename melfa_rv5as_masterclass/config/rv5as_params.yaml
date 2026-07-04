@@ -11,6 +11,18 @@
     control_period_s: 0.4        # state machine cycle time (s)
     vision_timeout_s: 0.6        # marker pose older than this = stale, hold
 
+    # --- Motion backend -----------------------------------------------------
+    # Any MoveIt pipeline works, but ALIGN/INSERT assume straight-line TCP
+    # motion: prefer a Cartesian/LIN-capable planner.
+    planning_pipeline: pilz_industrial_motion_planner
+    planner_id: LIN
+    accel_scaling: 0.1
+
+    # Calibration/teach mode: false = stop after fine alignment (hover at
+    # standoff, no insertion). Use while teaching connector offsets and for
+    # first runs on new hardware.
+    enable_insertion: true
+
     # --- Target geometry (marker frame; teach on the physical cell) ---------
     # Position of the connector mate point relative to the marker centre.
     # Marker frame: X/Y in the marker plane, Z out of the work surface.
