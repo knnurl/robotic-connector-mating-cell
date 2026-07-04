@@ -1,0 +1,17 @@
+  << Run every line in a different terminal >>
+
+ros2 launch melfa_bringup rv5as_control.launch.py use_fake_hardware:=false controller_type:="D" robot_ip:=192.168.0.20
+
+ros2 launch melfa_rv5as_moveit_config rv5as_moveit.launch.py
+
+ros2 run roscam cam_pub
+
+ros2 launch realsense2_camera rs_d405_pointcloud_launch.py
+
+ros2 run tf2_ros static_transform_publisher 0 0 0 -1.57 -1.57 1.57 rv5as_default_tcp camera_link
+
+ros2 launch melfa_rv5as_masterclass move_l.launch.py
+
+
+
+
