@@ -3,7 +3,8 @@
 
 Collect mode (default, needs the robot + vision running):
 
-    ros2 run roscam handeye_calib --ros-args -p base_frame:=rv5as_base -p tcp_frame:=rv5as_default_tcp
+    ros2 run roscam handeye_calib --ros-args -p base_frame:=rv5as_base \
+        -p tcp_frame:=rv5as_default_tcp
 
     Jog the robot to 10-15 diverse poses keeping the marker in view; press
     Enter at each to record a sample pair (TF base->tcp + /aruco/pose_raw).
@@ -51,16 +52,20 @@ def matrix_to_quat(m):
     t = np.trace(m)
     if t > 0.0:
         s = math.sqrt(t + 1.0) * 2.0
-        w, x, y, z = 0.25 * s, (m[2, 1] - m[1, 2]) / s, (m[0, 2] - m[2, 0]) / s, (m[1, 0] - m[0, 1]) / s
+        w, x = 0.25 * s, (m[2, 1] - m[1, 2]) / s
+        y, z = (m[0, 2] - m[2, 0]) / s, (m[1, 0] - m[0, 1]) / s
     elif m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
         s = math.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2]) * 2.0
-        w, x, y, z = (m[2, 1] - m[1, 2]) / s, 0.25 * s, (m[0, 1] + m[1, 0]) / s, (m[0, 2] + m[2, 0]) / s
+        w, x = (m[2, 1] - m[1, 2]) / s, 0.25 * s
+        y, z = (m[0, 1] + m[1, 0]) / s, (m[0, 2] + m[2, 0]) / s
     elif m[1, 1] > m[2, 2]:
         s = math.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2]) * 2.0
-        w, x, y, z = (m[0, 2] - m[2, 0]) / s, (m[0, 1] + m[1, 0]) / s, 0.25 * s, (m[1, 2] + m[2, 1]) / s
+        w, x = (m[0, 2] - m[2, 0]) / s, (m[0, 1] + m[1, 0]) / s
+        y, z = 0.25 * s, (m[1, 2] + m[2, 1]) / s
     else:
         s = math.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1]) * 2.0
-        w, x, y, z = (m[1, 0] - m[0, 1]) / s, (m[0, 2] + m[2, 0]) / s, (m[1, 2] + m[2, 1]) / s, 0.25 * s
+        w, x = (m[1, 0] - m[0, 1]) / s, (m[0, 2] + m[2, 0]) / s
+        y, z = (m[1, 2] + m[2, 1]) / s, 0.25 * s
     q = np.array([x, y, z, w])
     return q / np.linalg.norm(q)
 
