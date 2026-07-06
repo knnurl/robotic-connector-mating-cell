@@ -10,8 +10,12 @@ publishes it as a PoseStamped in the camera optical frame:
   /aruco/debug_image  sensor_msgs/Image        (optional, marker overlay)
 
 Intrinsics come from camera_info, so no calibration files are needed.
-Measurements are gated on reprojection error and on translation jumps before
-they reach the filter, so a single bad detection cannot yank the robot.
+Measurements are gated on reprojection error, then fused by a Kalman filter
+(constant-velocity translation + small-angle orientation, see pose_kf.py)
+whose innovation gate rejects outliers, so a single bad detection cannot
+yank the robot. During brief detection dropouts (< max_prediction_s) the
+filter's prediction is published so the controller rides through flicker;
+longer occlusions go silent and the controller holds position.
 """
 
 import math
@@ -23,6 +27,8 @@ from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image
+
+from roscam.pose_kf import PoseKF
 
 
 def rotation_matrix_to_quaternion(m):
@@ -56,28 +62,6 @@ def rotation_matrix_to_quaternion(m):
     return q / np.linalg.norm(q)
 
 
-def quaternion_slerp(q0, q1, alpha):
-    """Spherical interpolation from q0 toward q1 by fraction alpha."""
-    dot = float(np.dot(q0, q1))
-    if dot < 0.0:  # take the short way around
-        q1 = -q1
-        dot = -dot
-    if dot > 0.9995:  # nearly identical: lerp is fine and stable
-        q = q0 + alpha * (q1 - q0)
-        return q / np.linalg.norm(q)
-    theta0 = math.acos(max(-1.0, min(1.0, dot)))
-    theta = theta0 * alpha
-    q2 = q1 - q0 * dot
-    q2 = q2 / np.linalg.norm(q2)
-    return q0 * math.cos(theta) + q2 * math.sin(theta)
-
-
-def quaternion_angle(q0, q1):
-    """Angle in radians between two quaternions."""
-    dot = abs(float(np.dot(q0, q1)))
-    return 2.0 * math.acos(max(-1.0, min(1.0, dot)))
-
-
 class ArucoPosePublisher(Node):
     def __init__(self):
         super().__init__('aruco_pose_publisher')
@@ -87,22 +71,34 @@ class ArucoPosePublisher(Node):
         self.declare_parameter('marker_id', 11)
         self.declare_parameter('marker_size_m', 0.021)
         self.declare_parameter('aruco_dictionary', 'DICT_6X6_250')
-        # EMA/slerp fraction applied per accepted measurement (1.0 = no filtering)
-        self.declare_parameter('filter_alpha', 0.35)
         self.declare_parameter('max_reprojection_error_px', 2.0)
-        # A translation jump larger than this against the last accepted pose is
-        # rejected as an outlier, unless it persists (re-acquisition).
-        self.declare_parameter('max_translation_jump_m', 0.05)
+        # Kalman filter tuning (see pose_kf.py)
+        self.declare_parameter('sigma_accel', 0.08)         # m/s^2 process noise
+        self.declare_parameter('sigma_rot_rate_deg', 15.0)  # deg/s process noise
+        self.declare_parameter('meas_std_pos', 0.002)       # m measurement noise
+        self.declare_parameter('meas_std_rot_deg', 1.0)     # deg measurement noise
+        self.declare_parameter('gate_sigma', 3.0)           # innovation gate
+        # Publish predicted poses for at most this long after the last
+        # accepted detection; beyond it, go silent (controller holds).
+        self.declare_parameter('max_prediction_s', 0.3)
+        # A measurement rejected by the gate this many times in a row is
+        # treated as the marker genuinely having moved (re-acquisition).
         self.declare_parameter('rejects_before_reacquire', 5)
         self.declare_parameter('publish_debug_image', True)
 
         self.marker_id = int(self.get_parameter('marker_id').value)
         self.marker_size = float(self.get_parameter('marker_size_m').value)
-        self.filter_alpha = float(self.get_parameter('filter_alpha').value)
         self.max_reproj_err = float(self.get_parameter('max_reprojection_error_px').value)
-        self.max_jump = float(self.get_parameter('max_translation_jump_m').value)
+        self.max_prediction_s = float(self.get_parameter('max_prediction_s').value)
         self.rejects_before_reacquire = int(self.get_parameter('rejects_before_reacquire').value)
         self.publish_debug = bool(self.get_parameter('publish_debug_image').value)
+
+        self.kf = PoseKF(
+            sigma_accel=float(self.get_parameter('sigma_accel').value),
+            sigma_rot_rate_deg=float(self.get_parameter('sigma_rot_rate_deg').value),
+            meas_std_pos=float(self.get_parameter('meas_std_pos').value),
+            meas_std_rot_deg=float(self.get_parameter('meas_std_rot_deg').value),
+            gate_sigma=float(self.get_parameter('gate_sigma').value))
 
         half = self.marker_size / 2.0
         # Corner order required by SOLVEPNP_IPPE_SQUARE (matches detectMarkers output)
@@ -119,10 +115,9 @@ class ArucoPosePublisher(Node):
         self.dist_coeffs = None
         self.bridge = CvBridge()
 
-        # Filter / outlier-gate state
-        self.filt_t = None
-        self.filt_q = None
-        self.last_accepted_t = None
+        # Filter timing state
+        self.last_frame_stamp = None   # stamp of the previous processed frame
+        self.last_accept_stamp = None  # stamp of the last accepted measurement
         self.consecutive_rejects = 0
 
         self.pose_pub = self.create_publisher(PoseStamped, '/aruco/pose', 10)
@@ -167,6 +162,10 @@ class ArucoPosePublisher(Node):
         if self.camera_matrix is None:
             return
 
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        dt = 0.0 if self.last_frame_stamp is None else stamp - self.last_frame_stamp
+        self.last_frame_stamp = stamp
+
         color_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         gray = cv2.cvtColor(color_image, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = self.detect(gray)
@@ -182,12 +181,49 @@ class ArucoPosePublisher(Node):
             if success:
                 measurement = self._validate(rvec, tvec, img_points)
 
+        if self.kf.initialized:
+            self.kf.predict(dt)
+
+        published = False
         if measurement is not None:
-            self._publish_pose(msg.header, *measurement)
+            t, q = measurement
+            accepted = self.kf.update(t, q)
+            if not accepted:
+                self.consecutive_rejects += 1
+                if self.consecutive_rejects >= self.rejects_before_reacquire:
+                    # Persistent disagreement: the marker really moved.
+                    self.get_logger().info('Re-acquiring marker after persistent jump.')
+                    self.kf.reset()
+                    accepted = self.kf.update(t, q)
+                else:
+                    self.get_logger().warn(
+                        'Rejected detection: inconsistent with filter prediction',
+                        throttle_duration_sec=2.0)
+            if accepted:
+                self.consecutive_rejects = 0
+                self.last_accept_stamp = stamp
+                self._publish(self.pose_raw_pub, msg.header, t, q)
+                self._publish(self.pose_pub, msg.header,
+                              self.kf.position, self.kf.quaternion)
+                published = True
+                self.get_logger().info(
+                    f'Marker at [{self.kf.position[0]:.3f}, {self.kf.position[1]:.3f}, '
+                    f'{self.kf.position[2]:.3f}] m (optical frame)',
+                    throttle_duration_sec=1.0)
             if self.publish_debug:
                 cv2.aruco.drawDetectedMarkers(color_image, [corners[index]])
                 cv2.drawFrameAxes(color_image, self.camera_matrix, self.dist_coeffs,
                                   rvec, tvec, self.marker_size)
+
+        # Bridge brief dropouts with the filter prediction; go silent beyond
+        # the horizon so the controller holds position.
+        if (not published and self.kf.initialized and
+                self.last_accept_stamp is not None and
+                stamp - self.last_accept_stamp <= self.max_prediction_s):
+            self._publish(self.pose_pub, msg.header,
+                          self.kf.position, self.kf.quaternion)
+            self.get_logger().warn('Publishing predicted pose (marker not detected).',
+                                   throttle_duration_sec=1.0)
 
         if self.publish_debug and self.debug_pub.get_subscription_count() > 0:
             debug_msg = self.bridge.cv2_to_imgmsg(color_image, encoding='bgr8')
@@ -195,7 +231,8 @@ class ArucoPosePublisher(Node):
             self.debug_pub.publish(debug_msg)
 
     def _validate(self, rvec, tvec, img_points):
-        """Gate a raw solvePnP result. Returns (t, q) or None if rejected."""
+        """Gate a raw solvePnP result on reprojection error.
+        Returns (t, q) or None if rejected."""
         projected, _ = cv2.projectPoints(
             self.obj_points, rvec, tvec, self.camera_matrix, self.dist_coeffs)
         reproj_err = float(np.mean(np.linalg.norm(
@@ -207,62 +244,25 @@ class ArucoPosePublisher(Node):
             return None
 
         t = tvec.reshape(3).astype(np.float64)
-        if self.last_accepted_t is not None:
-            jump = float(np.linalg.norm(t - self.last_accepted_t))
-            if jump > self.max_jump:
-                self.consecutive_rejects += 1
-                if self.consecutive_rejects < self.rejects_before_reacquire:
-                    self.get_logger().warn(
-                        f'Rejected detection: {jump * 1000:.0f} mm jump',
-                        throttle_duration_sec=2.0)
-                    return None
-                # The "jump" persisted: the marker really moved. Re-acquire.
-                self.get_logger().info('Re-acquiring marker after persistent jump.')
-                self.filt_t = None
-                self.filt_q = None
-        self.consecutive_rejects = 0
-        self.last_accepted_t = t
-
         rot_matrix, _ = cv2.Rodrigues(rvec)
         q = rotation_matrix_to_quaternion(rot_matrix)
         return t, q
 
-    def _publish_pose(self, header, t, q):
-        # Low-pass: EMA on translation, slerp on orientation
-        if self.filt_t is None:
-            self.filt_t = t
-            self.filt_q = q
-        else:
-            a = self.filter_alpha
-            self.filt_t = (1.0 - a) * self.filt_t + a * t
-            self.filt_q = quaternion_slerp(self.filt_q, q, a)
+    @staticmethod
+    def _fill_pose(msg, t, q):
+        msg.pose.position.x = float(t[0])
+        msg.pose.position.y = float(t[1])
+        msg.pose.position.z = float(t[2])
+        msg.pose.orientation.x = float(q[0])
+        msg.pose.orientation.y = float(q[1])
+        msg.pose.orientation.z = float(q[2])
+        msg.pose.orientation.w = float(q[3])
 
-        raw = PoseStamped()
-        raw.header = header  # camera optical frame, image timestamp
-        raw.pose.position.x = float(t[0])
-        raw.pose.position.y = float(t[1])
-        raw.pose.position.z = float(t[2])
-        raw.pose.orientation.x = float(q[0])
-        raw.pose.orientation.y = float(q[1])
-        raw.pose.orientation.z = float(q[2])
-        raw.pose.orientation.w = float(q[3])
-        self.pose_raw_pub.publish(raw)
-
-        filt = PoseStamped()
-        filt.header = header
-        filt.pose.position.x = float(self.filt_t[0])
-        filt.pose.position.y = float(self.filt_t[1])
-        filt.pose.position.z = float(self.filt_t[2])
-        filt.pose.orientation.x = float(self.filt_q[0])
-        filt.pose.orientation.y = float(self.filt_q[1])
-        filt.pose.orientation.z = float(self.filt_q[2])
-        filt.pose.orientation.w = float(self.filt_q[3])
-        self.pose_pub.publish(filt)
-
-        self.get_logger().info(
-            f'Marker at [{self.filt_t[0]:.3f}, {self.filt_t[1]:.3f}, '
-            f'{self.filt_t[2]:.3f}] m (optical frame)',
-            throttle_duration_sec=1.0)
+    def _publish(self, publisher, header, t, q):
+        out = PoseStamped()
+        out.header = header  # camera optical frame, image timestamp
+        self._fill_pose(out, t, q)
+        publisher.publish(out)
 
 
 def main(args=None):
