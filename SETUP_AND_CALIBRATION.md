@@ -253,12 +253,44 @@ The sequence restarts at `WAIT_FOR_VISION`.
 
 Vision node (`roscam cam_pub`): `image_topic`, `camera_info_topic`,
 `marker_id` (11), `marker_size_m` (0.021), `aruco_dictionary`
-(`DICT_6X6_250`), `filter_alpha` (0.35), `max_reprojection_error_px` (2.0),
-`max_translation_jump_m` (0.05), `publish_debug_image` (true).
+(`DICT_6X6_250`), `max_reprojection_error_px` (2.0),
+`publish_debug_image` (true). Kalman filter: `sigma_accel` (0.08 m/s²),
+`sigma_rot_rate_deg` (15), `meas_std_pos` (0.002 m), `meas_std_rot_deg`
+(1.0), `gate_sigma` (3.0), `max_prediction_s` (0.3 — how long predicted
+poses bridge a detection dropout before the node goes silent and the
+controller holds), `rejects_before_reacquire` (5).
 
 ---
 
-## 6. Planner note (robot-agnostic caveat)
+## 6. Optional: connector-level pose refinement (`connector_pose`)
+
+The marker is a proxy — `connector_pose` refines the actual connector's
+6-DOF pose by registering a point sample of its CAD model against the depth
+cloud (point-to-plane ICP), using the marker pose as the prior. Setup:
+
+1. **Export the connector CAD as STL** (binary or ASCII), modelled so the
+   **origin is at the mate point and Z points out of the work surface** —
+   then the controller's `connector_offset_*` stay zero.
+2. Enable RealSense aligned depth (`align_depth.enable:=true`) so
+   `/camera/camera/aligned_depth_to_color/image_raw` exists.
+3. Run: `ros2 run roscam connector_pose --ros-args -p template_stl:=/path/connector.stl \
+   -p marker_t_connector_xyz:="[x, y, z]"` (rough connector position in the
+   marker frame — teach once).
+4. Point the controller at it: `pose_topic: /connector/pose` in the params
+   file. No other controller change.
+
+Behaviour: ICP output is quality-gated (`min_inlier_fraction` 0.6,
+`max_rms_m` 0.004, `max_refine_translation_m` 0.02); on gate failure the
+node publishes the marker-derived prior — never worse than marker-only —
+and logs why. Accepted poses run through a low-noise Kalman filter (the
+connector is static), which averages depth noise down over ~2–3 s.
+
+Measured on synthetic data (worst-case 20 mm part, 0.3 mm depth noise):
+XY/Z ≈ **0.1 mm**, yaw ≈ **0.1°**, roll/pitch ≈ **0.7°** (edge-noise
+limited; scales with depth-noise ÷ part size, so larger connectors do
+proportionally better). Real-D405 tuning pass still required.
+
+## 7. Planner note (robot-agnostic caveat)
 
 ALIGN and INSERT assume the TCP moves in a **straight line** toward each
 commanded pose — INSERT especially, since it is the mating stroke.
@@ -275,7 +307,7 @@ commanded pose — INSERT especially, since it is the mating stroke.
 
 ---
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 | Symptom | Likely cause / fix |
 |---|---|

@@ -35,6 +35,11 @@ Ordered by priority. Details for each item: [HANDOFF.md](HANDOFF.md) §8 and
       tracking; keep Pilz LIN for the committed insertion stroke
 - [ ] Decide and implement a failure policy beyond FAULT-hold
       (e.g. retract-to-standoff after N insertion failures)
+- [x] Kalman filter in vision (replaces EMA; outlier gate + ≤0.3 s
+      dropout prediction) — done 2026-07-06
+- [x] Connector-level 6-DOF pose via depth ICP against CAD STL
+      (`connector_pose` node; marker = prior, gated fallback) — done
+      2026-07-06; needs real-data tuning + STL export of the real connector
 - [ ] Multi-marker / ArUco-board support in `cam_pub` for occlusion
       robustness and better pose accuracy (bigger effective marker)
 - [ ] Consolidated single launch file for the whole cell (needs the MELFA
