@@ -26,8 +26,11 @@
 #include <thread>
 
 #include <rclcpp/rclcpp.hpp>
+#include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <moveit/move_group_interface/move_group_interface.h>
+#include <std_msgs/msg/float64.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Transform.h>
@@ -128,6 +131,18 @@ public:
                 latest_pose_arrival_ = std::chrono::steady_clock::now();
             });
 
+        // Machine-readable state for dashboards/logging. Phase is
+        // transient_local so late-joining GUIs get the current value.
+        phase_pub_ = node_->create_publisher<std_msgs::msg::String>(
+            "/mating/phase", rclcpp::QoS(1).transient_local());
+        err_pos_pub_ = node_->create_publisher<std_msgs::msg::Float64>(
+            "/mating/error_mm", 10);
+        err_rot_pub_ = node_->create_publisher<std_msgs::msg::Float64>(
+            "/mating/error_deg", 10);
+        diag_pub_ = node_->create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
+            "/diagnostics", 10);
+        publish_phase();
+
         // Operator recovery: unlatch FAULT/MATED and restart the sequence
         // (e.g. after clearing a jam or removing the mated connector).
         reset_srv_ = node_->create_service<std_srvs::srv::Trigger>(
@@ -209,7 +224,68 @@ private:
         if (next != phase_) {
             RCLCPP_INFO(LOGGER, "Phase: %s -> %s", phase_name(phase_), phase_name(next));
             phase_ = next;
+            publish_phase();
         }
+    }
+
+    void publish_phase()
+    {
+        std_msgs::msg::String msg;
+        msg.data = phase_name(phase_);
+        phase_pub_->publish(msg);
+    }
+
+    // Cell status for dashboards: phase, live error, health flags.
+    void publish_status(bool vision_fresh, double pos_err_mm, double rot_err_deg)
+    {
+        std_msgs::msg::Float64 f;
+        if (std::isfinite(pos_err_mm)) {
+            f.data = pos_err_mm;
+            err_pos_pub_->publish(f);
+            f.data = rot_err_deg;
+            err_rot_pub_->publish(f);
+        }
+
+        diagnostic_msgs::msg::DiagnosticArray arr;
+        arr.header.stamp = node_->get_clock()->now();
+        diagnostic_msgs::msg::DiagnosticStatus st;
+        st.name = "connector_mating";
+        st.hardware_id = params_.pose_topic;
+        if (phase_ == Phase::FAULT) {
+            st.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
+            st.message = "FAULT latched - operator reset required";
+        } else if (!vision_fresh && phase_ != Phase::MATED) {
+            st.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+            st.message = "marker not visible / stale - holding";
+        } else {
+            st.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+            st.message = phase_name(phase_);
+        }
+        auto kv = [&st](const std::string &k, const std::string &v) {
+            diagnostic_msgs::msg::KeyValue e;
+            e.key = k;
+            e.value = v;
+            st.values.push_back(e);
+        };
+        kv("phase", phase_name(phase_));
+        kv("vision_fresh", vision_fresh ? "true" : "false");
+        kv("position_error_mm",
+           std::isfinite(pos_err_mm) ? std::to_string(pos_err_mm) : "n/a");
+        kv("rotation_error_deg",
+           std::isfinite(rot_err_deg) ? std::to_string(rot_err_deg) : "n/a");
+        kv("aligned_cycles", std::to_string(aligned_cycles_));
+        kv("consecutive_plan_failures", std::to_string(consecutive_plan_failures_));
+        kv("insertion_enabled", insertion_enabled() ? "true" : "false");
+        arr.status.push_back(st);
+        diag_pub_->publish(arr);
+    }
+
+    // Read fresh each cycle so a GUI/param toggle takes effect immediately.
+    bool insertion_enabled()
+    {
+        bool enabled = params_.enable_insertion;
+        node_->get_parameter_or("enable_insertion", enabled, enabled);
+        return enabled;
     }
 
     // Latest marker pose if it is fresh enough, else nullopt.
@@ -330,6 +406,7 @@ private:
             RCLCPP_INFO_THROTTLE(LOGGER, *node_->get_clock(), 10000,
                                  "Phase %s - no motion will be commanded.",
                                  phase_name(phase_));
+            publish_status(false, NAN, NAN);
             return;
         }
 
@@ -340,11 +417,13 @@ private:
                                      "Marker not visible / stale - holding position.");
             }
             aligned_cycles_ = 0;
+            publish_status(false, NAN, NAN);
             return;
         }
 
         const auto goal = compute_standoff_goal(*marker);
         if (!goal) {
+            publish_status(true, NAN, NAN);
             return;
         }
 
@@ -362,6 +441,7 @@ private:
         const double rot_deg = rot_angle * 180.0 / M_PI;
         RCLCPP_INFO(LOGGER, "[%s] err: %.1f mm, %.2f deg",
                     phase_name(phase_), pos_dist * 1000.0, rot_deg);
+        publish_status(true, pos_dist * 1000.0, rot_deg);
 
         switch (phase_) {
         case Phase::ALIGN_COARSE: {
@@ -381,7 +461,7 @@ private:
             if (pos_dist < params_.fine_pos_tol_m &&
                 rot_deg < params_.fine_rot_tol_deg) {
                 if (++aligned_cycles_ >= params_.align_hold_cycles) {
-                    if (params_.enable_insertion) {
+                    if (insertion_enabled()) {
                         set_phase(Phase::INSERT);
                     } else {
                         RCLCPP_INFO_THROTTLE(
@@ -440,6 +520,10 @@ private:
     tf2_ros::TransformListener tf_listener_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_srv_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr phase_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr err_pos_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr err_rot_pub_;
+    rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diag_pub_;
     std::atomic<bool> reset_requested_{false};
 
     Params params_;

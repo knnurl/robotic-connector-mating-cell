@@ -1,0 +1,38 @@
+# Configuration for mating_panel.py — edit freely, no code changes needed.
+title: Connector Mating Cell
+
+# --- Topics ------------------------------------------------------------
+phase_topic: /mating/phase
+error_pos_topic: /mating/error_mm
+error_rot_topic: /mating/error_deg
+image_topic: /aruco/debug_image     # set to '' to disable the camera view
+image_max_width: 480
+
+# --- Display -----------------------------------------------------------
+# Tolerance lines on the plots (match fine_pos_tol_m / fine_rot_tol_deg
+# in rv5as_params.yaml — values here are mm / deg).
+pos_tol_mm: 2.5
+rot_tol_deg: 1.0
+plot_seconds: 30
+refresh_hz: 10
+stale_after_s: 3.0     # mark the phase display when no data arrives
+
+phase_colors:
+  WAIT_FOR_VISION: gray40
+  ALIGN_COARSE: '#b8860b'      # dark goldenrod
+  ALIGN_FINE: '#c9a227'
+  INSERT: '#b22222'            # firebrick — robot committing the stroke
+  MATED: '#2e8b57'             # sea green
+  FAULT: '#8b0000'             # dark red
+
+# --- Buttons -----------------------------------------------------------
+# type: service_trigger -> calls a std_srvs/Trigger service
+# type: param_toggle    -> flips a boolean parameter on a node
+buttons:
+  - label: RESET sequence
+    type: service_trigger
+    service: /connector_mating_node/reset
+  - label: Toggle insertion enable
+    type: param_toggle
+    node: /connector_mating_node
+    param: enable_insertion

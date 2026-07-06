@@ -15,6 +15,7 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(diagnostic_msgs REQUIRED)
 
 # The MELFA GPIO stack only exists on the robot PC; build the PLC/HMI
 # nodes conditionally so the rest of the package compiles anywhere.
@@ -47,7 +48,7 @@ target_include_directories(move_l PUBLIC
   $<INSTALL_INTERFACE:include>)
 target_compile_features(move_l PUBLIC cxx_std_17)
 ament_target_dependencies(move_l
-  rclcpp moveit_ros_planning_interface geometry_msgs tf2 tf2_ros tf2_geometry_msgs std_srvs)
+  rclcpp moveit_ros_planning_interface geometry_msgs tf2 tf2_ros tf2_geometry_msgs std_srvs diagnostic_msgs)
 
 list(APPEND INSTALL_TARGETS pick_n_place_ move_l)
 

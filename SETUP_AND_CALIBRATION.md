@@ -211,6 +211,16 @@ Watch the controller log: it prints the phase and the live 6-DOF error
 3. Real hardware, insertion enabled, reduced `insert_speed` → full mate;
    verify the log latches `MATED` and nothing moves afterwards.
 
+### Monitoring & GUI
+
+The controller publishes machine-readable state: `/mating/phase` (latched
+String), `/mating/error_mm`, `/mating/error_deg`, and `/diagnostics`.
+Three ready-made front-ends live in [tools/gui/](tools/gui/README.md):
+a Foxglove Studio layout (engineering), a zero-install tkinter operator
+panel with YAML-configurable buttons/tolerances (demos/teaching), and an
+rqt recipe. `enable_insertion` is now read every cycle, so toggling it
+from a GUI or `ros2 param set` takes effect immediately.
+
 ### Operator reset
 
 `MATED` and `FAULT` are latched — the controller commands no motion until

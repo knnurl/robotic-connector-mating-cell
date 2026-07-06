@@ -1,0 +1,72 @@
+{
+  "configById": {
+    "Indicator!phase": {
+      "path": "/mating/phase.data",
+      "style": "background",
+      "fallbackColor": "#585858",
+      "fallbackLabel": "no data",
+      "rules": [
+        { "operator": "=", "rawValue": "WAIT_FOR_VISION", "color": "#666666", "label": "WAIT FOR VISION" },
+        { "operator": "=", "rawValue": "ALIGN_COARSE", "color": "#b8860b", "label": "ALIGN (coarse)" },
+        { "operator": "=", "rawValue": "ALIGN_FINE", "color": "#c9a227", "label": "ALIGN (fine)" },
+        { "operator": "=", "rawValue": "INSERT", "color": "#b22222", "label": "INSERTING" },
+        { "operator": "=", "rawValue": "MATED", "color": "#2e8b57", "label": "MATED" },
+        { "operator": "=", "rawValue": "FAULT", "color": "#8b0000", "label": "FAULT - reset required" }
+      ]
+    },
+    "Plot!errors": {
+      "title": "Alignment error",
+      "paths": [
+        { "value": "/mating/error_mm.data", "enabled": true, "label": "position [mm]", "timestampMethod": "receiveTime" },
+        { "value": "/mating/error_deg.data", "enabled": true, "label": "rotation [deg]", "timestampMethod": "receiveTime" }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "followingViewWidth": 60
+    },
+    "Image!camera": {
+      "cameraState": {},
+      "imageMode": { "imageTopic": "/aruco/debug_image" }
+    },
+    "CallService!reset": {
+      "serviceName": "/connector_mating_node/reset",
+      "requestPayload": "{}",
+      "layout": "vertical",
+      "buttonText": "RESET sequence",
+      "buttonColor": "#b22222"
+    },
+    "DiagnosticStatusPanel!diag": {
+      "topicToRender": "/diagnostics",
+      "selectedHardwareId": "",
+      "selectedName": "connector_mating"
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": { "speed": 1 },
+  "layout": {
+    "direction": "row",
+    "splitPercentage": 62,
+    "first": {
+      "direction": "column",
+      "splitPercentage": 55,
+      "first": "Image!camera",
+      "second": "Plot!errors"
+    },
+    "second": {
+      "direction": "column",
+      "splitPercentage": 25,
+      "first": "Indicator!phase",
+      "second": {
+        "direction": "column",
+        "splitPercentage": 60,
+        "first": "DiagnosticStatusPanel!diag",
+        "second": "CallService!reset"
+      }
+    }
+  }
+}
