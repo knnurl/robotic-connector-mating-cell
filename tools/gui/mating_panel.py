@@ -4,7 +4,7 @@
 Everything user-facing is data, not code: topics, tolerances, phase colours,
 plot window, and every button come from panel_config.yaml (or --config).
 Buttons support two actions:
-  service_trigger  - call a std_srvs/Trigger service (e.g. the mating reset)
+  service_trigger  - call a std_srvs/Trigger service (e.g. stop/pause/reset)
   param_toggle     - flip a boolean parameter on a node (e.g. enable_insertion)
 
 Run (any machine on the ROS 2 network, sourced environment):
@@ -20,6 +20,7 @@ import os
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 
 import numpy as np
 import rclpy
@@ -34,6 +35,46 @@ from std_srvs.srv import Trigger
 
 DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                    'panel_config.yaml')
+
+# Dark-surface chart chrome + status palette (validated set; see repo docs).
+THEME = {
+    'page': '#0d0d0d',        # window plane
+    'surface': '#1a1a19',     # cards / chart surface
+    'ink': '#ffffff',         # primary text
+    'ink2': '#c3c2b7',        # secondary text
+    'muted': '#898781',       # axis labels, captions
+    'grid': '#2c2c2a',        # hairline gridlines / card border
+    'baseline': '#383835',    # axis baseline
+    'series': '#3987e5',      # plot line (single series per plot)
+    'good': '#0ca30c',
+    'warning': '#fab219',
+    'serious': '#ec835a',
+    'critical': '#d03b3b',
+}
+
+
+def _hex_to_rgb(h):
+    h = h.lstrip('#')
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def text_on(color):
+    """Black or white ink, whichever reads on the given fill."""
+    r, g, b = _hex_to_rgb(color)
+    return '#0b0b0b' if (0.299 * r + 0.587 * g + 0.114 * b) > 150 else '#ffffff'
+
+
+def mix(color, other, t):
+    """Linear blend color->other by t (for hover shades)."""
+    a, b = _hex_to_rgb(color), _hex_to_rgb(other)
+    return '#%02x%02x%02x' % tuple(int(round(a[i] + (b[i] - a[i]) * t))
+                                   for i in range(3))
+
+
+def rounded_rect(canvas, x0, y0, x1, y1, r, **kw):
+    pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1,
+           x1 - r, y1, x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
+    return canvas.create_polygon(pts, smooth=True, **kw)
 
 
 class PanelNode(Node):
@@ -139,69 +180,126 @@ class PanelNode(Node):
 
 
 class PanelUI:
+    button_log = None
+
     def __init__(self, root, node, cfg):
         self.root = root
         self.node = node
         self.cfg = cfg
         self.photo = None  # keep a reference or tk garbage-collects it
+        t = THEME
 
         root.title(cfg.get('title', 'Connector Mating'))
-        root.configure(bg='#202020')
+        root.configure(bg=t['page'])
 
-        self.phase_label = tk.Label(root, text='---', font=('DejaVu Sans', 32, 'bold'),
-                                    fg='white', bg='gray25', width=18, pady=10)
-        self.phase_label.grid(row=0, column=0, columnspan=2, sticky='ew',
-                              padx=8, pady=8)
+        base = tkfont.nametofont('TkDefaultFont').actual()['family']
+        self.f_caption = (base, 9)
+        self.f_label = (base, 10)
+        self.f_value = ('DejaVu Sans Mono', 18, 'bold')
+        self.f_phase = (base, 26, 'bold')
+        self.f_button = (base, 11, 'bold')
 
-        self.err_labels = {}
+        outer = tk.Frame(root, bg=t['page'])
+        outer.pack(fill='both', expand=True, padx=16, pady=14)
+
+        # ---- header: title + phase banner ------------------------------
+        header = tk.Frame(outer, bg=t['page'])
+        header.pack(fill='x')
+        tk.Label(header, text=cfg.get('title', 'Connector Mating').upper(),
+                 font=(base, 10, 'bold'), fg=t['muted'], bg=t['page'],
+                 anchor='w').pack(fill='x')
+
+        self.phase_canvas = tk.Canvas(outer, height=76, bg=t['page'],
+                                      highlightthickness=0)
+        self.phase_canvas.pack(fill='x', pady=(6, 12))
+
+        # ---- middle: camera card (left) + two plot cards (right) -------
+        mid = tk.Frame(outer, bg=t['page'])
+        mid.pack(fill='both', expand=True)
+
+        cam_card = self._card(mid, 'CAMERA')
+        cam_card.pack(side='left', fill='both', expand=True)
+        self.image_label = tk.Label(cam_card, bg=t['surface'],
+                                    fg=t['muted'], font=self.f_label,
+                                    text='waiting for image…')
+        self.image_label.pack(fill='both', expand=True, padx=10, pady=(0, 10))
+
+        right = tk.Frame(mid, bg=t['page'])
+        right.pack(side='left', fill='y', padx=(12, 0))
+
         self.plots = {}
-        for col, (key, title, tol_key, unit) in enumerate([
-                ('pos', 'position error', 'pos_tol_mm', 'mm'),
-                ('rot', 'rotation error', 'rot_tol_deg', 'deg')]):
-            frame = tk.Frame(root, bg='#202020')
-            frame.grid(row=1, column=col, padx=8, sticky='n')
-            lbl = tk.Label(frame, text=f'{title}: ---', font=('DejaVu Sans Mono', 14),
-                           fg='white', bg='#202020')
-            lbl.pack()
-            canvas = tk.Canvas(frame, width=300, height=110, bg='#101010',
+        for key, title, tol_key, unit in (
+                ('pos', 'POSITION ERROR', 'pos_tol_mm', 'mm'),
+                ('rot', 'ROTATION ERROR', 'rot_tol_deg', 'deg')):
+            card = self._card(right, title)
+            card.pack(fill='x', pady=(0, 12) if key == 'pos' else 0)
+            row = tk.Frame(card, bg=t['surface'])
+            row.pack(fill='x', padx=10)
+            dot = tk.Canvas(row, width=10, height=10, bg=t['surface'],
+                            highlightthickness=0)
+            dot.pack(side='left', pady=6)
+            dot_id = dot.create_oval(2, 2, 9, 9, fill=t['muted'], outline='')
+            val = tk.Label(row, text='--', font=self.f_value, fg=t['ink'],
+                           bg=t['surface'], anchor='w')
+            val.pack(side='left', padx=(6, 2))
+            tk.Label(row, text=unit, font=self.f_caption, fg=t['muted'],
+                     bg=t['surface'], anchor='sw').pack(side='left', pady=(0, 4))
+            canvas = tk.Canvas(card, width=330, height=110, bg=t['surface'],
                                highlightthickness=0)
-            canvas.pack(pady=4)
-            self.err_labels[key] = lbl
-            self.plots[key] = (canvas, float(cfg.get(tol_key, 1.0)), unit)
+            canvas.pack(padx=10, pady=(2, 10))
+            self.plots[key] = {
+                'canvas': canvas, 'value': val, 'dot': dot, 'dot_id': dot_id,
+                'tol': float(cfg.get(tol_key, 1.0)), 'unit': unit,
+            }
 
-        self.image_label = tk.Label(root, bg='#101010')
-        self.image_label.grid(row=2, column=0, columnspan=2, padx=8, pady=8)
-
-        btn_frame = tk.Frame(root, bg='#202020')
-        btn_frame.grid(row=3, column=0, columnspan=2, pady=4)
-        per_row = int(cfg.get('buttons_per_row', 4))
+        # ---- buttons ----------------------------------------------------
+        btn_frame = tk.Frame(outer, bg=t['page'])
+        btn_frame.pack(fill='x', pady=(14, 4))
+        per_row = int(cfg.get('buttons_per_row', 5))
         for i, btn in enumerate(cfg.get('buttons', [])):
-            color = btn.get('color', 'gray85')
-            tk.Button(btn_frame, text=btn['label'],
-                      font=('DejaVu Sans', 12, 'bold'),
-                      bg=color, activebackground=color,
-                      fg=btn.get('text_color', 'black'),
-                      activeforeground=btn.get('text_color', 'black'),
-                      command=lambda b=btn: self.run_button(b),
-                      width=18, height=2).grid(
-                row=i // per_row, column=i % per_row, padx=6, pady=4)
+            color = btn.get('color', t['grid'])
+            fg = btn.get('text_color', text_on(color))
+            b = tk.Button(btn_frame, text=btn['label'], font=self.f_button,
+                          bg=color, fg=fg, activebackground=mix(color, '#ffffff', 0.15),
+                          activeforeground=fg, relief='flat', bd=0,
+                          highlightthickness=0, cursor='hand2',
+                          padx=18, pady=10,
+                          command=lambda b_=btn: self.run_button(b_))
+            b.grid(row=i // per_row, column=i % per_row, padx=(0, 10), pady=4,
+                   sticky='ew')
+            btn_frame.grid_columnconfigure(i % per_row, weight=1)
+            b.bind('<Enter>', lambda e, w=b, c=color:
+                   w.config(bg=mix(c, '#ffffff', 0.12)))
+            b.bind('<Leave>', lambda e, w=b, c=color: w.config(bg=c))
 
-        self.status = tk.Label(root, text='', anchor='w', fg='gray70',
-                               bg='#202020', font=('DejaVu Sans', 10))
-        self.status.grid(row=4, column=0, columnspan=2, sticky='ew', padx=8)
+        # ---- status bar --------------------------------------------------
+        self.status = tk.Label(outer, text='ready', anchor='w', fg=t['muted'],
+                               bg=t['page'], font=self.f_caption)
+        self.status.pack(fill='x', pady=(6, 0))
 
         self.refresh()
 
-    button_log = None
+    def _card(self, parent, title):
+        """Bordered surface card with a muted caption; returns the body."""
+        t = THEME
+        frame = tk.Frame(parent, bg=t['surface'],
+                         highlightbackground=t['grid'], highlightthickness=1)
+        tk.Label(frame, text=title, font=self.f_caption, fg=t['muted'],
+                 bg=t['surface'], anchor='w').pack(fill='x', padx=10,
+                                                   pady=(8, 2))
+        return frame
+
+    # ------------------------------------------------------------ actions
 
     def run_button(self, btn):
         def done(ok, message):
             if self.button_log is None:
                 self.button_log = {}
             self.button_log[btn['label']] = ok
+            color = THEME['good'] if ok else THEME['serious']
             self.root.after(0, lambda: self.status.config(
-                text=f'{btn["label"]}: {"OK" if ok else "FAILED"} - {message}',
-                fg='pale green' if ok else 'salmon'))
+                text=f'{btn["label"]}: {"ok" if ok else "failed"} — {message}',
+                fg=color))
         if btn.get('type') == 'service_trigger':
             self.node.call_trigger(btn['service'], done)
         elif btn.get('type') == 'param_toggle':
@@ -209,30 +307,73 @@ class PanelUI:
         else:
             done(False, f'unknown button type {btn.get("type")}')
 
+    # ------------------------------------------------------------ drawing
+
+    def draw_phase(self, phase, stale):
+        t = THEME
+        c = self.phase_canvas
+        c.delete('all')
+        w = max(c.winfo_width(), 200)
+        color = self.cfg.get('phase_colors', {}).get(phase, t['grid'])
+        if phase == '---':
+            color = t['grid']
+        rounded_rect(c, 0, 0, w, 74, 12, fill=color, outline='')
+        ink = text_on(color)
+        c.create_text(w / 2, 34, text=phase.replace('_', ' '),
+                      font=self.f_phase, fill=ink)
+        sub = 'no data' if phase == '---' else (
+            'STALE — no updates from controller' if stale else 'live')
+        c.create_text(w / 2, 60, text=sub, font=self.f_caption,
+                      fill=mix(ink, color, 0.35))
+
     def draw_plot(self, key):
-        canvas, tol, unit = self.plots[key]
-        canvas.delete('all')
-        w = int(canvas['width'])
-        h = int(canvas['height'])
+        t = THEME
+        p = self.plots[key]
+        c = p['canvas']
+        c.delete('all')
+        w, h = int(c['width']), int(c['height'])
+        ml, mr, mt, mb = 34, 10, 8, 16  # margins: room for y labels + x caption
+        pw, ph = w - ml - mr, h - mt - mb
         window = float(self.cfg.get('plot_seconds', 30))
         now = time.monotonic()
         with self.node.lock:
-            data = [(t, v) for t, v in self.node.errors[key] if now - t < window]
-        top = max([v for _, v in data] + [tol * 2.0]) * 1.1
-        # tolerance line
-        y_tol = h - (tol / top) * h
-        canvas.create_line(0, y_tol, w, y_tol, fill='#3fa34d', dash=(4, 3))
-        canvas.create_text(4, y_tol - 8, anchor='w', fill='#3fa34d',
-                           text=f'tol {tol:g} {unit}', font=('DejaVu Sans', 8))
+            data = [(ts, v) for ts, v in self.node.errors[key]
+                    if now - ts < window]
+        tol = p['tol']
+        top = max([v for _, v in data] + [tol * 2.0]) * 1.12
+
+        def x(ts):
+            return ml + pw - (now - ts) / window * pw
+
+        def y(v):
+            return mt + ph - min(v / top, 1.0) * ph
+
+        # recessive hairline grid: quarters of the scale
+        for frac in (0.25, 0.5, 0.75):
+            gy = mt + ph * frac
+            c.create_line(ml, gy, ml + pw, gy, fill=t['grid'])
+        # baseline + tolerance reference
+        c.create_line(ml, mt + ph, ml + pw, mt + ph, fill=t['baseline'])
+        ty = y(tol)
+        c.create_line(ml, ty, ml + pw, ty, fill=t['muted'], dash=(2, 4))
+        # y tick labels (muted, tabular): 0, tol, top
+        for vy, txt in ((mt + ph, '0'), (ty, f'{tol:g}'), (mt + 4, f'{top:.3g}')):
+            c.create_text(ml - 5, vy, text=txt, anchor='e', fill=t['muted'],
+                          font=('DejaVu Sans Mono', 8))
+        c.create_text(ml + pw, h - 3, text=f'last {window:g} s', anchor='se',
+                      fill=t['muted'], font=('DejaVu Sans Mono', 8))
+
         if len(data) >= 2:
-            pts = []
-            for t, v in data:
-                x = w - (now - t) / window * w
-                y = h - min(v / top, 1.0) * h
-                pts += [x, y]
-            canvas.create_line(*pts, fill='#e0e0e0', width=2)
+            pts = [coord for ts, v in data for coord in (x(ts), y(v))]
+            c.create_line(*pts, fill=t['series'], width=2,
+                          joinstyle='round', capstyle='round')
+            # direct label on the latest point (selective, not every point)
+            lx, ly = x(data[-1][0]), y(data[-1][1])
+            c.create_oval(lx - 3, ly - 3, lx + 3, ly + 3,
+                          fill=t['series'], outline=t['surface'], width=2)
 
     def refresh(self):
+        t = THEME
         with self.node.lock:
             phase = self.node.phase
             image = self.node.image_rgb
@@ -241,26 +382,25 @@ class PanelUI:
             latest = {k: (d[-1][1] if d else None)
                       for k, d in self.node.errors.items()}
 
-        colors = self.cfg.get('phase_colors', {})
-        self.phase_label.config(
-            text=phase + (' (stale)' if stale and phase != '---' else ''),
-            bg=colors.get(phase, 'gray25'))
+        self.draw_phase(phase, stale)
 
-        for key, (_, tol, unit) in self.plots.items():
+        for key, p in self.plots.items():
             v = latest[key]
-            lbl = self.err_labels[key]
             if v is None:
-                lbl.config(text=f'{key}: ---', fg='gray60')
+                p['value'].config(text='--', fg=t['ink2'])
+                p['dot'].itemconfig(p['dot_id'], fill=t['muted'])
             else:
-                lbl.config(text=f'{v:7.2f} {unit}',
-                           fg='pale green' if v < tol else 'orange')
+                p['value'].config(text=f'{v:.2f}', fg=t['ink'])
+                p['dot'].itemconfig(
+                    p['dot_id'],
+                    fill=t['good'] if v < p['tol'] else t['serious'])
             self.draw_plot(key)
 
         if image is not None:
             hgt, wid = image.shape[:2]
             header = f'P6 {wid} {hgt} 255 '.encode()
             self.photo = tk.PhotoImage(data=header + image.tobytes())
-            self.image_label.config(image=self.photo)
+            self.image_label.config(image=self.photo, text='')
 
         self.root.after(int(1000 / float(self.cfg.get('refresh_hz', 10))),
                         self.refresh)

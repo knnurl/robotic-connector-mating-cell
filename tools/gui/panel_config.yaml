@@ -17,14 +17,15 @@ plot_seconds: 30
 refresh_hz: 10
 stale_after_s: 3.0     # mark the phase display when no data arrives
 
+# Validated dark-surface palette (status + categorical steps).
 phase_colors:
-  WAIT_FOR_VISION: gray40
-  PAUSED: '#4682b4'            # steel blue
-  ALIGN_COARSE: '#b8860b'      # dark goldenrod
-  ALIGN_FINE: '#c9a227'
-  INSERT: '#b22222'            # firebrick — robot committing the stroke
-  MATED: '#2e8b57'             # sea green
-  FAULT: '#8b0000'             # dark red
+  WAIT_FOR_VISION: '#52514e'   # neutral — idle
+  PAUSED: '#3987e5'            # blue — informational hold
+  ALIGN_COARSE: '#c98500'      # amber — working (coarse)
+  ALIGN_FINE: '#eda100'        # brighter amber — working (fine)
+  INSERT: '#ec835a'            # orange — committing the stroke (attention)
+  MATED: '#0ca30c'             # green — success
+  FAULT: '#d03b3b'             # red — fault
 
 # --- Buttons -----------------------------------------------------------
 # type: service_trigger -> calls a std_srvs/Trigger service
