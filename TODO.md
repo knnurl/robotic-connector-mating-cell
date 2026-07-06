@@ -44,7 +44,8 @@ Ordered by priority. Details for each item: [HANDOFF.md](HANDOFF.md) §8 and
       robustness and better pose accuracy (bigger effective marker)
 - [x] Machine-readable cell state (/mating/phase, /mating/error_*,
       /diagnostics) + GUI options: Foxglove layout, configurable tkinter
-      operator panel, rqt recipe (tools/gui/) — done 2026-07-06
+      operator panel, rqt recipe (tools/gui/); operational stop/pause/
+      resume/reset services + buttons — done 2026-07-06
 - [ ] Consolidated single launch file for the whole cell (needs the MELFA
       packages present to test)
 - [ ] Force-guarded insertion (F/T sensor or MELFA force option) for

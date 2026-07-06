@@ -50,7 +50,16 @@ class PanelNode(Node):
         }
         self.image_rgb = None          # numpy RGB, downscaled
         self.last_msg_time = 0.0
-        self._clients = {}
+
+        # Pre-create service/parameter clients for all configured buttons
+        # (rclpy already uses Node._clients internally; use our own dict).
+        self._srv_clients = {}
+        for btn in cfg.get('buttons', []):
+            if btn.get('type') == 'service_trigger':
+                self._client(Trigger, btn['service'])
+            elif btn.get('type') == 'param_toggle':
+                self._client(GetParameters, f"{btn['node']}/get_parameters")
+                self._client(SetParameters, f"{btn['node']}/set_parameters")
 
         latched = QoSProfile(depth=1,
                              durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
@@ -91,9 +100,9 @@ class PanelNode(Node):
     # ------------------------------------------------------------ actions
 
     def _client(self, srv_type, name):
-        if name not in self._clients:
-            self._clients[name] = self.create_client(srv_type, name)
-        return self._clients[name]
+        if name not in self._srv_clients:
+            self._srv_clients[name] = self.create_client(srv_type, name)
+        return self._srv_clients[name]
 
     def call_trigger(self, service, done_cb):
         cli = self._client(Trigger, service)
@@ -165,10 +174,17 @@ class PanelUI:
 
         btn_frame = tk.Frame(root, bg='#202020')
         btn_frame.grid(row=3, column=0, columnspan=2, pady=4)
+        per_row = int(cfg.get('buttons_per_row', 4))
         for i, btn in enumerate(cfg.get('buttons', [])):
-            tk.Button(btn_frame, text=btn['label'], font=('DejaVu Sans', 12),
+            color = btn.get('color', 'gray85')
+            tk.Button(btn_frame, text=btn['label'],
+                      font=('DejaVu Sans', 12, 'bold'),
+                      bg=color, activebackground=color,
+                      fg=btn.get('text_color', 'black'),
+                      activeforeground=btn.get('text_color', 'black'),
                       command=lambda b=btn: self.run_button(b),
-                      width=24).grid(row=0, column=i, padx=6)
+                      width=18, height=2).grid(
+                row=i // per_row, column=i % per_row, padx=6, pady=4)
 
         self.status = tk.Label(root, text='', anchor='w', fg='gray70',
                                bg='#202020', font=('DejaVu Sans', 10))
@@ -176,8 +192,13 @@ class PanelUI:
 
         self.refresh()
 
+    button_log = None
+
     def run_button(self, btn):
         def done(ok, message):
+            if self.button_log is None:
+                self.button_log = {}
+            self.button_log[btn['label']] = ok
             self.root.after(0, lambda: self.status.config(
                 text=f'{btn["label"]}: {"OK" if ok else "FAILED"} - {message}',
                 fg='pale green' if ok else 'salmon'))
@@ -275,6 +296,9 @@ def main():
     root = tk.Tk()
     ui = PanelUI(root, node, cfg)
     if args.test_seconds > 0:
+        # exercise every configured button once, staggered
+        for i, btn in enumerate(cfg.get('buttons', [])):
+            root.after(2000 + i * 800, lambda b=btn: ui.run_button(b))
         root.after(int(args.test_seconds * 1000), root.destroy)
     try:
         root.mainloop()
@@ -285,9 +309,8 @@ def main():
         rclpy.shutdown()
         spin_thread.join(timeout=2.0)
         if args.test_seconds > 0:
-            del ui  # widgets are gone once the window closes
             print(f'SMOKE OK phase={snapshot[0]} samples={snapshot[1]} '
-                  f'image={snapshot[2]}')
+                  f'image={snapshot[2]} button_results={ui.button_log}')
 
 
 if __name__ == '__main__':

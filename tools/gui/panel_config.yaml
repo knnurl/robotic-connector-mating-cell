@@ -19,6 +19,7 @@ stale_after_s: 3.0     # mark the phase display when no data arrives
 
 phase_colors:
   WAIT_FOR_VISION: gray40
+  PAUSED: '#4682b4'            # steel blue
   ALIGN_COARSE: '#b8860b'      # dark goldenrod
   ALIGN_FINE: '#c9a227'
   INSERT: '#b22222'            # firebrick — robot committing the stroke
@@ -28,7 +29,25 @@ phase_colors:
 # --- Buttons -----------------------------------------------------------
 # type: service_trigger -> calls a std_srvs/Trigger service
 # type: param_toggle    -> flips a boolean parameter on a node
+# STOP halts the trajectory immediately and latches FAULT (reset to
+# recover). It is an OPERATIONAL stop - the hardware e-stop remains the
+# only safety-rated stop on the cell.
 buttons:
+  - label: "STOP"
+    type: service_trigger
+    service: /connector_mating_node/stop
+    color: '#b22222'
+    text_color: white
+  - label: Pause
+    type: service_trigger
+    service: /connector_mating_node/pause
+    color: '#4682b4'
+    text_color: white
+  - label: Resume
+    type: service_trigger
+    service: /connector_mating_node/resume
+    color: '#2e8b57'
+    text_color: white
   - label: RESET sequence
     type: service_trigger
     service: /connector_mating_node/reset

@@ -9,9 +9,21 @@ The controller publishes machine-readable state (no GUI required to consume it):
 | `/mating/error_deg` | `std_msgs/Float64` | Live rotation error, deg |
 | `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | Health: phase, vision freshness, plan failures, insertion enable |
 
-Reset service: `/connector_mating_node/reset` (`std_srvs/Trigger`).
+Operational services (all `std_srvs/Trigger` on `/connector_mating_node/...`):
+
+| Service | Effect |
+|---|---|
+| `stop` | Halt the in-flight trajectory **immediately** and latch FAULT (reset to recover) |
+| `pause` | Halt immediately and hold position; sequence freezes (phase shows PAUSED) |
+| `resume` | Continue after a pause (alignment is re-verified before any insertion) |
+| `reset` | Unlatch FAULT/MATED/pause and restart at WAIT_FOR_VISION |
+
 Runtime toggle: `enable_insertion` bool parameter on `/connector_mating_node`
 (read fresh each cycle, so flipping it takes effect immediately).
+
+> **STOP is an operational stop, not an emergency stop.** It depends on the
+> ROS graph, the network, and this software all working. The hardware e-stop
+> chain is the only safety-rated stop on the cell — keep it within reach.
 
 ## Option A — Foxglove Studio (recommended for engineering use)
 

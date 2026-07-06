@@ -6,19 +6,65 @@
       "fallbackColor": "#585858",
       "fallbackLabel": "no data",
       "rules": [
-        { "operator": "=", "rawValue": "WAIT_FOR_VISION", "color": "#666666", "label": "WAIT FOR VISION" },
-        { "operator": "=", "rawValue": "ALIGN_COARSE", "color": "#b8860b", "label": "ALIGN (coarse)" },
-        { "operator": "=", "rawValue": "ALIGN_FINE", "color": "#c9a227", "label": "ALIGN (fine)" },
-        { "operator": "=", "rawValue": "INSERT", "color": "#b22222", "label": "INSERTING" },
-        { "operator": "=", "rawValue": "MATED", "color": "#2e8b57", "label": "MATED" },
-        { "operator": "=", "rawValue": "FAULT", "color": "#8b0000", "label": "FAULT - reset required" }
+        {
+          "operator": "=",
+          "rawValue": "PAUSED",
+          "color": "#4682b4",
+          "label": "PAUSED"
+        },
+        {
+          "operator": "=",
+          "rawValue": "WAIT_FOR_VISION",
+          "color": "#666666",
+          "label": "WAIT FOR VISION"
+        },
+        {
+          "operator": "=",
+          "rawValue": "ALIGN_COARSE",
+          "color": "#b8860b",
+          "label": "ALIGN (coarse)"
+        },
+        {
+          "operator": "=",
+          "rawValue": "ALIGN_FINE",
+          "color": "#c9a227",
+          "label": "ALIGN (fine)"
+        },
+        {
+          "operator": "=",
+          "rawValue": "INSERT",
+          "color": "#b22222",
+          "label": "INSERTING"
+        },
+        {
+          "operator": "=",
+          "rawValue": "MATED",
+          "color": "#2e8b57",
+          "label": "MATED"
+        },
+        {
+          "operator": "=",
+          "rawValue": "FAULT",
+          "color": "#8b0000",
+          "label": "FAULT - reset required"
+        }
       ]
     },
     "Plot!errors": {
       "title": "Alignment error",
       "paths": [
-        { "value": "/mating/error_mm.data", "enabled": true, "label": "position [mm]", "timestampMethod": "receiveTime" },
-        { "value": "/mating/error_deg.data", "enabled": true, "label": "rotation [deg]", "timestampMethod": "receiveTime" }
+        {
+          "value": "/mating/error_mm.data",
+          "enabled": true,
+          "label": "position [mm]",
+          "timestampMethod": "receiveTime"
+        },
+        {
+          "value": "/mating/error_deg.data",
+          "enabled": true,
+          "label": "rotation [deg]",
+          "timestampMethod": "receiveTime"
+        }
       ],
       "showXAxisLabels": true,
       "showYAxisLabels": true,
@@ -30,7 +76,9 @@
     },
     "Image!camera": {
       "cameraState": {},
-      "imageMode": { "imageTopic": "/aruco/debug_image" }
+      "imageMode": {
+        "imageTopic": "/aruco/debug_image"
+      }
     },
     "CallService!reset": {
       "serviceName": "/connector_mating_node/reset",
@@ -43,11 +91,34 @@
       "topicToRender": "/diagnostics",
       "selectedHardwareId": "",
       "selectedName": "connector_mating"
+    },
+    "CallService!stop": {
+      "serviceName": "/connector_mating_node/stop",
+      "requestPayload": "{}",
+      "layout": "vertical",
+      "buttonText": "STOP (halt + FAULT)",
+      "buttonColor": "#8b0000"
+    },
+    "CallService!pause": {
+      "serviceName": "/connector_mating_node/pause",
+      "requestPayload": "{}",
+      "layout": "vertical",
+      "buttonText": "Pause",
+      "buttonColor": "#4682b4"
+    },
+    "CallService!resume": {
+      "serviceName": "/connector_mating_node/resume",
+      "requestPayload": "{}",
+      "layout": "vertical",
+      "buttonText": "Resume",
+      "buttonColor": "#2e8b57"
     }
   },
   "globalVariables": {},
   "userNodes": {},
-  "playbackConfig": { "speed": 1 },
+  "playbackConfig": {
+    "speed": 1
+  },
   "layout": {
     "direction": "row",
     "splitPercentage": 62,
@@ -63,9 +134,24 @@
       "first": "Indicator!phase",
       "second": {
         "direction": "column",
-        "splitPercentage": 60,
+        "splitPercentage": 40,
         "first": "DiagnosticStatusPanel!diag",
-        "second": "CallService!reset"
+        "second": {
+          "direction": "column",
+          "splitPercentage": 50,
+          "first": {
+            "direction": "row",
+            "splitPercentage": 50,
+            "first": "CallService!stop",
+            "second": "CallService!reset"
+          },
+          "second": {
+            "direction": "row",
+            "splitPercentage": 50,
+            "first": "CallService!pause",
+            "second": "CallService!resume"
+          }
+        }
       }
     }
   }

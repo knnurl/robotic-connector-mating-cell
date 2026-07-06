@@ -155,6 +155,43 @@ public:
                 RCLCPP_WARN(LOGGER, "Reset requested via service.");
             });
 
+        // Operational stop (NOT a safety e-stop - that stays hardware):
+        // halts the current trajectory immediately and latches FAULT.
+        stop_srv_ = node_->create_service<std_srvs::srv::Trigger>(
+            "~/stop",
+            [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+                   std::shared_ptr<std_srvs::srv::Trigger::Response> resp) {
+                stop_requested_ = true;
+                move_group_.stop();  // cancel in-flight trajectory now
+                resp->success = true;
+                resp->message = "STOP: trajectory halted, FAULT latched (reset to recover).";
+                RCLCPP_ERROR(LOGGER, "Software STOP via service - halting and latching FAULT.");
+            });
+
+        // Pause: halt and hold position; resume continues the sequence.
+        pause_srv_ = node_->create_service<std_srvs::srv::Trigger>(
+            "~/pause",
+            [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+                   std::shared_ptr<std_srvs::srv::Trigger::Response> resp) {
+                paused_ = true;
+                move_group_.stop();
+                publish_phase();
+                resp->success = true;
+                resp->message = "Paused: holding position until resume.";
+                RCLCPP_WARN(LOGGER, "Paused via service.");
+            });
+        resume_srv_ = node_->create_service<std_srvs::srv::Trigger>(
+            "~/resume",
+            [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+                   std::shared_ptr<std_srvs::srv::Trigger::Response> resp) {
+                paused_ = false;
+                aligned_cycles_ = 0;  // re-verify alignment after a pause
+                publish_phase();
+                resp->success = true;
+                resp->message = "Resumed.";
+                RCLCPP_WARN(LOGGER, "Resumed via service.");
+            });
+
         planning_frame_ = move_group_.getPlanningFrame();
         eef_link_ = move_group_.getEndEffectorLink();
         RCLCPP_INFO(LOGGER, "Planning frame: %s, end effector: %s",
@@ -231,7 +268,7 @@ private:
     void publish_phase()
     {
         std_msgs::msg::String msg;
-        msg.data = phase_name(phase_);
+        msg.data = paused_ ? std::string("PAUSED") : std::string(phase_name(phase_));
         phase_pub_->publish(msg);
     }
 
@@ -268,6 +305,7 @@ private:
             st.values.push_back(e);
         };
         kv("phase", phase_name(phase_));
+        kv("paused", paused_ ? "true" : "false");
         kv("vision_fresh", vision_fresh ? "true" : "false");
         kv("position_error_mm",
            std::isfinite(pos_err_mm) ? std::to_string(pos_err_mm) : "n/a");
@@ -385,6 +423,9 @@ private:
             consecutive_plan_failures_ = 0;
             return;
         }
+        if (paused_ || stop_requested_) {
+            return;  // operator halted an in-flight move; not a planner fault
+        }
         if (++consecutive_plan_failures_ >= params_.max_consecutive_plan_failures) {
             RCLCPP_FATAL(LOGGER, "%d consecutive planning/execution failures - holding.",
                          consecutive_plan_failures_);
@@ -395,11 +436,30 @@ private:
     // One state-machine cycle.
     void step()
     {
+        if (stop_requested_.exchange(false)) {
+            RCLCPP_ERROR(LOGGER, "Software STOP - latching FAULT (was %s).",
+                         phase_name(phase_));
+            set_phase(Phase::FAULT);
+            publish_status(false, NAN, NAN);
+            return;
+        }
+
         if (reset_requested_.exchange(false)) {
-            RCLCPP_WARN(LOGGER, "Resetting controller state (was %s).", phase_name(phase_));
+            RCLCPP_WARN(LOGGER, "Resetting controller state (was %s%s).",
+                        phase_name(phase_), paused_ ? ", paused" : "");
             aligned_cycles_ = 0;
             consecutive_plan_failures_ = 0;
+            paused_ = false;
             set_phase(Phase::WAIT_FOR_VISION);
+            publish_phase();
+        }
+
+        if (paused_) {
+            RCLCPP_INFO_THROTTLE(LOGGER, *node_->get_clock(), 5000,
+                                 "Paused - holding position (resume to continue).");
+            aligned_cycles_ = 0;
+            publish_status(false, NAN, NAN);
+            return;
         }
 
         if (phase_ == Phase::MATED || phase_ == Phase::FAULT) {
@@ -520,11 +580,16 @@ private:
     tf2_ros::TransformListener tf_listener_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_srv_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr stop_srv_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr pause_srv_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr resume_srv_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr phase_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr err_pos_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr err_rot_pub_;
     rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diag_pub_;
     std::atomic<bool> reset_requested_{false};
+    std::atomic<bool> stop_requested_{false};
+    std::atomic<bool> paused_{false};
 
     Params params_;
     std::string planning_frame_;
