@@ -1,0 +1,104 @@
+# Connector-mating controller parameters for a REAL Franka FR3
+# (franka_ros2 + franka_fr3_moveit_config, OMPL pipeline).
+#
+# Differences from the MELFA reference (rv5as_params.yaml), per
+# SETUP_AND_CALIBRATION.md section 7: the FR3 MoveIt config has NO Pilz
+# pipeline, so the insertion stroke is not path-guaranteed. Depth, speeds
+# and tolerances are reduced accordingly. Validate in fake hardware first.
+#
+# SAFE DEFAULT: enable_insertion is FALSE (teach/calibration mode - aligns
+# and hovers at standoff). Flip it only after the validation ladder.
+
+/**:
+  ros__parameters:
+    planning_group: fr3_arm
+    EEF_FRAME_ID: fr3_hand_tcp
+    BASE_FRAME_ID: fr3_link0
+
+    # --- Vision input -------------------------------------------------------
+    pose_topic: /aruco/pose
+    raw_pose_topic: /aruco/pose_raw  # unpredicted detections; gates insertion arming
+    control_period_s: 0.4
+    vision_timeout_s: 0.6
+    tf_lookup_timeout_s: 0.1
+
+    # --- Motion backend (OMPL - no Pilz on FR3, see setup guide section 7) --
+    planning_pipeline: ompl
+    planner_id: ""               # empty = pipeline default
+    accel_scaling: 0.08
+
+    # --- Calibration/teach mode ---------------------------------------------
+    enable_insertion: false      # KEEP FALSE until offsets are taught
+
+    # --- Target geometry (marker frame; teach on the physical cell) ---------
+    connector_offset_x: 0.0
+    connector_offset_y: 0.0
+    connector_offset_z: 0.0
+    tool_yaw_offset_deg: 0.0
+    standoff_height_m: 0.10      # generous while teaching
+    insertion_depth_m: 0.04      # reduced vs Pilz (stroke not path-guaranteed)
+
+    # --- Phase behaviour ----------------------------------------------------
+    coarse_max_step_m: 0.04
+    coarse_max_step_deg: 5.0
+    coarse_speed: 0.15           # conservative for first FR3 runs
+    coarse_pos_tol_m: 0.02
+    coarse_rot_tol_deg: 5.0
+    fine_max_step_m: 0.008
+    fine_max_step_deg: 1.5
+    fine_speed: 0.06
+    fine_pos_tol_m: 0.002        # tightened vs Pilz (section 7)
+    fine_rot_tol_deg: 1.0
+    align_hold_cycles: 4         # one extra verification cycle on OMPL
+    insert_speed: 0.02
+
+    # --- Safety guards ------------------------------------------------------
+    max_joint_jump_rad: 0.8
+    max_consecutive_plan_failures: 5
+
+    # --- Force-aware insertion (FR3: free - estimated external wrench) ------
+    # Axial reaction >= contact_force_n = contact: MATED if the stroke has
+    # travelled >= min_contact_depth_m, jam (FAULT -> ~/retract) if earlier.
+    # Lateral >= max_lateral_force_n at any point = snag -> FAULT.
+    # Thresholds are conservative starters - tune against the real connector
+    # (log axial force during a manual mate first). The wrench estimate has
+    # a few N of bias/noise; keep contact_force_n well above that.
+    wrench_topic: /franka_robot_state_broadcaster/external_wrench_in_base_frame
+    contact_force_n: 8.0
+    max_lateral_force_n: 12.0
+    min_contact_depth_m: 0.02    # contact in the first 20 mm = obstruction
+    wrench_timeout_s: 0.2
+
+    # --- Insertion stroke planner --------------------------------------------
+    # No Pilz in the FR3 MoveIt config, so the stroke uses
+    # computeCartesianPath: interpolated straight line, TOTG-timed at
+    # insert_speed - path-guaranteed without Pilz.
+    insert_planner: cartesian
+    cartesian_eef_step_m: 0.002
+
+    # --- Alignment mode -------------------------------------------------------
+    # step (default). To try continuous tracking: install
+    # ros-humble-moveit-servo, run a servo node with tools/fr3/fr3_servo.yaml,
+    # then set align_mode: servo and control_period_s: 0.05 (must be shorter
+    # than the servo command timeout). INSERT stays a discrete stroke.
+    align_mode: step
+    servo_twist_topic: /servo_node/delta_twist_cmds
+    servo_pos_gain: 1.5
+    servo_rot_gain: 1.5
+
+    # --- INSERT backend --------------------------------------------------------
+    # moveit (default): position-controlled stroke via the planner above.
+    # impedance: compliant, self-aligning stroke via the Cartesian-impedance
+    # controller (fr3_mating_controllers). Commissioning ladder in
+    # fr3_mating_controllers/README.md: float test -> hold/stiffness test ->
+    # moveit stroke with force guard -> impedance stroke. Requires the
+    # controller spawned --inactive (see cartesian_impedance_stroke.yaml)
+    # and wrench_topic set (it is, above).
+    insert_backend: moveit
+    impedance_controller: cartesian_impedance_stroke_controller
+    trajectory_controller: fr3_arm_controller
+    controller_switch_service: /controller_manager/switch_controller
+    equilibrium_topic: /cartesian_impedance_stroke_controller/equilibrium_pose
+    impedance_stroke_mps: 0.005
+    impedance_overdrive_m: 0.010   # preload lead: ~8 N at k_z=800 N/m
+    impedance_settle_s: 1.0

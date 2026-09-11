@@ -1,0 +1,23 @@
+# Intel RealSense (vendor 8086): never let the kernel USB-autosuspend it.
+#
+# WHY: with power/control=auto (2 s delay) the kernel suspends an idle D405.
+# On resume it RE-ENUMERATES with a new USB device number, so any handle an
+# already-running process holds is dead - librealsense then reports
+# "frame timeout" forever, with no error and no recovery. Observed on this
+# cell three times in one session: device 003 -> 005 -> 008.
+#
+# INSTALL:
+#   sudo cp tools/fr3/99-realsense-no-suspend.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger --action=add --subsystem-match=usb --attr-match=idVendor=8086
+#
+# VERIFY (want "on", not "auto"):
+#   cat /sys/bus/usb/devices/4-2/power/control
+#
+# TEST/= is checked first so the rule is a no-op on kernels or device
+# variants that do not expose the attribute, instead of erroring out.
+ACTION=="add|bind|change", SUBSYSTEM=="usb", ATTR{idVendor}=="8086", TEST=="power/control", ATTR{power/control}="on"
+
+# Belt and braces: some udev versions apply ATTR{} too early on add for USB
+# devices, so also force it from a RUN rule once the device is bound.
+ACTION=="add|bind|change", SUBSYSTEM=="usb", ATTR{idVendor}=="8086", RUN+="/bin/sh -c '/bin/echo on > /sys/%p/power/control 2>/dev/null || true'"

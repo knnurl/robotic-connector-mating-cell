@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CycloneDDS configuration for the FR3 connector-mating cell.
+  CycloneDDS 0.10.x as shipped with ROS 2 Humble.
+
+  THE PROBLEM THIS SOLVES
+  =======================
+  libfranka's FCI loop must exchange UDP packets with the robot every
+  1 ms. If DDS traffic (camera images, point clouds, Foxglove) shares the
+  robot's network interface - or floods the kernel network stack with
+  fragments and retransmits - the RT thread misses its deadline and the
+  arm stops with `communication_constraints_violation`.
+
+  Two defences, both in this file:
+
+  1. INTERFACE ISOLATION (the big one): DDS is pinned to the loopback and
+     (optionally) the WiFi interface. The wired NIC that carries FCI
+     traffic to the robot is NEVER listed, so no ROS topic - however
+     heavy - can contend with the 1 kHz loop on that link.
+
+  2. BUFFER/FRAGMENT TUNING (from the fr3_act project's proven
+     cyclonedds_franka.xml): large fragments and receive buffers so image
+     traffic on the allowed interfaces generates fewer interrupts and no
+     retransmit storms.
+
+  USAGE - in EVERY terminal (or in ~/.bashrc), BEFORE launching anything:
+
+    export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    export CYCLONEDDS_URI=file://<abs path to>/tools/fr3/cyclonedds_fr3.xml
+
+  Then edit the <Interfaces> block below for this machine (find names
+  with `ip -br link`). Rules:
+    - "lo" ALWAYS stays (all cell nodes run on this PC).
+    - Add the WiFi interface ONLY if you need Foxglove/rqt from another
+      machine, and never stream raw images over it (see README).
+    - NEVER add the interface on the robot/FCI subnet (172.16.0.x).
+-->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain id="any">
+
+    <General>
+      <Interfaces>
+        <!-- Loopback: all mating-cell nodes are on this PC. -->
+        <NetworkInterface name="lo"/>
+        <!-- Uncomment for remote Foxglove over WiFi (this machine: wlp0s20f3).
+        <NetworkInterface name="wlp0s20f3"/>
+        -->
+        <!-- DO NOT add the FCI/robot NIC (this machine: eno1). -->
+      </Interfaces>
+      <!-- Loopback-only setups do not need multicast discovery storms. -->
+      <AllowMulticast>spdp</AllowMulticast>
+      <!-- Fewer, larger UDP packets per image frame = fewer scheduling
+           interrupts stealing time from the RT thread. -->
+      <MaxMessageSize>65500B</MaxMessageSize>
+      <FragmentSize>64000B</FragmentSize>
+    </General>
+
+    <Discovery>
+      <!-- REQUIRED when the only interface is "lo".
+
+           lo is not multicast-capable, so CycloneDDS logs
+             selected interface "lo" is not multicast-capable: disabling multicast
+           and SPDP falls back to UNICAST discovery. Unicast SPDP probes
+           localhost participant indices 0..MaxAutoParticipantIndex, whose
+           default is 9 - far too few here. One moveit.launch.py is already
+           ~9 participants (rviz2, robot_state_publisher, move_group,
+           ros2_control_node, joint_state_publisher, 3 spawners, gripper)
+           before vision_standalone and align_gui are counted. Participants
+           landing above the cap are simply never discovered, which surfaces
+           as move_group never receiving /joint_states - i.e. "no current
+           robot state" - with no error message anywhere.
+
+           Raising the cap and naming localhost explicitly makes unicast
+           discovery deterministic for a whole cell on one host. -->
+      <ParticipantIndex>auto</ParticipantIndex>
+      <MaxAutoParticipantIndex>80</MaxAutoParticipantIndex>
+      <Peers>
+        <Peer address="localhost"/>
+      </Peers>
+    </Discovery>
+
+    <Internal>
+      <!-- 8 MB socket receive buffer (default ~128 KB). A raw VGA colour
+           frame is ~0.9 MB; without headroom the kernel drops UDP
+           fragments -> DDS retransmits -> CPU/network spikes. -->
+      <SocketReceiveBufferSize min="8MB"/>
+
+      <!-- Tolerate minor loss without immediate retransmit storms. -->
+      <NackDelay>50ms</NackDelay>
+      <RetransmitMerging>Always</RetransmitMerging>
+      <MaxQueuedRexmitMessages>256</MaxQueuedRexmitMessages>
+      <MaxQueuedRexmitBytes>2MB</MaxQueuedRexmitBytes>
+
+      <!-- Absorb image-fragment bursts without backpressure. -->
+      <DeliveryQueueMaxSamples>256</DeliveryQueueMaxSamples>
+
+      <Watermarks>
+        <WhcHigh>4MB</WhcHigh>
+      </Watermarks>
+    </Internal>
+
+    <Sizing>
+      <ReceiveBufferSize>2MB</ReceiveBufferSize>
+    </Sizing>
+
+    <!-- Uncomment to debug DDS behaviour:
+    <Tracing>
+      <OutputFile>/tmp/cyclonedds_fr3.log</OutputFile>
+      <Verbosity>warning</Verbosity>
+    </Tracing>
+    -->
+
+  </Domain>
+</CycloneDDS>

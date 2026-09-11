@@ -1,0 +1,34 @@
+# Low-bandwidth RealSense D405 configuration for the FR3 mating cell.
+#
+# The mating pipeline needs ONLY:
+#   - color image + camera_info (ArUco detection)
+#   - (optional) aligned depth, ONLY if running connector_pose ICP refinement
+#
+# It does NOT need: point clouds, IR streams, high FPS, high resolution.
+# Every enabled stream is DDS traffic that competes with the 1 kHz FCI
+# loop (see cyclonedds_fr3.xml header). 640x480 @ 15 fps colour is ~13 MB/s
+# raw - fine on loopback, fatal over WiFi, unthinkable on the robot NIC.
+#
+# Usage:
+#   ros2 launch realsense2_camera rs_launch.py \
+#       config_file:="$(pwd)/tools/fr3/realsense_low_bw.yaml"
+#
+# For connector_pose (ICP): set enable_depth and align_depth.enable true.
+
+/**:
+  ros__parameters:
+    # --- Colour: the only stream the marker pipeline needs ---------------
+    enable_color: true
+    rgb_camera.color_profile: 640x480x15
+
+    # --- Everything else OFF ---------------------------------------------
+    enable_depth: false            # true only for connector_pose ICP
+    align_depth.enable: false      # true only for connector_pose ICP
+    depth_module.depth_profile: 640x480x15
+    pointcloud.enable: false       # NEVER enable on this cell
+    enable_infra1: false
+    enable_infra2: false
+    enable_sync: false
+
+    # Marker detection tolerates latency; favour fewer USB/CPU spikes.
+    # (D405 has no IMU/projector options to disable.)
