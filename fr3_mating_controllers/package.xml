@@ -11,7 +11,7 @@
     connector self-aligns into its socket under contact. Builds only where
     the franka_ros2 stack is present (see CMakeLists).
   </description>
-  <maintainer email="k.ural1@salford.ac.uk">Kadir Ural</maintainer>
+  <maintainer email="k.ural1@salford.ac.uk">Kaan Ural</maintainer>
   <license>Apache License 2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>

@@ -4,7 +4,7 @@
   <name>roscam</name>
   <version>0.1.0</version>
   <description>ArUco marker pose publisher for the connector-mating cell</description>
-  <maintainer email="k.ural1@salford.ac.uk">Kadir Ural</maintainer>
+  <maintainer email="k.ural1@salford.ac.uk">Kaan Ural</maintainer>
   <license>Apache License 2.0</license>
 
   <depend>rclpy</depend>

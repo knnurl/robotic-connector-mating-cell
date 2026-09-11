@@ -4,7 +4,7 @@
   <name>melfa_rv5as_masterclass</name>
   <version>1.1.0</version>
   <description>Connector-mating motion control for the MELFA RV-5AS (based on the ROS-I AP Annual Summit 2024 Masterclass)</description>
-  <maintainer email="k.ural1@salford.ac.uk">Kadir Ural</maintainer>
+  <maintainer email="k.ural1@salford.ac.uk">Kaan Ural</maintainer>
   <license>Apache License 2.0</license>
 
   <!-- Build tool dependencies -->

@@ -12,7 +12,7 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='Kadir Ural',
+    maintainer='Kaan Ural',
     maintainer_email='k.ural1@salford.ac.uk',
     description='ArUco marker pose publisher for the connector-mating cell. '
                 'Publishes the marker pose as PoseStamped in the camera '

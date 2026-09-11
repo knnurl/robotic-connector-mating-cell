@@ -9,7 +9,7 @@ what to do next. Companion doc: [SETUP_AND_CALIBRATION.md](SETUP_AND_CALIBRATION
 Vision-guided **connector mating** on a Mitsubishi **MELFA RV-5AS** cobot
 (ROS 2 Humble + MoveIt 2 + Pilz LIN planner) with an eye-in-hand RealSense
 **D405** and one ArUco marker (DICT_6X6_250, id 11, 21 mm) on the work
-surface near the connector. Owner: Kadir Ural (k.ural1@salford.ac.uk),
+surface near the connector. Owner: Kaan Ural (k.ural1@salford.ac.uk),
 University of Salford.
 
 Two-phase motion profile: fast approach to the target area, then a slow,
@@ -218,5 +218,5 @@ Status when parked (user said "forget franka testing"):
   clamps; keep every tunable in the params YAML, not in code.
 - Tests: `colcon test --packages-select melfa_rv5as_masterclass`; keep
   `mating_geometry.hpp` pure (no ROS node deps) so it stays testable.
-- Commits so far use `git -c user.name="Kadir Ural" -c
+- Commits so far use `git -c user.name="Kaan Ural" -c
   user.email="k.ural1@salford.ac.uk"` since no global git identity is set.
