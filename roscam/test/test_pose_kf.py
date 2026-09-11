@@ -4,7 +4,8 @@ import math
 import numpy as np
 import pytest
 
-from roscam.pose_kf import PoseKF, quat_from_rotvec, quat_multiply
+from roscam.pose_kf import (PoseKF, compose_pose, quat_from_rotvec,
+                            quat_multiply, quat_rotate)
 
 RATE = 30.0
 DT = 1.0 / RATE
@@ -105,6 +106,69 @@ def test_gate_loosens_with_covariance_growth():
     pos, q = trajectory(3.0)
     assert kf.update(*noisy(pos, q, rng)), \
         'valid measurement rejected after covariance growth'
+
+
+def test_compose_pose_matches_manual_chain():
+    """(a<-b) o (b<-c): rotate-then-translate must match manual composition."""
+    q_ab = quat_from_rotvec(np.array([0.0, 0.0, math.pi / 2.0]))  # 90 deg yaw
+    p_ab = np.array([1.0, 0.0, 0.0])
+    q_bc = quat_from_rotvec(np.array([0.2, -0.1, 0.3]))
+    p_bc = np.array([0.0, 0.5, 0.2])
+
+    p_ac, q_ac = compose_pose(p_ab, q_ab, p_bc, q_bc)
+
+    # +90 deg yaw maps (0, 0.5, 0.2) -> (-0.5, 0, 0.2), plus (1, 0, 0).
+    assert np.allclose(p_ac, [0.5, 0.0, 0.2], atol=1e-12)
+    assert np.allclose(q_ac, quat_multiply(q_ab, q_bc), atol=1e-12)
+    # Rotations compose: rotating a probe vector through q_ac must equal
+    # rotating it through q_bc then q_ab.
+    v = np.array([0.3, -0.7, 0.9])
+    assert np.allclose(quat_rotate(q_ac, v),
+                       quat_rotate(q_ab, quat_rotate(q_bc, v)), atol=1e-12)
+
+
+def test_fixed_frame_filtering_survives_camera_step():
+    """A static marker seen by a stepping eye-in-hand camera.
+
+    Filtered in the OPTICAL frame, a coarse robot step (5 cm between frames)
+    appears as marker motion and must trip the innovation gate on a good
+    detection. Filtered in a FIXED frame (measurements re-expressed via TF,
+    as cam_pub's filter_frame does), the same detections are constant and
+    every one must pass. This is the failure mode filter_frame exists for.
+    """
+    kf_optical = PoseKF()
+    kf_fixed = PoseKF()
+    rng = np.random.default_rng(6)
+
+    marker_fixed = np.array([0.40, 0.10, 0.0])
+    q_marker = np.array([0.0, 0.0, 0.0, 1.0])
+
+    def camera_pos(i):
+        return (np.array([0.0, 0.0, 0.30]) if i < 10
+                else np.array([0.05, 0.0, 0.30]))  # coarse-align step
+
+    optical_rejected = False
+    fixed_all_accepted = True
+    for i in range(20):
+        # Translation-only camera: optical measurement = marker - camera.
+        z_optical = marker_fixed - camera_pos(i) + rng.normal(0.0, POS_NOISE, 3)
+        z_fixed = z_optical + camera_pos(i)  # re-expressed in the fixed frame
+
+        if kf_optical.initialized:
+            kf_optical.predict(DT)
+        if not kf_optical.update(z_optical, q_marker):
+            optical_rejected = True
+
+        if kf_fixed.initialized:
+            kf_fixed.predict(DT)
+        if not kf_fixed.update(z_fixed, q_marker):
+            fixed_all_accepted = False
+
+    assert optical_rejected, \
+        'optical-frame filter accepted a 5 cm apparent jump - gate broken?'
+    assert fixed_all_accepted, \
+        'fixed-frame filter rejected a static-marker detection'
+    assert np.linalg.norm(kf_fixed.position - marker_fixed) < 0.005
 
 
 if __name__ == '__main__':

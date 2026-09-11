@@ -27,6 +27,27 @@ def quat_multiply(a, b):
     ])
 
 
+def quat_rotate(q, v):
+    """Rotate vector v by quaternion q (x, y, z, w)."""
+    qv = np.asarray(q[:3], dtype=float)
+    w = float(q[3])
+    v = np.asarray(v, dtype=float)
+    t = 2.0 * np.cross(qv, v)
+    return v + w * t + np.cross(qv, t)
+
+
+def compose_pose(p_ab, q_ab, p_bc, q_bc):
+    """Compose two poses: (a<-b) o (b<-c) -> (a<-c).
+
+    Each pose is (translation, quaternion (x, y, z, w)) of a child frame
+    expressed in a parent frame. Used to re-express an optical-frame marker
+    pose in a fixed frame given TF fixed<-optical.
+    """
+    p = np.asarray(p_ab, dtype=float) + quat_rotate(q_ab, p_bc)
+    q = quat_multiply(np.asarray(q_ab, dtype=float), np.asarray(q_bc, dtype=float))
+    return p, q / np.linalg.norm(q)
+
+
 def quat_from_rotvec(v):
     angle = float(np.linalg.norm(v))
     if angle < 1e-12:

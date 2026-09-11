@@ -30,7 +30,7 @@ from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile
 from sensor_msgs.msg import Image
-from std_msgs.msg import Float64, String
+from std_msgs.msg import Bool, Float64, String
 from std_srvs.srv import Trigger
 
 DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -85,6 +85,7 @@ class PanelNode(Node):
         self.cfg = cfg
         self.lock = threading.Lock()
         self.phase = '---'
+        self.paused = False
         self.errors = {
             'pos': collections.deque(maxlen=2000),   # (t, mm)
             'rot': collections.deque(maxlen=2000),   # (t, deg)
@@ -106,6 +107,11 @@ class PanelNode(Node):
                              durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(String, cfg['phase_topic'],
                                  self._phase_cb, latched)
+        # Operational pause is a separate latched Bool; the phase topic
+        # always carries the real state-machine phase.
+        self.create_subscription(Bool,
+                                 cfg.get('paused_topic', '/mating/paused'),
+                                 self._paused_cb, latched)
         self.create_subscription(Float64, cfg['error_pos_topic'],
                                  lambda m: self._err_cb('pos', m), 10)
         self.create_subscription(Float64, cfg['error_rot_topic'],
@@ -117,6 +123,11 @@ class PanelNode(Node):
     def _phase_cb(self, msg):
         with self.lock:
             self.phase = msg.data
+            self.last_msg_time = time.monotonic()
+
+    def _paused_cb(self, msg):
+        with self.lock:
+            self.paused = bool(msg.data)
             self.last_msg_time = time.monotonic()
 
     def _err_cb(self, key, msg):
@@ -376,12 +387,17 @@ class PanelUI:
         t = THEME
         with self.node.lock:
             phase = self.node.phase
+            paused = self.node.paused
             image = self.node.image_rgb
             stale = time.monotonic() - self.node.last_msg_time > \
                 float(self.cfg.get('stale_after_s', 3.0))
             latest = {k: (d[-1][1] if d else None)
                       for k, d in self.node.errors.items()}
 
+        # Compose the display state: the pause flag overlays the phase.
+        # (phase == 'PAUSED' kept for controllers predating /mating/paused.)
+        if paused and phase != '---':
+            phase = 'PAUSED'
         self.draw_phase(phase, stale)
 
         for key, p in self.plots.items():

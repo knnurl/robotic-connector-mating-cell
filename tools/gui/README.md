@@ -4,19 +4,21 @@ The controller publishes machine-readable state (no GUI required to consume it):
 
 | Topic | Type | Content |
 |---|---|---|
-| `/mating/phase` | `std_msgs/String` | Current phase (latched — late joiners get it) |
+| `/mating/phase` | `std_msgs/String` | Current state-machine phase (latched — late joiners get it) |
+| `/mating/paused` | `std_msgs/Bool` | Operational pause flag (latched; separate from the phase) |
 | `/mating/error_mm` | `std_msgs/Float64` | Live position error, mm |
 | `/mating/error_deg` | `std_msgs/Float64` | Live rotation error, deg |
-| `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | Health: phase, vision freshness, plan failures, insertion enable |
+| `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | Health: phase, paused, vision freshness, plan failures, insertion enable |
 
 Operational services (all `std_srvs/Trigger` on `/connector_mating_node/...`):
 
 | Service | Effect |
 |---|---|
 | `stop` | Halt the in-flight trajectory **immediately** and latch FAULT (reset to recover) |
-| `pause` | Halt immediately and hold position; sequence freezes (phase shows PAUSED) |
-| `resume` | Continue after a pause (alignment is re-verified before any insertion) |
-| `reset` | Unlatch FAULT/MATED/pause and restart at WAIT_FOR_VISION |
+| `pause` | Halt immediately and hold position; sequence freezes (`/mating/paused` = true) |
+| `resume` | Continue after a pause (alignment is re-verified; a paused INSERT stroke resumes for the remaining depth only) |
+| `reset` | Unlatch FAULT/MATED/pause and restart at WAIT_FOR_VISION. **Refused** if FAULT interrupted an insertion stroke — retract first |
+| `retract` | FAULT only: pull straight back along the tool axis to the stroke-start (standoff) pose, then restart at WAIT_FOR_VISION |
 
 Runtime toggle: `enable_insertion` bool parameter on `/connector_mating_node`
 (read fresh each cycle, so flipping it takes effect immediately).

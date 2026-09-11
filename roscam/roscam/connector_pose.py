@@ -15,21 +15,35 @@ controller's connector_offset_* parameters stay zero.
 If ICP fails its quality gates (occlusion, bad depth), the node publishes
 the marker-derived prior instead (never worse than marker-only behaviour)
 and logs the degradation.
+
+Frame sources (`source` parameter), mirroring cam_pub:
+  topic      (default) aligned depth arrives as a ROS topic - unchanged.
+  realsense  capture aligned depth IN-PROCESS via pyrealsense2: the depth
+             stream (~18 MB/s) never enters the DDS graph. NOTE: only one
+             process may own the camera - if cam_pub also needs frames,
+             use vision_standalone.py, which runs both pipelines on a
+             single capture.
+  external   an embedder injects intrinsics (set_intrinsics) and frames
+             (process_depth); see vision_standalone.py.
 """
 
+import threading
 import time
 
 import numpy as np
 import rclpy
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped
+from rclpy.duration import Duration
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image
+from std_msgs.msg import Header
 
 from roscam.handeye_calib import matrix_to_quat, quat_to_matrix, to_homogeneous
 from roscam.icp import (crop_points, depth_to_points, icp, load_stl,
                         sample_mesh, voxel_downsample)
 from roscam.pose_kf import PoseKF
+from roscam.rs_capture import RsCapture
 
 
 def rpy_deg_to_matrix(roll, pitch, yaw):
@@ -43,8 +57,8 @@ def rpy_deg_to_matrix(roll, pitch, yaw):
 
 
 class ConnectorPoseNode(Node):
-    def __init__(self):
-        super().__init__('connector_pose')
+    def __init__(self, **node_kwargs):
+        super().__init__('connector_pose', **node_kwargs)
 
         self.declare_parameter('template_stl', '')
         self.declare_parameter('template_points', 1500)
@@ -69,6 +83,13 @@ class ConnectorPoseNode(Node):
         self.declare_parameter('max_refine_translation_m', 0.02)
         self.declare_parameter('process_every_n', 5)
         self.declare_parameter('fallback_to_prior', True)
+        # Frame source: 'topic' | 'realsense' | 'external' (see module doc).
+        self.declare_parameter('source', 'topic')
+        self.declare_parameter('optical_frame_id', 'camera_color_optical_frame')
+        self.declare_parameter('capture_width', 640)
+        self.declare_parameter('capture_height', 480)
+        self.declare_parameter('capture_fps', 15)
+        self.declare_parameter('capture_latency_s', 0.02)
 
         template_path = str(self.get_parameter('template_stl').value)
         if not template_path:
@@ -116,14 +137,39 @@ class ConnectorPoseNode(Node):
 
         self.pose_pub = self.create_publisher(PoseStamped, '/connector/pose', 10)
         self.create_subscription(
-            CameraInfo, str(self.get_parameter('camera_info_topic').value),
-            self.info_cb, 10)
-        self.create_subscription(
             PoseStamped, str(self.get_parameter('marker_pose_topic').value),
             self.marker_cb, 10)
-        self.create_subscription(
-            Image, str(self.get_parameter('depth_topic').value),
-            self.depth_cb, 5)
+
+        self.source = str(self.get_parameter('source').value)
+        if self.source not in ('topic', 'realsense', 'external'):
+            raise RuntimeError(f"source must be topic|realsense|external, got '{self.source}'")
+        self.optical_frame_id = str(self.get_parameter('optical_frame_id').value)
+        self.capture_latency = float(self.get_parameter('capture_latency_s').value)
+
+        self._capture = None
+        self._capture_thread = None
+        self._stop_capture = threading.Event()
+        if self.source == 'topic':
+            self.create_subscription(
+                CameraInfo, str(self.get_parameter('camera_info_topic').value),
+                self.info_cb, 10)
+            self.create_subscription(
+                Image, str(self.get_parameter('depth_topic').value),
+                self.depth_cb, 5)
+        elif self.source == 'realsense':
+            self._capture = RsCapture(
+                width=int(self.get_parameter('capture_width').value),
+                height=int(self.get_parameter('capture_height').value),
+                fps=int(self.get_parameter('capture_fps').value),
+                enable_depth=True)
+            intr = self._capture.start()
+            self.set_intrinsics(intr.fx, intr.fy, intr.cx, intr.cy)
+            self._capture_thread = threading.Thread(target=self._capture_loop,
+                                                    daemon=True)
+            self._capture_thread.start()
+            self.get_logger().info('In-process RealSense depth capture - '
+                                   'no depth topics on the graph.')
+        # 'external': embedder calls set_intrinsics() + process_depth().
 
     def info_cb(self, msg):
         if self.intrinsics is None:
@@ -131,12 +177,48 @@ class ConnectorPoseNode(Node):
             self.intrinsics = (k[0, 0], k[1, 1], k[0, 2], k[1, 2])
             self.get_logger().info('Camera intrinsics received.')
 
+    def set_intrinsics(self, fx, fy, cx, cy):
+        """Intrinsics from an SDK/embedder instead of camera_info."""
+        self.intrinsics = (float(fx), float(fy), float(cx), float(cy))
+
+    def self_stamped_header(self):
+        h = Header()
+        h.stamp = (self.get_clock().now()
+                   - Duration(seconds=self.capture_latency)).to_msg()
+        h.frame_id = self.optical_frame_id
+        return h
+
+    def shutdown_capture(self):
+        self._stop_capture.set()
+        if self._capture_thread is not None:
+            self._capture_thread.join(timeout=2.0)
+        if self._capture is not None:
+            self._capture.stop()
+
+    def _capture_loop(self):
+        while rclpy.ok() and not self._stop_capture.is_set():
+            frame = self._capture.wait_frame(timeout_s=1.0)
+            if frame is None or frame.depth_m is None:
+                continue
+            try:
+                self.process_depth(frame.depth_m, self.self_stamped_header())
+            except Exception as e:
+                self.get_logger().error(f'depth processing failed: {e}',
+                                        throttle_duration_sec=5.0)
+
     def marker_cb(self, msg):
         p, q = msg.pose.position, msg.pose.orientation
         T = to_homogeneous(quat_to_matrix(q.x, q.y, q.z, q.w), [p.x, p.y, p.z])
         self.latest_marker = (T, time.monotonic())
 
     def depth_cb(self, msg):
+        depth = self.bridge.imgmsg_to_cv2(msg)
+        if depth.dtype == np.uint16:
+            depth = depth.astype(np.float32) * 1e-3  # mm -> m
+        self.process_depth(depth.astype(np.float32), msg.header)
+
+    def process_depth(self, depth_m, header):
+        """Gated ICP refinement for one aligned-depth frame (float32, m)."""
         self.frame_count += 1
         if (self.frame_count % self.every_n or self.intrinsics is None
                 or self.latest_marker is None):
@@ -147,16 +229,12 @@ class ConnectorPoseNode(Node):
 
         prior = T_cam_marker @ self.T_marker_connector
 
-        depth = self.bridge.imgmsg_to_cv2(msg)
-        if depth.dtype == np.uint16:
-            depth = depth.astype(np.float32) * 1e-3  # mm -> m
-        points = depth_to_points(depth.astype(np.float32), *self.intrinsics,
-                                 stride=self.stride)
+        points = depth_to_points(depth_m, *self.intrinsics, stride=self.stride)
         scene = crop_points(points, prior[:3, 3], self.crop_radius)
 
         refined, ok, why = self.refine(scene, prior)
         if ok:
-            stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            stamp = header.stamp.sec + header.stamp.nanosec * 1e-9
             dt = 0.0 if self.last_icp_stamp is None else stamp - self.last_icp_stamp
             self.last_icp_stamp = stamp
             pos = refined[:3, 3]
@@ -172,9 +250,9 @@ class ConnectorPoseNode(Node):
                     self.kf.reset()
                     self.kf.update(pos, quat)
                     self.kf_rejects = 0
-            self.publish(msg.header, self.kf.position, self.kf.quaternion)
+            self.publish(header, self.kf.position, self.kf.quaternion)
         elif self.fallback:
-            self.publish(msg.header, prior[:3, 3], matrix_to_quat(prior[:3, :3]))
+            self.publish(header, prior[:3, 3], matrix_to_quat(prior[:3, :3]))
             self.get_logger().warn(f'ICP fallback to marker prior: {why}',
                                    throttle_duration_sec=2.0)
 
@@ -221,6 +299,7 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        node.shutdown_capture()
         node.destroy_node()
         rclpy.shutdown()
 

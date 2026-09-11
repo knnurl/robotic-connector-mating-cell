@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>fr3_mating_controllers</name>
+  <version>0.1.0</version>
+  <description>
+    Cartesian-impedance insertion backend for the connector-mating cell:
+    a franka_ros2 ControllerInterface plugin running the 1 kHz torque loop
+    tau = J^T (K dx - D v) + nullspace + coriolis, with tool-frame
+    stiffness (soft lateral X/Y + roll/pitch, firm along tool Z) so the
+    connector self-aligns into its socket under contact. Builds only where
+    the franka_ros2 stack is present (see CMakeLists).
+  </description>
+  <maintainer email="k.ural1@salford.ac.uk">Kadir Ural</maintainer>
+  <license>Apache License 2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>controller_interface</depend>
+  <depend>hardware_interface</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>geometry_msgs</depend>
+  <depend>eigen</depend>
+  <!-- Robot-specific: provides the robot_model/robot_state semantic
+       state interfaces (Jacobian, coriolis, EE pose from libfranka). -->
+  <depend>franka_semantic_components</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

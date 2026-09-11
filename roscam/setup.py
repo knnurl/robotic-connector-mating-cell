@@ -24,6 +24,8 @@ setup(
             'cam_pub = roscam.cam_pub:main',
             'handeye_calib = roscam.handeye_calib:main',
             'connector_pose = roscam.connector_pose:main',
+            'vision_standalone = roscam.vision_standalone:main',
+            'teach_offsets = roscam.teach_offsets:main',
         ],
     },
 )

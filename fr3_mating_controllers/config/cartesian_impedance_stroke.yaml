@@ -1,0 +1,47 @@
+# CartesianImpedanceStrokeController tuning - the self-aligning insertion
+# profile. Load via the spawner:
+#
+#   ros2 run controller_manager spawner cartesian_impedance_stroke_controller \
+#       --inactive --param-file <this file>
+#
+# (--inactive: the mating controller activates it only for the INSERT
+# stroke and hands back to the trajectory controller afterwards.)
+#
+# TUNING GUIDE (in this order, on the real cell):
+#  1. float_mode: true -> arm must free-float smoothly under hand pressure.
+#     This is the RT-loop proof: any jitter/reflex here is a network/RT
+#     problem (run tools/fr3/fr3_preflight.sh), not a gain problem.
+#  2. float_mode: false, hold test: push the TCP laterally - it should
+#     feel like a soft spring (~150 N/m: 15 N gives ~10 cm) and snap back
+#     critically damped (no oscillation). Push along tool Z - noticeably
+#     stiffer (~800 N/m).
+#  3. Lateral stiffness sets self-alignment: TOO SOFT and the stroke stalls
+#     on friction; TOO STIFF and it fights the chamfer instead of sliding
+#     in. Start 150, adjust by +/-50. Rotational r/p likewise (10 Nm/rad).
+#  4. Tool-Z stiffness sets insertion drive: it must overcome mating
+#     friction at a lag of F/k (800 N/m at 8 N contact = 10 mm lag - the
+#     equilibrium leads the flange by that much at full preload).
+#  5. damping_ratio 1.0 = critical. Drop toward 0.7 only if insertion
+#     feels sluggish; raise above 1.0 if contact chatter appears.
+
+cartesian_impedance_stroke_controller:
+  ros__parameters:
+    type: fr3_mating_controllers/CartesianImpedanceStrokeController
+    arm_id: fr3
+
+    float_mode: false
+
+    # Tool-frame stiffness: soft lateral X/Y + roll/pitch (self-align),
+    # firm along tool Z (the stroke axis).
+    k_pos_tool: [150.0, 150.0, 800.0]   # N/m
+    k_rot_tool: [10.0, 10.0, 20.0]      # Nm/rad (yaw stiffer: keying)
+    damping_ratio: 1.0                  # D = 2*zeta*sqrt(K), per axis
+    nullspace_stiffness: 5.0            # Nm/rad toward the activation posture
+
+    # Equilibrium slew limits (fr3_backend pattern): topic jumps become
+    # bounded ramps. Also caps the effective stroke speed.
+    setpoint_slew_mps: 0.05
+    setpoint_slew_rps: 0.5
+
+    # Torque-rate saturation per 1 ms cycle (FCI discontinuity limit).
+    tau_rate_limit: 1.0

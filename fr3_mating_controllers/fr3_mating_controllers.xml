@@ -1,0 +1,12 @@
+<library path="fr3_mating_controllers">
+  <class name="fr3_mating_controllers/CartesianImpedanceStrokeController"
+         type="fr3_mating_controllers::CartesianImpedanceStrokeController"
+         base_class_type="controller_interface::ControllerInterface">
+    <description>
+      Cartesian-impedance equilibrium tracker for the connector insertion
+      stroke: tool-frame stiffness (soft lateral, firm axial), slew-limited
+      setpoint from ~/equilibrium_pose, nullspace posture hold, coriolis
+      feed-forward. float_mode:=true sends coriolis only (commissioning).
+    </description>
+  </class>
+</library>

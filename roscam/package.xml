@@ -10,9 +10,14 @@
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>tf2_ros</depend>
   <depend>cv_bridge</depend>
   <exec_depend>python3-opencv</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
+  <!-- Optional, imported lazily: `source:=realsense` / vision_standalone
+       need `pip install pyrealsense2` (in-process capture keeps image
+       traffic off the DDS graph). Topic mode works without it. -->
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

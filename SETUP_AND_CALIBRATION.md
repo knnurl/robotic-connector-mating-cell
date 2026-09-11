@@ -121,7 +121,26 @@ The controller aims at a point defined **in the marker frame**
 (`connector_offset_x/y/z`, marker X/Y in-plane, Z out of the surface), with
 tool yaw `tool_yaw_offset_deg`. Defaults are all zero = marker centre.
 
-Teach procedure (uses the built-in calibration mode):
+**Automatic (recommended, needs the connector CAD STL):** if you run the
+`connector_pose` ICP node (§6), the offsets can be taught in one shot
+instead of by caliper iteration — ICP already knows where the connector is
+relative to the marker.
+
+1. In the params file set `enable_insertion: false`, launch the full
+   system (§4), let the robot hover at standoff with the marker **and**
+   connector in view.
+2. Run `connector_pose` with your STL and, critically,
+   `-p fallback_to_prior:=false` (a fallback pose *is* the rough prior, so
+   teaching from it would echo your guess back).
+3. `ros2 run roscam teach_offsets` — it pairs `/aruco/pose_raw` with
+   `/connector/pose`, averages ~100 samples, and prints a paste-ready
+   block of `connector_offset_x/y/z` + `tool_yaw_offset_deg` (and the
+   matching `marker_t_connector_xyz` for `connector_pose` itself). It warns
+   if the sample spread is large (unstable ICP → fix the depth data first).
+4. Paste into the params file; still set `insertion_depth_m` per step 4
+   below (depth is a stroke length, not an offset).
+
+**Manual (uses the built-in calibration mode, no STL needed):**
 
 1. In the params file set `enable_insertion: false` and a generous
    `standoff_height_m` (e.g. `0.10`).
@@ -191,6 +210,24 @@ ros2 run roscam cam_pub
 ros2 launch melfa_rv5as_masterclass move_l.launch.py
 ```
 
+**Shortcut — terminals 4–6 in one:** the consolidated cell launch starts
+the hand-eye TF, vision, and controller together (the robot side, 1–2,
+stays separate):
+
+```bash
+ros2 launch melfa_rv5as_masterclass cell.launch.py \
+  handeye_xyz:="<x> <y> <z>" handeye_quat:="<qx> <qy> <qz> <qw>"
+# in-process capture (no image topics) + fixed-frame KF + depth-ICP:
+ros2 launch melfa_rv5as_masterclass cell.launch.py \
+  vision_source:=realsense filter_frame:=rv5as_base \
+  template_stl:=/path/connector.stl
+```
+
+`handeye_xyz`/`handeye_quat` are **required** (no default — a guessed TF is
+the dominant roll/pitch error source); pass the `handeye_calib` output.
+Setting `template_stl` also brings up `connector_pose` — point the
+controller at it with `pose_topic: /connector/pose`.
+
 ### Pre-flight checks
 
 ```bash
@@ -214,14 +251,16 @@ Watch the controller log: it prints the phase and the live 6-DOF error
 ### Monitoring & GUI
 
 The controller publishes machine-readable state: `/mating/phase` (latched
-String), `/mating/error_mm`, `/mating/error_deg`, and `/diagnostics`.
+String, always the real state-machine phase), `/mating/paused` (latched
+Bool — the operational pause flag is separate from the phase),
+`/mating/error_mm`, `/mating/error_deg`, and `/diagnostics`.
 Three ready-made front-ends live in [tools/gui/](tools/gui/README.md):
 a Foxglove Studio layout (engineering), a zero-install tkinter operator
 panel with YAML-configurable buttons/tolerances (demos/teaching), and an
 rqt recipe. `enable_insertion` is now read every cycle, so toggling it
 from a GUI or `ros2 param set` takes effect immediately.
 
-### Operator reset
+### Operator reset & retract
 
 `MATED` and `FAULT` are latched — the controller commands no motion until
 reset. After removing the mated connector / clearing the fault:
@@ -232,6 +271,21 @@ ros2 service call /connector_mating_node/reset std_srvs/srv/Trigger
 
 The sequence restarts at `WAIT_FOR_VISION`.
 
+**If the FAULT interrupted an insertion stroke** (STOP pressed or planning
+failed mid-INSERT), the tool may still be partially engaged, so `reset` is
+**refused**: restarting the sequence would command lateral alignment motion
+while inside the connector. Pull straight back first:
+
+```bash
+ros2 service call /connector_mating_node/retract std_srvs/srv/Trigger
+```
+
+Retract re-traces the stroke along the tool axis back to the recorded
+standoff pose (orientation locked, `insert_speed`), clears the latch, and
+restarts at `WAIT_FOR_VISION`. It is only accepted in `FAULT`. Both GUIs
+have a Retract button. Pausing mid-INSERT is also safe: the resumed stroke
+covers only the remaining depth.
+
 ---
 
 ## 5. Parameter reference (`config/rv5as_params.yaml`)
@@ -240,9 +294,11 @@ The sequence restarts at `WAIT_FOR_VISION`.
 |---|---|---|
 | `planning_group` | `rv5as` | MoveIt group |
 | `EEF_FRAME_ID` | `rv5as_default_tcp` | TCP link used for servoing |
-| `pose_topic` | `/aruco/pose` | Marker pose input |
+| `pose_topic` | `/aruco/pose` | Marker pose input (filtered) |
+| `raw_pose_topic` | `/aruco/pose_raw` | Unpredicted detections; insertion arming requires one this fresh (predictions steer but never arm the stroke) |
 | `control_period_s` | 0.4 | State-machine cycle time |
-| `vision_timeout_s` | 0.6 | Pose older than this = stale → hold |
+| `vision_timeout_s` | 0.6 | Pose older than this = stale → hold. Staleness uses the message header stamp (arrival time only for zero/skewed stamps) |
+| `tf_lookup_timeout_s` | 0.1 | Wait for TF at the image timestamp (correct for a moving camera) before falling back to the latest transform |
 | `planning_pipeline` / `planner_id` | pilz / `LIN` | Motion backend (§6) |
 | `accel_scaling` | 0.1 | Global acceleration scaling |
 | `enable_insertion` | true | false = calibration mode, stop at standoff |
@@ -260,15 +316,53 @@ The sequence restarts at `WAIT_FOR_VISION`.
 | `insert_speed` | 0.03 | Velocity scaling, insertion stroke |
 | `max_joint_jump_rad` | 0.8 | Reject plans with joint jumps (IK-flip guard) |
 | `max_consecutive_plan_failures` | 5 | Then FAULT (hold) |
+| `wrench_topic` | `''` | WrenchStamped source → force-aware insertion. `''` = blind stroke (default). Axial reaction ≥ `contact_force_n` = contact: **MATED** if ≥ `min_contact_depth_m` travelled, jam → FAULT (retract) if earlier; lateral ≥ `max_lateral_force_n` = snag → FAULT. FR3: the estimated external wrench topic works out of the box |
+| `contact_force_n` / `max_lateral_force_n` | 8 / 12 | Contact / snag thresholds (N); tune per connector |
+| `min_contact_depth_m` | 0 | Contact earlier than this = obstruction, not seating |
+| `insert_planner` | `pipeline` | `cartesian` = `computeCartesianPath` stroke (Pilz-less robots, §6) |
+| `align_mode` | `step` | `servo` = ALIGN publishes twists for moveit_servo (continuous tracking); INSERT stays a discrete stroke. Velocity cap = step clamps ÷ `control_period_s` |
 
 Vision node (`roscam cam_pub`): `image_topic`, `camera_info_topic`,
 `marker_id` (11), `marker_size_m` (0.021), `aruco_dictionary`
-(`DICT_6X6_250`), `max_reprojection_error_px` (2.0),
+(`DICT_6X6_250`), `board_markers_x`/`board_markers_y` (1×1 = single marker;
+set >1 for a grid **board** of ids `marker_id..marker_id+N−1` —
+occlusion-robust and more accurate, the published pose is the board centre
+so taught offsets are unchanged; print it with `cv2.aruco.GridBoard`),
+`board_marker_separation_m` (0.005), `max_reprojection_error_px` (2.0),
 `publish_debug_image` (true). Kalman filter: `sigma_accel` (0.08 m/s²),
 `sigma_rot_rate_deg` (15), `meas_std_pos` (0.002 m), `meas_std_rot_deg`
 (1.0), `gate_sigma` (3.0), `max_prediction_s` (0.3 — how long predicted
 poses bridge a detection dropout before the node goes silent and the
-controller holds), `rejects_before_reacquire` (5).
+controller holds), `rejects_before_reacquire` (5), `filter_frame` ('' —
+recommended: set to the robot base frame, e.g. `rv5as_base`. The optical
+frame moves with the arm, so robot steps look like marker motion to the
+filter and can trip its gate; with `filter_frame` set, detections are
+re-expressed via TF at the image stamp and filtered where the marker is
+truly static. `/aruco/pose` is then published in that frame — the
+controller handles any frame. `/aruco/pose_raw` always stays optical for
+the hand-eye tool. Requires the TF chain, so leave it '' during the
+initial hand-eye calibration itself).
+
+Timing budget: predicted poses can bridge `max_prediction_s`, and the
+controller tolerates `vision_timeout_s` on top, so keep
+`control_period_s × align_hold_cycles` comfortably larger than
+`vision_timeout_s` (the controller warns at startup otherwise). Arming is
+additionally gated on `raw_pose_topic`, so a prediction can never commit
+the insertion stroke.
+
+**Frame source (`source` parameter, cam_pub and connector_pose):**
+`topic` (default — images from a camera driver via ROS topics, the wiring
+described above), `realsense` (capture **in-process** via pyrealsense2:
+no image/depth ever enters the DDS graph, only poses — the bandwidth fix
+for robots with a 1 kHz network control loop, e.g. FR3; needs
+`pip install pyrealsense2`; intrinsics come from the SDK, frames are
+stamped node-time − `capture_latency_s`, debug image throttled to
+`debug_max_hz`), or `external` (embedder-fed). Only ONE process may own
+the camera — when both the marker pipeline and ICP refinement are needed
+out-of-ROS, run `ros2 run roscam vision_standalone`, which owns the camera
+once and runs both on the same frames (marker-only without `template_stl`;
+all cam_pub/connector_pose parameters apply). In `realsense`/standalone
+mode, skip the camera-driver terminal entirely.
 
 ---
 
@@ -308,12 +402,13 @@ commanded pose — INSERT especially, since it is the mating stroke.
 - **Pilz `LIN`** (default): guaranteed linear TCP path + orientation slerp.
   Available on many industrial drivers (MELFA, UR, Kuka, Fanuc MoveIt
   configs).
-- **No Pilz?** Set `planning_pipeline: ompl` and leave `planner_id` empty.
-  Alignment still converges (steps are small, so paths are near-linear), but
-  the insertion stroke is not path-guaranteed — reduce `fine_pos_tol_m`,
-  `insertion_depth_m`, and speeds, and validate in fake hardware first. A
-  `computeCartesianPath` fallback is the proper fix if you need a
-  Pilz-less deployment; ask for it.
+- **No Pilz?** Set `planning_pipeline: ompl` (empty `planner_id`) for the
+  alignment steps — they converge fine (small steps are near-linear) — and
+  set `insert_planner: cartesian` so the **insertion stroke** uses
+  `computeCartesianPath`: an interpolated straight Cartesian path,
+  time-parameterized at `insert_speed`. This is the path-guaranteed
+  Pilz-less configuration (used by the FR3 profile in
+  `tools/fr3/fr3_params.yaml`). Still validate in fake hardware first.
 
 ---
 

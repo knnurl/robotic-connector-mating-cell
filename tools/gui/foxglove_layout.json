@@ -50,6 +50,26 @@
         }
       ]
     },
+    "Indicator!paused": {
+      "path": "/mating/paused.data",
+      "style": "background",
+      "fallbackColor": "#585858",
+      "fallbackLabel": "no data",
+      "rules": [
+        {
+          "operator": "=",
+          "rawValue": "true",
+          "color": "#4682b4",
+          "label": "PAUSED - resume to continue"
+        },
+        {
+          "operator": "=",
+          "rawValue": "false",
+          "color": "#3a3a3a",
+          "label": "running"
+        }
+      ]
+    },
     "Plot!errors": {
       "title": "Alignment error",
       "paths": [
@@ -112,6 +132,13 @@
       "layout": "vertical",
       "buttonText": "Resume",
       "buttonColor": "#2e8b57"
+    },
+    "CallService!retract": {
+      "serviceName": "/connector_mating_node/retract",
+      "requestPayload": "{}",
+      "layout": "vertical",
+      "buttonText": "Retract (recover from FAULT mid-insert)",
+      "buttonColor": "#b8860b"
     }
   },
   "globalVariables": {},
@@ -130,26 +157,36 @@
     },
     "second": {
       "direction": "column",
-      "splitPercentage": 25,
+      "splitPercentage": 20,
       "first": "Indicator!phase",
       "second": {
         "direction": "column",
-        "splitPercentage": 40,
-        "first": "DiagnosticStatusPanel!diag",
+        "splitPercentage": 10,
+        "first": "Indicator!paused",
         "second": {
           "direction": "column",
-          "splitPercentage": 50,
-          "first": {
-            "direction": "row",
-            "splitPercentage": 50,
-            "first": "CallService!stop",
-            "second": "CallService!reset"
-          },
+          "splitPercentage": 40,
+          "first": "DiagnosticStatusPanel!diag",
           "second": {
-            "direction": "row",
-            "splitPercentage": 50,
-            "first": "CallService!pause",
-            "second": "CallService!resume"
+            "direction": "column",
+            "splitPercentage": 34,
+            "first": {
+              "direction": "row",
+              "splitPercentage": 50,
+              "first": "CallService!stop",
+              "second": "CallService!reset"
+            },
+            "second": {
+              "direction": "column",
+              "splitPercentage": 50,
+              "first": {
+                "direction": "row",
+                "splitPercentage": 50,
+                "first": "CallService!pause",
+                "second": "CallService!resume"
+              },
+              "second": "CallService!retract"
+            }
           }
         }
       }

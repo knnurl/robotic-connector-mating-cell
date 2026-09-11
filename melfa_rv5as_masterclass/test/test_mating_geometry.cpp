@@ -8,7 +8,9 @@
 using mating_geometry::clamped_target;
 using mating_geometry::insertion_target;
 using mating_geometry::pose_error;
+using mating_geometry::servo_twist;
 using mating_geometry::standoff_goal;
+using mating_geometry::wrench_axial_lateral;
 
 namespace
 {
@@ -187,6 +189,26 @@ TEST(InsertionTarget, DescendsAlongToolAxisWithOrientationLocked)
                 0.0, 1e-9);
 }
 
+TEST(InsertionTarget, NegativeDepthRetractsAlongToolAxis)
+{
+    // Retract = insertion with negative depth: straight back UP the tool
+    // axis, orientation locked. With the tool pointing down (tool Z =
+    // world -Z), a -0.04 stroke must INCREASE world z by 0.04.
+    const tf2::Transform current = make_pose(0.4, 0.1, 0.11, M_PI, 0.0, 0.0);
+    const auto target = insertion_target(current, -0.04);
+
+    EXPECT_NEAR(target.getOrigin().x(), 0.4, 1e-9);
+    EXPECT_NEAR(target.getOrigin().y(), 0.1, 1e-9);
+    EXPECT_NEAR(target.getOrigin().z(), 0.15, 1e-9);
+    EXPECT_NEAR(target.getRotation().angleShortestPath(current.getRotation()),
+                0.0, 1e-9);
+
+    // Retract must exactly invert a partial insertion from the same pose.
+    const auto inserted = insertion_target(current, 0.04);
+    const auto back = insertion_target(inserted, -0.04);
+    EXPECT_NEAR((back.getOrigin() - current.getOrigin()).length(), 0.0, 1e-9);
+}
+
 TEST(InsertionTarget, FollowsTiltedTool)
 {
     // Tool tilted 10 deg: the stroke must follow the tilted axis, not world Z.
@@ -198,6 +220,71 @@ TEST(InsertionTarget, FollowsTiltedTool)
         tf2::quatRotate(current.getRotation(), tf2::Vector3(0, 0, 1));
     const tf2::Vector3 expected = current.getOrigin() + tool_z * 0.1;
     EXPECT_NEAR((target.getOrigin() - expected).length(), 0.0, 1e-9);
+}
+
+TEST(ServoTwist, ProportionalInsideClampsZeroAtGoal)
+{
+    // Small error: exact P-law, no clamping.
+    tf2::Vector3 lin, ang;
+    tf2::Quaternion rot_err;
+    rot_err.setRPY(0.0, 0.0, 0.1);  // 0.1 rad yaw error
+    servo_twist(tf2::Vector3(0.01, 0.0, 0.0), rot_err,
+                2.0, 1.5, 0.05, 0.5, lin, ang);
+    EXPECT_NEAR(lin.x(), 0.02, 1e-9);
+    EXPECT_NEAR(lin.y(), 0.0, 1e-9);
+    EXPECT_NEAR(ang.z(), 0.15, 1e-6);
+
+    // Zero error: exactly zero twist (the hold/deadman command).
+    servo_twist(tf2::Vector3(0, 0, 0), tf2::Quaternion::getIdentity(),
+                2.0, 1.5, 0.05, 0.5, lin, ang);
+    EXPECT_EQ(lin.length(), 0.0);
+    EXPECT_EQ(ang.length(), 0.0);
+}
+
+TEST(ServoTwist, ClampsMagnitudePreservesDirection)
+{
+    tf2::Vector3 lin, ang;
+    tf2::Quaternion rot_err;
+    rot_err.setRPY(0.0, 0.0, 2.0);  // huge yaw error
+    const tf2::Vector3 err(0.3, 0.4, 0.0);  // 0.5 m error
+    servo_twist(err, rot_err, 2.0, 1.5, 0.05, 0.5, lin, ang);
+    EXPECT_NEAR(lin.length(), 0.05, 1e-9);
+    EXPECT_NEAR(lin.normalized().dot(err.normalized()), 1.0, 1e-9);
+    EXPECT_NEAR(ang.length(), 0.5, 1e-9);
+    EXPECT_GT(ang.z(), 0.0);
+}
+
+TEST(ServoTwist, TakesShortWayAroundForReflexRotations)
+{
+    tf2::Vector3 lin, ang;
+    tf2::Quaternion rot_err;
+    rot_err.setRPY(0.0, 0.0, -0.2);  // -0.2 rad = 2*pi - 0.2 the long way
+    servo_twist(tf2::Vector3(0, 0, 0), rot_err, 1.0, 1.0, 0.05, 0.5, lin, ang);
+    EXPECT_NEAR(ang.z(), -0.2, 1e-6);  // must go the short (negative) way
+}
+
+TEST(WrenchAxialLateral, DecomposesAlongTiltedToolAxis)
+{
+    // Tool pointing straight down (stroke direction = world -Z). A surface
+    // pushing BACK on the tool pushes along world +Z -> positive axial.
+    double axial, lateral;
+    wrench_axial_lateral(tf2::Vector3(0, 0, 10.0), tf2::Vector3(0, 0, -1),
+                         axial, lateral);
+    EXPECT_NEAR(axial, 10.0, 1e-9);
+    EXPECT_NEAR(lateral, 0.0, 1e-9);
+
+    // Pure sideways snag: no axial component, full lateral.
+    wrench_axial_lateral(tf2::Vector3(3.0, 4.0, 0.0), tf2::Vector3(0, 0, -1),
+                         axial, lateral);
+    EXPECT_NEAR(axial, 0.0, 1e-9);
+    EXPECT_NEAR(lateral, 5.0, 1e-9);
+
+    // Mixed load on a tilted axis decomposes exactly.
+    const tf2::Vector3 z = tf2::Vector3(1, 0, -1).normalized();
+    const tf2::Vector3 f = z * -7.0 + tf2::Vector3(0, 2.0, 0);  // 7 N reaction + 2 N lateral
+    wrench_axial_lateral(f, z, axial, lateral);
+    EXPECT_NEAR(axial, 7.0, 1e-9);
+    EXPECT_NEAR(lateral, 2.0, 1e-9);
 }
 
 int main(int argc, char **argv)

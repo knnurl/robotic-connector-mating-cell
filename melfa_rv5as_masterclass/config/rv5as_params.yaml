@@ -8,8 +8,10 @@
 
     # --- Vision input -------------------------------------------------------
     pose_topic: /aruco/pose
+    raw_pose_topic: /aruco/pose_raw  # unpredicted detections; gates insertion arming
     control_period_s: 0.4        # state machine cycle time (s)
     vision_timeout_s: 0.6        # marker pose older than this = stale, hold
+    tf_lookup_timeout_s: 0.1     # wait for TF at the image stamp before using latest
 
     # --- Motion backend -----------------------------------------------------
     # Any MoveIt pipeline works, but ALIGN/INSERT assume straight-line TCP
@@ -53,3 +55,33 @@
     # --- Safety guards ------------------------------------------------------
     max_joint_jump_rad: 0.8      # reject plans with joint jumps beyond this
     max_consecutive_plan_failures: 5
+
+    # --- Force-aware insertion (optional; '' = disabled) --------------------
+    # A WrenchStamped source (F/T sensor or estimated external wrench) turns
+    # the stroke from open-loop into force-aware: axial reaction >=
+    # contact_force_n = contact (MATED if >= min_contact_depth_m travelled,
+    # jam -> FAULT if earlier); lateral >= max_lateral_force_n = snag -> FAULT.
+    # The RV-5AS has no built-in F/T source; leave empty unless one is fitted.
+    wrench_topic: ""
+    contact_force_n: 8.0
+    max_lateral_force_n: 12.0
+    min_contact_depth_m: 0.0
+    wrench_timeout_s: 0.2
+
+    # --- Insertion stroke planner --------------------------------------------
+    # pipeline  = the configured MoveIt pipeline (Pilz LIN here - keep it)
+    # cartesian = computeCartesianPath: path-guaranteed straight stroke on
+    #             robots without Pilz (see FR3 params)
+    insert_planner: pipeline
+    cartesian_eef_step_m: 0.002
+
+    # --- Alignment mode -------------------------------------------------------
+    # step  = plan+execute one clamped LIN goal per cycle (default)
+    # servo = publish Cartesian twists for a running moveit_servo node;
+    #         INSERT stays a discrete committed stroke. Velocity envelope =
+    #         max_step / control_period_s (same limits as step mode). Set
+    #         control_period_s shorter than the servo command timeout.
+    align_mode: step
+    servo_twist_topic: /servo_node/delta_twist_cmds
+    servo_pos_gain: 1.5
+    servo_rot_gain: 1.5

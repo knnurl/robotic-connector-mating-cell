@@ -85,4 +85,46 @@ inline tf2::Transform insertion_target(const tf2::Transform &current, double dep
     return target;
 }
 
+// Proportional Cartesian velocity command toward the goal, for servo-mode
+// alignment: v = clamp(gain * err). The angular command follows the
+// shortest rotation (same convention as clamped_target). Zero error yields
+// exactly zero twist - the deadman/hold command.
+inline void servo_twist(const tf2::Vector3 &pos_err, const tf2::Quaternion &rot_err,
+                        double pos_gain, double rot_gain,
+                        double max_lin, double max_rot,
+                        tf2::Vector3 &linear, tf2::Vector3 &angular)
+{
+    linear = pos_err * pos_gain;
+    const double lin_mag = linear.length();
+    if (lin_mag > max_lin) {
+        linear *= max_lin / lin_mag;
+    }
+
+    double angle = rot_err.getAngle();
+    tf2::Vector3 axis = rot_err.getAxis();
+    if (angle > M_PI) {  // take the short way
+        angle = 2.0 * M_PI - angle;
+        axis = -axis;
+    }
+    if (angle < 1e-9) {
+        angular = tf2::Vector3(0, 0, 0);
+        return;
+    }
+    angular = axis * std::min(angle * rot_gain, max_rot);
+}
+
+// Split an external force (expressed in the same frame as tool_z) into the
+// component along the tool axis (signed: positive = pushing back against
+// the insertion direction) and the lateral remainder magnitude. Used to
+// tell "seated" (axial reaction) from "snagged" (lateral load) during the
+// insertion stroke.
+inline void wrench_axial_lateral(const tf2::Vector3 &force, const tf2::Vector3 &tool_z,
+                                 double &axial, double &lateral)
+{
+    const tf2::Vector3 z = tool_z.normalized();
+    // The stroke pushes along +tool_z; the surface reacts along -tool_z.
+    axial = -force.dot(z);
+    lateral = (force - z * force.dot(z)).length();
+}
+
 }  // namespace mating_geometry

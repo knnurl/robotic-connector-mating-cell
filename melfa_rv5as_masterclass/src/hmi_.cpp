@@ -17,7 +17,6 @@
 #include "rclcpp/rclcpp.hpp"
 #include <chrono>
 #include <cmath>
-#include <std_msgs/msg/u_int8.hpp>
 #include "melfa_msgs/srv/gpio_configure.hpp"
 #include "melfa_msgs/msg/gpio_state.hpp"
 #include "melfa_msgs/msg/gpio_command.hpp"
@@ -71,8 +70,6 @@ class HMINode : public rclcpp::Node
 public:
   HMINode() : Node("hmi_")
   {
-    task_command_publisher_ = this->create_publisher<std_msgs::msg::UInt8>("task_command", 10);
-
     analog_data_publisher_ = this->create_publisher<melfa_msgs::msg::GpioCommand>("gpio_controller/gpio_command", 10);
     auto hmi_callback_group = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
     options.callback_group = hmi_callback_group;
@@ -108,17 +105,16 @@ public:
 
     analog_data_publisher_->publish(message);
   }
+  // Logs the HMI push buttons. The task_command topic this used to publish
+  // had no subscriber anywhere in the stack and was removed as dead wiring.
   void push_button_callback(const melfa_msgs::msg::GpioState& msg)
   {
     uint16_t hmi_input = msg.input_data;
-    auto task_command = std_msgs::msg::UInt8();
-    task_command.data = 0;
     switch (hmi_input)
     {
       case 0b0:
         break;
       case 0b1:
-        task_command.data = 0b1;
         if (!pick_n_place_pid_)
         {
           pick_n_place_pid_=1;
@@ -126,15 +122,12 @@ public:
         }
         break;
       case 0b10:
-        task_command.data = 0b10;
         RCLCPP_INFO(rclcpp::get_logger("push_button_callback"), "Pick Task received");
         break;
       case 0b100:
-        task_command.data = 0b100;
         RCLCPP_INFO(rclcpp::get_logger("push_button_callback"), "Place Task received");
         break;
       case 0b1000:
-        task_command.data = 0b1000;
         RCLCPP_INFO(rclcpp::get_logger("push_button_callback"), "Exit received");
         if(pick_n_place_pid_)
         {
@@ -148,13 +141,11 @@ public:
                     "detected.");
         break;
     }
-    task_command_publisher_->publish(task_command);
   }
 
 private:
   rclcpp::Subscription<melfa_msgs::msg::GpioState>::SharedPtr plc_link_io_subscription_;
   rclcpp::Subscription<melfa_msgs::msg::GpioState>::SharedPtr misc3_io_subscription_;
-  rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr task_command_publisher_;
   rclcpp::Publisher<melfa_msgs::msg::GpioCommand>::SharedPtr analog_data_publisher_;
   rclcpp::SubscriptionOptions options;
   uint32_t pick_n_place_pid_ = 0;

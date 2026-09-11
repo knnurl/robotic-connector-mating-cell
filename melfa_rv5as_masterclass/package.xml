@@ -20,6 +20,7 @@
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>
   <depend>diagnostic_msgs</depend>
+  <depend>controller_manager_msgs</depend>
 
   <depend>melfa_masterclass_msgs</depend>
   <!-- melfa_msgs is only present on the robot PC; plc_/hmi_ are built

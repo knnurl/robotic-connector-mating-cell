@@ -3,6 +3,7 @@ title: Connector Mating Cell
 
 # --- Topics ------------------------------------------------------------
 phase_topic: /mating/phase
+paused_topic: /mating/paused        # latched Bool; panel shows PAUSED overlay
 error_pos_topic: /mating/error_mm
 error_rot_topic: /mating/error_deg
 image_topic: /aruco/debug_image     # set to '' to disable the camera view
@@ -48,6 +49,11 @@ buttons:
     type: service_trigger
     service: /connector_mating_node/resume
     color: '#2e8b57'
+    text_color: white
+  - label: Retract
+    type: service_trigger
+    service: /connector_mating_node/retract
+    color: '#c98500'
     text_color: white
   - label: RESET sequence
     type: service_trigger
