@@ -21,6 +21,10 @@ connector offset, standoff and insertion depth inherits it.
     ros2 run roscam handeye_calib --ros-args \
         -p base_frame:=fr3_link0 -p tcp_frame:=fr3_hand_tcp -p filter_frame:=''
 
+Sanity-check the result against the physical bracket — the mount CAD and
+its measured properties are in [hardware/camera_mount/](hardware/camera_mount/).
+Re-run this calibration if that part is ever reprinted or reseated.
+
 Then: teach connector offsets → validation ladder (FR3 section below).
 
 ### ⚠ Blocker before any further robot motion
