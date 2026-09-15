@@ -45,19 +45,36 @@ Z  -0.02 .. 0.06   span  80 mm
 
 ## Relationship to hand-eye calibration
 
-`tools/fr3/align_gui.py` recovers the hand-eye **rotation** empirically from
-three probe moves, saved to `tools/fr3/handeye_rotation.json`. Measured on
-this cell, the camera optical axis sits **2.23° off TCP Z** — i.e. the mount
-points the camera very nearly straight down the tool axis. That is a useful
-cross-check on both the print and the calibration.
+**Calibrated 2026-09-15** with `roscam.handeye_calib` (21 poses, Tsai; all
+four solvers agreed to 0.05 mm / 0.01 deg; residual 3.17 mm / 1.57 deg). The
+result is the default in `tools/fr3/fr3_mating.launch.py`:
 
-The **translation** is still the dry-run guess `0.06 0.0 -0.04` and must come
-from `handeye_calib`. Use this STEP as a sanity check on the result, not as a
-substitute:
+```
+handeye_xyz  : 0.061126 -0.011144 -0.046550        (|t| = 78 mm)
+handeye_quat : 0.000855 0.003126 0.706706 0.707500 (~90 deg about Z)
+```
 
-- the guess magnitudes do sit inside the envelope above, so it is plausible
-  but unverified;
-- deriving the translation from CAD alone also needs the D405's optical
+Two properties of this bracket that the numbers confirm:
+
+- **The camera is mounted rotated ~90°** about the optical axis. The launch
+  file previously defaulted to identity, which was wrong by 89.94 deg and
+  silently swapped camera X/Y for anything trusting the transform.
+- **The optical axis comes out 0.37° off TCP Z** — the mount points the
+  camera essentially straight down the tool axis, as its geometry suggests.
+
+An earlier estimate from `align_gui`'s three-probe method (saved in
+`tools/fr3/handeye_rotation.json`) put that axis at 2.23° and differs from
+the full calibration by 5.20 deg overall. Prefer `handeye_calib`: 21 diverse
+poses beats 3 probe moves for rotation. The probe method remains useful for
+what it was built for — it needs no calibration procedure and recovers just
+enough rotation to run a camera-frame position servo.
+
+Using the STEP as a check, not a source:
+
+- the CAD origin is the designer's, NOT the robot flange, so the raw
+  bounding box above cannot be compared against `handeye_xyz` directly —
+  only the magnitude is meaningful, and 78 mm suits this envelope;
+- deriving the translation from CAD alone would also need the D405's optical
   centre relative to its mounting holes (Intel datasheet) — the optical
   origin is inside the camera body and is not a feature of this part;
 - a printed part has real tolerance, so CAD is a prior, not ground truth.

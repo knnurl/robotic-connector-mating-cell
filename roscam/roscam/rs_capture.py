@@ -38,7 +38,7 @@ class RsCapture:
 
     def __init__(self, width=640, height=480, fps=15, enable_depth=False,
                  serial='', auto_recover=True, timeouts_before_reset=8,
-                 max_resets=5):
+                 max_resets=5, frames_to_forgive=200):
         self.width = int(width)
         self.height = int(height)
         self.fps = int(fps)
@@ -60,6 +60,14 @@ class RsCapture:
         self.max_resets = int(max_resets)
         self.consecutive_timeouts = 0
         self.resets_done = 0
+        # max_resets must mean "recoveries that did not stick", not
+        # "recoveries ever". A flexing USB cable on a moving wrist drops the
+        # device repeatedly over a long session; each recovery genuinely
+        # works, so a lifetime counter retires a perfectly healthy camera
+        # mid-run. Streaming this many frames after a reset clears the
+        # budget, so only a camera that will NOT stay up exhausts it.
+        self.frames_to_forgive = int(frames_to_forgive)
+        self._frames_since_reset = 0
         self.on_event = None          # optional callback(str) for logging
 
     def start(self):
@@ -137,6 +145,7 @@ class RsCapture:
             self._emit(f'camera recovery FAILED: {e}')
             return False
         self.consecutive_timeouts = 0
+        self._frames_since_reset = 0
         self._emit('camera recovered')
         return True
 
@@ -163,6 +172,14 @@ class RsCapture:
                            'check USB autosuspend (power/control) and cabling')
             return None  # timeout
         self.consecutive_timeouts = 0
+        if self.resets_done:
+            self._frames_since_reset += 1
+            if self._frames_since_reset >= self.frames_to_forgive:
+                self._emit(f'camera stable for {self._frames_since_reset} '
+                           f'frames - clearing reset budget '
+                           f'(was {self.resets_done}/{self.max_resets})')
+                self.resets_done = 0
+                self._frames_since_reset = 0
         t_host = time.time()
         if self._align is not None:
             frames = self._align.process(frames)

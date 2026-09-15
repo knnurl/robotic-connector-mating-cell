@@ -57,10 +57,26 @@ def generate_launch_description():
                               description='topic = camera driver publishes images (default); '
                                           'realsense = in-process capture, no image topics '
                                           '(skip the camera-driver terminal)'),
-        # Hand-eye TCP->optical transform. DEFAULTS ARE A GUESS - replace with
-        # the handeye_calib solution before trusting roll/pitch alignment.
-        DeclareLaunchArgument('handeye_xyz', default_value='0.06 0.0 -0.04'),
-        DeclareLaunchArgument('handeye_quat', default_value='0.0 0.0 0.0 1.0',
+        # Hand-eye TCP->optical transform. MEASURED 2026-09-15 with
+        # roscam.handeye_calib: 21 poses, Tsai selected (all four solvers
+        # agreed to 0.05 mm / 0.01 deg), residual 3.17 mm / 1.57 deg.
+        #
+        # The previous defaults were a dry-run guess and the ROTATION was
+        # wrong by 89.94 deg: it assumed identity, but the camera is mounted
+        # rotated ~90 deg about the optical axis, so camera X/Y were
+        # effectively swapped for anything that trusted this transform. The
+        # translation guess was close (13 mm out); the rotation was not.
+        #
+        # Re-run handeye_calib if the bracket is reprinted or reseated - see
+        # hardware/camera_mount/. Cross-checks: the camera optical axis comes
+        # out 0.37 deg off TCP Z, consistent with a mount designed to look
+        # straight down the tool axis, and |translation| = 78 mm is plausible
+        # for that bracket's envelope.
+        DeclareLaunchArgument('handeye_xyz',
+                              default_value='0.061126 -0.011144 -0.046550'),
+        DeclareLaunchArgument('handeye_quat',
+                              default_value=('0.000855 0.003126 '
+                                             '0.706706 0.707500'),
                               description='qx qy qz qw'),
     ]
 

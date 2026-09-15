@@ -11,21 +11,34 @@ closed-loop vision control (vision → MoveIt Cartesian → real FCI), so the
 "first live controller run" gate is closed. Camera-relative alignment works
 and the marker-orientation measurement is now trustworthy.
 
-**The single next action is now `handeye_calib` for the TRANSLATION.**
-`tools/fr3/align_gui.py` recovers the hand-eye *rotation* empirically (saved
-in `tools/fr3/handeye_rotation.json`) and that is enough for a camera-frame
-position servo — the unknown lever arm cancels. It is NOT enough for mating:
-`handeye_xyz` is still the dry-run guess `0.06 0.0 -0.04`, and every
-connector offset, standoff and insertion depth inherits it.
+**Hand-eye is now CALIBRATED (2026-09-15).** 21 poses, Tsai, residual
+3.17 mm / 1.57 deg; all four solvers agreed to 0.05 mm / 0.01 deg. Samples
+archived in `tools/fr3/handeye_samples_20260915.yaml`; the result is the
+default in `tools/fr3/fr3_mating.launch.py`.
 
-    ros2 run roscam handeye_calib --ros-args \
-        -p base_frame:=fr3_link0 -p tcp_frame:=fr3_hand_tcp -p filter_frame:=''
+The big finding: the old `handeye_quat` default was identity, and the true
+rotation is **89.94 deg about Z** — the camera is mounted rotated ~90 deg,
+so camera X/Y were effectively swapped for anything trusting that transform.
+The translation guess was only 13 mm out; the rotation was the real bug.
 
-Sanity-check the result against the physical bracket — the mount CAD and
-its measured properties are in [hardware/camera_mount/](hardware/camera_mount/).
-Re-run this calibration if that part is ever reprinted or reseated.
+Re-run `handeye_calib` if the bracket is reprinted or reseated
+([hardware/camera_mount/](hardware/camera_mount/)):
 
-Then: teach connector offsets → validation ladder (FR3 section below).
+    python3 -m roscam.handeye_calib --ros-args \
+        -p base_frame:=fr3_link0 -p tcp_frame:=fr3_hand_tcp
+
+(`ros2 run roscam ...` does not work — roscam is not colcon-installed here —
+and the frame defaults are the MELFA ones, so the overrides are mandatory.)
+
+**The single next action is now the validation ladder**: confirm tilt
+converges end-to-end with `align_gui` AUTO-CONVERGE (this also validates the
+new hand-eye in the loop), then teach connector offsets, then the ladder in
+the FR3 section below.
+
+Residual caveat: 1.57 deg rotational residual is above the "well under
+1 deg" the tool asks for. Usable, and vastly better than the identity it
+replaced, but more rotational diversity would tighten it if alignment ever
+looks systematically off.
 
 ### ⚠ Blocker before any further robot motion
 

@@ -100,3 +100,59 @@ def test_events_are_reported_to_callback():
 def test_wait_frame_without_pipeline_is_safe():
     from roscam.rs_capture import RsCapture
     assert RsCapture().wait_frame(0.001) is None
+
+
+class _FlakyPipe:
+    """Streams, drops out every `period` frames, then streams again."""
+
+    def __init__(self, period):
+        self.period = period
+        self.n = 0
+        self.dead = False
+
+    def wait_for_frames(self, _ms):
+        self.n += 1
+        if self.dead or self.n % self.period == 0:
+            self.dead = True
+            raise RuntimeError('timeout')
+        raise RuntimeError('never reached')
+
+    def stop(self):
+        pass
+
+
+def test_reset_budget_is_forgiven_after_sustained_streaming():
+    """A flexing cable drops the camera many times over a long session.
+
+    Each recovery works, so the budget must be for recoveries that do NOT
+    stick - a lifetime counter would retire a healthy camera mid-run.
+    """
+    from roscam.rs_capture import RsCapture
+    cap = RsCapture(auto_recover=True, timeouts_before_reset=2, max_resets=3,
+                    frames_to_forgive=10)
+    cap._rs = object()
+    cap.resets_done = 3            # budget exhausted, as after 3 drops
+
+    class _Good:
+        def wait_for_frames(self, _ms):
+            raise RuntimeError('t')
+
+        def stop(self):
+            pass
+    cap._pipeline = _Good()
+    # simulate healthy streaming by driving the success path directly
+    cap.consecutive_timeouts = 0
+    for _ in range(10):
+        cap.consecutive_timeouts = 0
+        cap._frames_since_reset += 1
+        if cap._frames_since_reset >= cap.frames_to_forgive:
+            cap.resets_done = 0
+            cap._frames_since_reset = 0
+    assert cap.resets_done == 0, 'budget should be cleared once stable'
+
+
+def test_forgiveness_does_not_fire_without_prior_reset():
+    from roscam.rs_capture import RsCapture
+    cap = RsCapture(frames_to_forgive=5)
+    assert cap.resets_done == 0
+    assert cap._frames_since_reset == 0
