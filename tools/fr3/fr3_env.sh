@@ -14,7 +14,7 @@
 # buffers but isolates nothing. Verify with tools/fr3/fr3_preflight.sh.
 
 # Resolve the repo path even though it contains spaces.
-_FR3_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_FR3_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export CYCLONEDDS_URI="file://${_FR3_DIR}/cyclonedds_fr3.xml"
@@ -23,10 +23,28 @@ export CYCLONEDDS_URI="file://${_FR3_DIR}/cyclonedds_fr3.xml"
 # built-in default (172.16.0.3) is NOT this cell.
 export FR3_ROBOT_IP=172.16.0.2
 
+# This repo's own packages - fr3_mating_controllers above all. The terminal
+# that starts the controller manager (moveit.launch.py) must see them, or
+# spawning the impedance controller fails with "Loader for controller ... not
+# found". local_setup only adds this workspace: source ROS and
+# ~/franka_ros2_ws first (usually in ~/.bashrc).
+_FR3_WS_SETUP="${_FR3_DIR}/../../install/local_setup.bash"
+if [ -f "$_FR3_WS_SETUP" ]; then
+    # shellcheck disable=SC1090
+    if source "$_FR3_WS_SETUP"; then
+        _FR3_WS_STATE="sourced"
+    else
+        _FR3_WS_STATE="FAILED to source install/local_setup.bash"
+    fi
+else
+    _FR3_WS_STATE="NOT BUILT - run colcon build; impedance controller unavailable"
+fi
+
 echo "FR3 env set:"
 echo "  RMW_IMPLEMENTATION = $RMW_IMPLEMENTATION"
 echo "  CYCLONEDDS_URI     = $CYCLONEDDS_URI"
 echo "  FR3_ROBOT_IP       = $FR3_ROBOT_IP"
+echo "  this workspace     = $_FR3_WS_STATE"
 echo "check with: tools/fr3/fr3_preflight.sh \$FR3_ROBOT_IP"
 
-unset _FR3_DIR
+unset _FR3_DIR _FR3_WS_SETUP _FR3_WS_STATE

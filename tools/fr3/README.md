@@ -82,18 +82,17 @@ debugging-only act, never during mating.
 ## Launch order
 
 ```bash
-# 0. Once per shell (or in ~/.bashrc):
-source /opt/ros/humble/setup.sh
-source ~/franka_ros2_ws/install/setup.sh
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-export CYCLONEDDS_URI=file://<abs-path>/tools/fr3/cyclonedds_fr3.xml
-export AMENT_PREFIX_PATH="$PWD/install/melfa_rv5as_masterclass:$PWD/install/roscam:$AMENT_PREFIX_PATH"
+# 0. In EVERY terminal - step 2's above all: the controller manager must see
+#    this workspace, or the impedance controller cannot be loaded.
+source /opt/ros/humble/setup.bash
+source ~/franka_ros2_ws/install/setup.bash
+source tools/fr3/fr3_env.sh     # DDS isolation, FR3_ROBOT_IP, this workspace
 
 # 1. Preflight (fix every FAIL)
-tools/fr3/fr3_preflight.sh 172.16.0.3
+tools/fr3/fr3_preflight.sh $FR3_ROBOT_IP
 
 # 2. Robot driver + MoveIt (upstream, self-contained; add use_fake_hardware:=true for dry runs)
-ros2 launch franka_fr3_moveit_config moveit.launch.py robot_ip:=172.16.0.3
+ros2 launch franka_fr3_moveit_config moveit.launch.py robot_ip:=$FR3_ROBOT_IP
 
 # 3. Camera (low-bandwidth profile). SKIP this terminal when using the
 #    out-of-ROS capture path (defence 0): pass vision_source:=realsense in
@@ -102,9 +101,9 @@ ros2 launch franka_fr3_moveit_config moveit.launch.py robot_ip:=172.16.0.3
 ros2 launch realsense2_camera rs_launch.py config_file:="$PWD/tools/fr3/realsense_low_bw.yaml"
 
 # 4. Cell: hand-eye TF + vision + controller (insertion disabled by default)
-ros2 launch tools/fr3/fr3_mating.launch.py robot_ip:=172.16.0.3
+ros2 launch tools/fr3/fr3_mating.launch.py robot_ip:=$FR3_ROBOT_IP
 # out-of-ROS capture variant (no camera driver, no image topics):
-ros2 launch tools/fr3/fr3_mating.launch.py robot_ip:=172.16.0.3 vision_source:=realsense
+ros2 launch tools/fr3/fr3_mating.launch.py robot_ip:=$FR3_ROBOT_IP vision_source:=realsense
 ```
 
 Then follow the standard validation ladder in

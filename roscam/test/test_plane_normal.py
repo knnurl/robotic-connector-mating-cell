@@ -212,3 +212,54 @@ def test_fuse_orientation_rejects_bad_input():
     assert fuse_orientation(np.eye(2), [0, 0, 1]) is None
     # X parallel to the normal is degenerate
     assert fuse_orientation(np.eye(3), [1, 0, 0]) is None
+
+
+def test_inplane_angle_matches_optical_convention():
+    from roscam.plane_normal import inplane_angle
+    # marker X along camera +X -> red points RIGHT -> 0 deg
+    assert abs(inplane_angle(np.eye(3)) - 0.0) < 1e-9
+    # marker X along camera +Y -> red points DOWN -> +90 (optical Y is down)
+    R = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1.0]])
+    assert abs(inplane_angle(R) - 90.0) < 1e-9
+    R = np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1.0]])
+    assert abs(inplane_angle(R) + 90.0) < 1e-9
+
+
+def test_inplane_angle_rejects_bad_shape():
+    from roscam.plane_normal import inplane_angle
+    assert inplane_angle(np.eye(2)) is None
+
+
+def test_wrap_deg():
+    from roscam.plane_normal import wrap_deg
+    for a, want in ((0, 0), (180, 180), (-180, 180), (190, -170),
+                    (-190, 170), (360, 0), (450, 90)):
+        assert abs(wrap_deg(a) - want) < 1e-9, f'{a} -> {wrap_deg(a)}'
+
+
+def test_inplane_correction_takes_the_short_way():
+    """The measured case: +83.67 -> +90 is 6.33 deg, NOT 353.67."""
+    from roscam.plane_normal import inplane_correction
+    c = inplane_correction(83.67, 90.0)
+    assert abs(c + 6.33) < 1e-6, c
+    # and the long way round is never chosen
+    assert abs(inplane_correction(-179.0, 179.0)) <= 2.0 + 1e-9
+
+
+def test_inplane_correction_clamps():
+    from roscam.plane_normal import inplane_correction
+    assert abs(inplane_correction(0.0, 90.0, limit_deg=5.0) + 5.0) < 1e-9
+    assert abs(inplane_correction(90.0, 0.0, limit_deg=5.0) - 5.0) < 1e-9
+    # already there -> no motion
+    assert abs(inplane_correction(45.0, 45.0, limit_deg=5.0)) < 1e-12
+
+
+def test_inplane_correction_converges_when_iterated():
+    from roscam.plane_normal import inplane_correction, wrap_deg
+    cur, target, lim = 83.67, 90.0, 2.0
+    for _ in range(50):
+        d = inplane_correction(cur, target, lim)
+        if abs(d) < 1e-9:
+            break
+        cur = wrap_deg(cur - d)
+    assert abs(wrap_deg(cur - target)) < 1e-6, cur

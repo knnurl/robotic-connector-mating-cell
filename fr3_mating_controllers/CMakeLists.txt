@@ -10,6 +10,18 @@ find_package(ament_cmake REQUIRED)
 # The Franka stack exists only where the FR3 is commissioned (this PC via
 # ~/franka_ros2_ws, or the robot PC). Elsewhere - e.g. the MELFA cell -
 # build nothing, mirroring the plc_/hmi_ conditional pattern.
+find_package(Eigen3 REQUIRED)
+
+# The safety-logic tests need only Eigen, so they build (and must pass) on any
+# machine - before the franka check below can skip the rest of the package.
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_impedance_detail test/test_impedance_detail.cpp)
+  target_include_directories(test_impedance_detail PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include ${EIGEN3_INCLUDE_DIRS})
+  target_compile_features(test_impedance_detail PRIVATE cxx_std_17)
+endif()
+
 find_package(franka_semantic_components QUIET)
 
 if(NOT franka_semantic_components_FOUND)
@@ -26,7 +38,6 @@ find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(geometry_msgs REQUIRED)
-find_package(Eigen3 REQUIRED)
 
 add_library(${PROJECT_NAME} SHARED
   src/cartesian_impedance_stroke_controller.cpp)

@@ -40,6 +40,18 @@ Residual caveat: 1.57 deg rotational residual is above the "well under
 replaced, but more rotational diversity would tighten it if alignment ever
 looks systematically off.
 
+**Superseded 2026-09-15 (evening): the next action is the IMPEDANCE
+commissioning ladder.** Camera alignment works through the cartesian backend
+(~1 mm), so the open risk is the insertion backend, which has never run on
+hardware and commands torque. Run the ladder with
+`tools/fr3/impedance_panel.py` — steps 1-3 need no connector, no vision and
+no force thresholds, so they can be done any time the cell is up.
+
+The servo alignment backend is **parked**, not abandoned: it works in
+simulation and unit tests, but it needs a controller swap on every run and
+was never validated after the position-controller fix. Alignment stays on
+the cartesian backend meanwhile.
+
 ### ⚠ Blocker before any further robot motion
 
 **Packet loss on the FCI link: 4.7% measured 2026-09-11** (was 10.5%; it
@@ -112,10 +124,21 @@ so it can miss this — check loss over a few hundred packets:
       `/franka_robot_state_broadcaster/external_wrench_in_base_frame`
       during one manual mate, set `contact_force_n` above the estimate's
       bias, verify contact→MATED and early-contact→FAULT behaviours
-- [ ] Optional: `sudo apt install ros-humble-moveit-servo`, run servo with
-      `tools/fr3/fr3_servo.yaml`, set `align_mode: servo` +
-      `control_period_s: 0.05` — first runtime validation of servo
-      alignment (fake hardware first)
+- [x] `moveit_servo` installed and wired into `align_gui` as the "servo"
+      backend — done 2026-09-15. Continuous 6-DOF streaming with command
+      shaping, an oscillation watchdog and a stall watchdog; signs pinned
+      by `tools/fr3/test_servo_signs.py`.
+- [ ] **Re-validate the servo backend on hardware after the controller
+      change.** It now streams joint POSITIONS to
+      `fr3_servo_position_controller` (loaded inactive by
+      `tools/fr3/fr3_servo.launch.py`; `align_gui` swaps controllers around
+      each run) instead of trajectories into the effort-mode
+      `fr3_arm_controller`, which stalled the arm outright — lessons 6-7.
+      Ladder: conservative until converged, then moderate, then brisk.
+      Watch for audible buzz, check `outcome` in the trace, and confirm
+      `fr3_arm_controller` is active again afterwards
+      (`ros2 control list_controllers`) — the GUI says "NOT RESTORED" and
+      the SERVO pill reads `CTRL STUCK` if the hand-back ever fails.
 - [x] Out-of-ROS camera capture ("camera outside ROS, only end-data in"):
       `roscam/rs_capture.py` (SDK wrapper + self-test CLI),
       `source:=topic|realsense|external` on cam_pub/connector_pose,
@@ -165,10 +188,93 @@ so it can miss this — check loss over a few hundred packets:
       overdrive, wrench-judged outcomes — done 2026-07-12. Compiled clean
       against franka_ros2; **never run on hardware** (fake HW cannot
       integrate torques)
-- [ ] Commission the impedance backend on the real FR3 per
-      `fr3_mating_controllers/README.md` ladder: float test → hold test →
-      setpoint test → dispatched stroke (AFTER the force-guarded moveit
-      stroke works — it shares the thresholds being tuned there)
+- [x] Commissioning rig for that ladder — done 2026-09-15:
+      `tools/fr3/impedance_panel.py`, one button per rung (FLOAT / HOLD /
+      SETPOINT / RELEASE) with the arm's pose, external wrench and
+      `control_command_success_rate` live, a JSONL trace per session, and
+      RELEASE one click away whenever no other action is running (close,
+      Ctrl+C and exit also hand the arm back). Logic
+      covered by `tools/fr3/test_impedance_panel.py`.
+- [x] Pre-contact guards in the controller — done 2026-09-15, before it
+      ever commanded torque: a Cartesian force/moment ceiling
+      (`max_force_n` 30 N, `max_torque_nm` 10 Nm — stiffness × error alone
+      is unbounded, and a blocked arm with a slewing equilibrium reaches
+      80 N in two seconds), a per-joint ceiling (`tau_max_nm`, default the
+      FR3's own limits), non-finite guards on state and torque, zeroed
+      commands on deactivate, and live-tunable gains so the ladder does not
+      have to deactivate to change stiffness. `float_mode` is now live too
+      and **re-seeds the equilibrium on float→hold**, so step 2 cannot snap
+      the arm back to where step 1 activated it.
+- [x] Review fixes before first contact — done 2026-09-15 (evening), after a
+      verified audit of the impedance turn:
+      live gains range-checked in the controller AND the panel (same limits,
+      a test fails if they drift; `damping_ratio` 0 / negative was accepted
+      before, i.e. an undamped or energy-injecting spring); malformed
+      setpoints dropped; configure-time parameters bounded and rejected live;
+      the setpoint handoff no longer blocks the 1 kHz loop and the float→hold
+      log moved out of it (gtests in `fr3_mating_controllers/test/`);
+      PRE-FLIGHT rung sets payload + collision thresholds with the robot idle
+      (franka accepts them only then) and restores the arm controller on
+      every path; Z floor for setpoints; release decided by the controller
+      manager's state on RELEASE, close and exit; DRIVER DOWN instead of
+      "use the E-stop" when the driver is gone; 50 Hz trace with joints;
+      `fr3_env.sh` sources this workspace; ladder wording corrected (small
+      overshoot is normal: effective damping ~0.5–0.7).
+      NOT done (outside this repo): franka_hardware does not catch reflex
+      exceptions in `read()`/`write()`, so every reflex still kills
+      `ros2_control_node`.
+- [x] Second review round on those fixes — done 2026-09-15 (night). An
+      adversarial review of the round above left 10 verified findings and 13
+      lower-ranked ones, all addressed:
+      the panel refuses to close while a release cannot be confirmed; HOLD
+      pressed again no longer ratchets the Z floor down; PRE-FLIGHT restores
+      the arm controller by the controller manager's answer, and exit restores
+      it too; Ctrl+C / SIGTERM go through the guarded close (tkinter swallowed
+      Ctrl+C, rclpy's default handler swallowed SIGTERM); the live view
+      reschedules before drawing; gain sets are applied atomically; a stuck
+      state relay reads NO ROBOT STATE, not DRIVER DOWN; PRE-FLIGHT reports
+      the resting |F ext| bias; `on_cleanup` lets configure-time parameters
+      change; gtests build without franka and cannot hang; the spawner path is
+      quoted. The review confirmed against the franka sources that releasing
+      the arm controller does put the robot in IDLE, so PRE-FLIGHT can work.
+- [ ] **Run the ladder on the real FR3** with `tools/fr3/impedance_panel.py`
+      (`fr3_mating_controllers/README.md`). **Rungs 0-3 PASSED 2026-09-16**
+      (payload via Desk, rest bias 1.0 N, RT 100%, float smooth, hold solid,
+      setpoints tracking with the friction deadband of lesson 10). Rung 4
+      still outstanding:
+      0. PRE-FLIGHT — weigh camera + bracket first (0 kg if Desk's end
+         effector already includes them; never the hand twice).
+      1. FLOAT — free-float by hand, smooth, no buzz; RT pill ≥ 99%; pushes
+         under 10 N. Ragged here = network/RT, not gains
+         (`tools/fr3/fr3_preflight.sh`). Slow sag = payload wrong.
+      2. HOLD — arm does not move when HOLD is pressed; ~15 N per 10 cm
+         sideways, ~12 N per 1.5 cm on Z; one small overshoot on release is
+         normal, ringing is not.
+      3. SETPOINT — 10–20 mm UP first; glides at ≤ 5 cm/s, settles within a
+         few mm.
+      4. Dispatched stroke — AFTER the force-guarded MoveIt stroke works,
+         since it shares the thresholds still being tuned there.
+- [ ] **Write the spec for continuous marker tracking on the impedance
+      backend** - design first, then code. Lesson 10 is why one gain set
+      cannot serve both tracking and mating:
+      - **named gain profiles** in the controller yaml (`track`: stiff and
+        well damped; `mate`: today's soft set), applied atomically on phase
+        transitions. Tracking to ~1 mm needs k around 3000 N/m (deadband
+        `3.5/k`); mating needs 150 for self-alignment
+      - **make `setpoint_slew_mps` / `setpoint_slew_rps` live**, not
+        configure-time: tracking wants 0.1-0.25 m/s, the stroke 0.005. Keep
+        the range checks
+      - **`damping_ratio` toward 2.0 for tracking.** `D = 2*zeta*sqrt(K)` is
+        critical for 1 kg, so effective zeta is `zeta / sqrt(apparent mass)`
+        - about 0.5 on this arm at zeta 1.0
+      - **orientation target must come from VISION, not the measured pose.**
+        The panel republishes the measured quaternion, which is fine for
+        stepping but would ratchet the 3.4 deg angular deadband when tracking
+      - **bench tests before closed loop**: static (steady error vs k, expect
+        `3.5/k`), step (bandwidth + overshoot), sine at 0.1/0.2/0.5 Hz (phase
+        lag gives end-to-end latency, closing that open item too)
+      - stays on impedance, NOT moveit_servo: effort-to-effort needs no
+        command-mode swap, so lessons 6 and 7 do not apply
 - [ ] `fr3_backend` (~/fr3_backend, joint-impedance WebSocket testbed):
       keep as a hands-on stiffness-feel/tuning rig; do NOT run alongside
       franka_ros2 (both need the exclusive FCI connection)
@@ -284,6 +390,105 @@ unknown lever arm, so levelling perturbs translation — alternate the two.
   reflexes. The torque interface is only bounded by
   `controller_torque_discontinuity` (1 Nm/ms), which is why the impedance
   backend is the right home for streamed, jumpy vision setpoints.
+
+## Lessons from the 2026-09-15 servo work (do not re-learn these)
+
+**6. Do not stream into an effort-mode trajectory controller.**
+`fr3_arm_controller` is a `JointTrajectoryController` on the **effort**
+interface, and `moveit_servo` replaces its trajectory every 10 ms. Each new
+trajectory is seeded at the *measured* position, so the tracking error — and
+with it the commanded torque — stays tiny. Measured: a conservative servo
+run commanded ~10 mm/s and 7 deg/s for **90 s while the arm moved
+0.00 mm/s** (error flat at 12.7 mm / 8.8 deg), and at higher speeds the
+100 Hz torque steps were clearly audible and shook the arm into
+`cartesian_reflex`. Stream joint *positions* to a forward position
+controller instead and let libfranka's own joint-impedance controller track
+them. Corollary: a servo backend needs a stall watchdog — commanded motion
+with no measured progress must abort, not stream forever.
+
+**7. franka_hardware 2.0.2 cannot swap command modes in ONE switch call.**
+`perform_command_mode_switch` walks the modes in a fixed order in a single
+pass: asked for effort in and position out, it starts torque control and
+*then* calls `stopRobot()` for the outgoing position mode, leaving `write()`
+with no active control — `std::runtime_error`, ros2_control_node dead, whole
+launch down. Verified twice with the arm stationary. Always **deactivate the
+old controller, pause, then activate the new one** (`switch_controllers` in
+`align_gui.py` does this). Switching *to* position is fine; it is the way
+back that bites. Test mode switches with the arm stopped and nothing
+commanded — that is how this was caught instead of mid-motion.
+
+**8. The enabling device is invisible over FCI.** Holding and releasing the
+cell's enabling device changes *no* field of `FrankaRobotState` — not
+`robot_mode`, not the error flags. There is no libfranka signal for it, so
+software cannot gate on it. `align_gui`'s gate is therefore a **robot-state**
+gate (pauses whenever the robot leaves MOVE, e.g. a real user stop, and ends
+the run on REFLEX), plus a PAUSE/RESUME button. If a held-to-run interlock
+is ever required, it has to come from the robot's own safety configuration
+or from separate hardware.
+
+**9. Do not subscribe to the 1 kHz robot state from a Python GUI.** Decoding
+`FrankaRobotState` at 1000 Hz costs **86% of a CPU core**; taking the
+messages raw and decoding a few costs 31% (rclpy still dispatches every
+callback). A C++ `topic_tools throttle` child relaying at 50 Hz costs 5%,
+which is what `align_gui` starts. Subscribe **best-effort, depth 1** so a
+slow reader can never back-pressure the realtime publisher.
+
+## Lessons from the 2026-09-16 impedance commissioning (do not re-learn these)
+
+**10. Compliant control has a friction deadband, and it is `F_friction / k`.**
+The arm tracks a commanded setpoint only until the spring force drops below
+joint breakaway, then stops and stays stopped. Measured on this cell:
+**~3.5 N at the TCP** and **~0.6 Nm about the wrist**. Three independent
+confirmations from one session:
+
+| deadband | predicted `F/k` | observed |
+|---|---|---|
+| position, `k_pos_tool` 150 N/m | 23 mm | 21.6 mm |
+| position, `k_pos_tool` 600 N/m | 5.8 mm | 6.8 mm |
+| orientation, `k_rot_tool` 10 Nm/rad | 3.4 deg | 3.37 deg |
+
+The proof that it is Coulomb friction and not a controller fault: raising
+stiffness 4x left the **stall force unchanged** (3.2 N -> 4.1 N) and shrank
+the **lag 3x**. Nothing was being clipped - controller manager at 1000 Hz, RT
+success 1.000, the 30 N wrench cap engaged in 3% of samples, no joint within
+25 deg of a limit.
+
+*The measurement trap:* at the panel's 60 mm lead cap a 150 N/m spring can
+never make more than 9 N, so "it stalls at 8 N" measures the CAP, not
+friction. Raise `k` and re-measure - the force at stall is the friction, the
+lag is just `F/k`.
+
+*What it costs, per axis:*
+- **The insertion stroke is fine.** At `k_z` 800 the deadband is 4.4 mm and
+  `impedance_overdrive_m` is already 10 mm of preload lead.
+- **Lateral self-alignment needs > 3.5 N of chamfer force** before the arm
+  yields at all. Check this against the real connector's insertion force.
+- **Angular deadband is 3.4 deg** at `k_rot_tool` 10 Nm/rad - the one to
+  watch for keyed connectors. `k_rot_tool` 40 brings it to ~0.85 deg, at the
+  cost of angular compliance.
+- **~2 N of friction lands in the external-wrench estimate** with nothing
+  touching the connector, against `contact_force_n` 8 N. Thinner margin than
+  it looks when tuning the force thresholds.
+- **A soft spring cannot track to 1 mm.** Tracking wants stiff (deadband
+  `3.5/k`), mating wants soft. That is a gain-schedule, not one tuning.
+
+Symptom to recognise: "it moves the right way but seems to hit resistance,
+and the heading recovers a bit after it stops". The partial recovery is the
+spring unwinding until it re-sticks - Coulomb hysteresis, not oscillation.
+Raw data: `tools/fr3/logs/impedance_20260916_162613.jsonl` (40 MB, three gain
+regimes).
+
+**11. A daemon spin thread outliving rclpy's context ABORTS the process.**
+`impedance_panel.py` exited 1 with `terminate called without an active
+exception` on an ordinary window close: `rclpy.shutdown()` ran while a daemon
+thread was still inside `rclpy.spin()`, taking a DDS thread down with the
+context. The abort landed *after* the arm was handed back - by luck of the
+race, not by construction, and it aborts in the one path that guarantees the
+handoff. Fixed by owning the executor and tearing down in order
+(`shutdown_ros()`: hand back -> `executor.shutdown()` -> `join` -> destroy ->
+`rclpy.shutdown()`), with a mutation-checked test. Corollary: **never read a
+GUI exit status as evidence the arm was released** - ask the controller
+manager (`ros2 control list_controllers`).
 
 ## Housekeeping
 

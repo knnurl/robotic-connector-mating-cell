@@ -219,6 +219,47 @@ def fuse_orientation(R_aruco, normal):
     return np.column_stack([x, y / yn, n])
 
 
+def inplane_angle(R_cam_marker):
+    """Angle of the marker X axis in the image, degrees.
+
+    This is rotation about the optical axis - the 6th DOF, and the one an
+    alignment loop that only nulls position and tilt leaves untouched.
+
+    Optical convention: +X is right on screen, +Y is DOWN. So 0 deg puts the
+    marker X axis (the RED axis OpenCV draws) pointing right, +90 straight
+    down, -90 straight up.
+
+    Measured on this cell at 0.01 deg std - by far the best-conditioned
+    quantity the marker gives, because it comes from the corner positions
+    rather than from foreshortening.
+    """
+    R = np.asarray(R_cam_marker, dtype=float)
+    if R.shape != (3, 3):
+        return None
+    return float(np.degrees(np.arctan2(R[1, 0], R[0, 0])))
+
+
+def wrap_deg(a):
+    """Wrap to (-180, 180]."""
+    w = (float(a) + 180.0) % 360.0 - 180.0
+    # the modulo lands exactly 180 on -180; keep the documented half-open end
+    return 180.0 if w == -180.0 else w
+
+
+def inplane_correction(current_deg, target_deg, limit_deg=None):
+    """Rotation about the optical axis that moves current -> target.
+
+    Returns degrees to rotate the CAMERA about its own Z, clamped to
+    limit_deg. Takes the short way round, so a target of +90 from +83.67 is
+    a 6.33 deg move, not 353.67.
+    """
+    err = wrap_deg(float(current_deg) - float(target_deg))
+    if limit_deg is not None:
+        lim = abs(float(limit_deg))
+        err = max(-lim, min(lim, err))
+    return err
+
+
 def disambiguate_by_normal(candidate_normals, reference_normal):
     """Pick the candidate whose normal best agrees with the reference.
 

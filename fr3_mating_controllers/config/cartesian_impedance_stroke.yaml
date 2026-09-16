@@ -7,41 +7,61 @@
 # (--inactive: the mating controller activates it only for the INSERT
 # stroke and hands back to the trajectory controller afterwards.)
 #
+# Commission it with tools/fr3/impedance_panel.py, which walks the README
+# ladder. Every value below is range-checked: out-of-range values make
+# configure fail, and a live change with any value out of range is rejected
+# (all-or-nothing when sent atomically, as the panel does).
+#
 # TUNING GUIDE (in this order, on the real cell):
-#  1. float_mode: true -> arm must free-float smoothly under hand pressure.
-#     This is the RT-loop proof: any jitter/reflex here is a network/RT
-#     problem (run tools/fr3/fr3_preflight.sh), not a gain problem.
-#  2. float_mode: false, hold test: push the TCP laterally - it should
-#     feel like a soft spring (~150 N/m: 15 N gives ~10 cm) and snap back
-#     critically damped (no oscillation). Push along tool Z - noticeably
-#     stiffer (~800 N/m).
+#  1. float_mode: true -> arm must free-float smoothly under GENTLE hand
+#     pressure (under 10 N). This is the RT-loop proof: any jitter/reflex
+#     here is a network/RT problem (run tools/fr3/fr3_preflight.sh), not a
+#     gain problem. A slow sag means the payload is set wrong.
+#  2. float_mode: false, hold test: push the TCP laterally - it should feel
+#     like a soft spring (~150 N/m: 15 N gives ~10 cm); push along tool Z -
+#     noticeably stiffer (~800 N/m: 12 N gives ~1.5 cm). One small overshoot
+#     on release is normal: D = 2*zeta*sqrt(K) is critical damping for 1 kg,
+#     and the arm's apparent mass is a few kg (effective zeta ~0.5-0.7).
+#     Ringing for more than a couple of cycles is not.
 #  3. Lateral stiffness sets self-alignment: TOO SOFT and the stroke stalls
 #     on friction; TOO STIFF and it fights the chamfer instead of sliding
 #     in. Start 150, adjust by +/-50. Rotational r/p likewise (10 Nm/rad).
 #  4. Tool-Z stiffness sets insertion drive: it must overcome mating
 #     friction at a lag of F/k (800 N/m at 8 N contact = 10 mm lag - the
 #     equilibrium leads the flange by that much at full preload).
-#  5. damping_ratio 1.0 = critical. Drop toward 0.7 only if insertion
-#     feels sluggish; raise above 1.0 if contact chatter appears.
+#  5. damping_ratio: raise toward 1.4 if the hold test rings; drop toward
+#     0.7 only if insertion feels sluggish.
 
 cartesian_impedance_stroke_controller:
   ros__parameters:
     type: fr3_mating_controllers/CartesianImpedanceStrokeController
     arm_id: fr3
 
+    # --- live-tunable (switching float OFF re-seeds the equilibrium) ---
     float_mode: false
 
     # Tool-frame stiffness: soft lateral X/Y + roll/pitch (self-align),
     # firm along tool Z (the stroke axis).
-    k_pos_tool: [150.0, 150.0, 800.0]   # N/m
-    k_rot_tool: [10.0, 10.0, 20.0]      # Nm/rad (yaw stiffer: keying)
-    damping_ratio: 1.0                  # D = 2*zeta*sqrt(K), per axis
-    nullspace_stiffness: 5.0            # Nm/rad toward the activation posture
+    k_pos_tool: [150.0, 150.0, 800.0]   # N/m, each 0-3000
+    k_rot_tool: [10.0, 10.0, 20.0]      # Nm/rad, each 0-300 (yaw stiffer: keying)
+    damping_ratio: 1.0                  # 0.1-2.0; D = 2*zeta*sqrt(K), per axis
+    nullspace_stiffness: 5.0            # Nm/rad, 0-50, toward the activation posture
 
+    # --- configure-time only: clean the controller up to change these ---
     # Equilibrium slew limits (fr3_backend pattern): topic jumps become
     # bounded ramps. Also caps the effective stroke speed.
-    setpoint_slew_mps: 0.05
-    setpoint_slew_rps: 0.5
+    setpoint_slew_mps: 0.05             # 0.001-0.25
+    setpoint_slew_rps: 0.5              # 0.001-1.0
 
-    # Torque-rate saturation per 1 ms cycle (FCI discontinuity limit).
+    # Ceilings on the commanded wrench, whatever the pose error. The panel's
+    # collision reflex threshold (40 N) sits ~10 N above max_force_n. The
+    # reflex watches the ESTIMATED external wrench, so keep max_force_n well
+    # below it.
+    max_force_n: 30.0                   # 1-100
+    max_torque_nm: 10.0                 # 0.5-30
+
+    # Per-joint torque ceiling, never above the FR3 limits.
+    tau_max_nm: [87.0, 87.0, 87.0, 87.0, 12.0, 12.0, 12.0]
+
+    # Torque-rate saturation per 1 ms cycle (FCI discontinuity limit, max 1.0).
     tau_rate_limit: 1.0

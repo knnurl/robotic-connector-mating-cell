@@ -27,6 +27,8 @@
        state interfaces (Jacobian, coriolis, EE pose from libfranka). -->
   <depend>franka_semantic_components</depend>
 
+  <test_depend>ament_cmake_gtest</test_depend>
+
   <export>
     <build_type>ament_cmake</build_type>
   </export>

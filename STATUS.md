@@ -6,6 +6,9 @@ how to use it at the current stage, and what remains. Companion docs:
 [TODO.md](TODO.md) (task list), [HANDOFF.md](HANDOFF.md) (original audit,
 2026-07-05, now historical).*
 
+> **Short, current version: [PROJECT_STATE.md](PROJECT_STATE.md)** — where the
+> project stands, what is next, and the open risks (updated 2026-09-15).
+
 ---
 
 ## 1. One-paragraph state of the world
@@ -36,13 +39,36 @@ after fixing two stacked defects in it (IPPE mirror-solution flipping at
 62% of frames, and a 2.6 deg out-of-plane magnitude bias; both detailed in
 TODO.md "Lessons"). The camera now runs at 90 fps with depth.
 
-What is still NOT proven: **mating**. Hand-eye *rotation* is calibrated
-empirically, but `handeye_xyz` (translation) remains the dry-run guess, so
-connector offsets, standoff and insertion depth are all untaught. The
-Cartesian-impedance backend has still never run on hardware. And the FCI
-link currently shows ~4.7% packet loss, which has killed the stack twice
-mid-motion and blocks reliable robot work until resolved. `handeye_calib`
-for the translation is the next action.
+**Updated 2026-09-15 — hand-eye calibrated, servo backend rebuilt.**
+Hand-eye is now measured rather than guessed (Tsai, 21 poses, residual
+3.17 mm / 1.57 deg; validated by an 8.14 mm static-marker scatter against
+170.6 mm for the old guess). The operator panel became a two-column
+dashboard: live camera, convergence history, connection pills, PAUSE/RESUME,
+a robot-state gate and a whole-arm Z floor. The cartesian backend converges
+to ~1 mm and is the trustworthy one. The servo backend turned out to be
+streaming into an **effort-mode** trajectory controller, which stalled the
+arm outright (90 s of commanded motion, 0.00 mm/s measured) and made it
+buzz; it now streams joint positions to a dedicated position controller that
+`align_gui` swaps in for the duration of a run. That rebuild is unit-tested
+but **not yet validated on hardware**. See TODO.md lessons 6-9.
+
+**The active path is now impedance commissioning.** The servo alignment
+backend is parked (it works in sim and unit tests, unvalidated on hardware
+since the controller fix); alignment stays on the cartesian backend, which
+works. The insertion backend is the real open risk — never run, and it
+commands torque — so it gained pre-contact guards (force/moment and
+per-joint ceilings, non-finite guards, live gains, and a float→hold re-seed
+so the ladder cannot snap the arm back) and a commissioning rig,
+`tools/fr3/impedance_panel.py`, with one button per rung of its README
+ladder.
+
+What is still NOT proven: **mating**, the impedance backend on hardware, and
+the rebuilt servo backend.
+Connector offsets, standoff and insertion depth are all untaught, and the
+Cartesian-impedance backend has still never run on hardware. The FCI link
+still drops the stack occasionally (a `communication_constraints_violation`
+killed it mid-run on 2026-09-15), which remains the background risk for any
+long robot session.
 
 ---
 
