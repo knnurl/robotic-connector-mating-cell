@@ -646,6 +646,47 @@ def test_trace_is_safe_across_threads(panel_mod):
     assert all(json.loads(line)['rec'] == 'x' for line in lines)
 
 
+def test_trace_never_calls_tk(panel_mod):
+    """The spin thread traces at 50 Hz holding _trace_lock. A Tk call there
+    (active() -> tabs.select()) waits for the Tk thread, which may itself be
+    waiting for _trace_lock in a status record: the 2026-09-23 freeze, twice."""
+    import io
+    import json
+    tk_calls = []
+    p = types.SimpleNamespace(tracef=io.StringIO(), _trace_lock=threading.Lock(),
+                              _built=True, _tab_name='IMPEDANCE',
+                              active=lambda: tk_calls.append('active'))
+    types.MethodType(panel_mod.CellPanel.trace, p)({'rec': 'sample'})
+    assert not tk_calls
+    assert json.loads(p.tracef.getvalue())['tab'] == 'IMPEDANCE'
+
+
+def test_the_tab_name_is_cached_on_the_tk_thread(panel_mod):
+    pane = types.SimpleNamespace(NAME='ALIGN')
+    p = types.SimpleNamespace(_tab_name='?', active=lambda: pane,
+                              set_status=lambda *a, **k: None)
+    types.MethodType(panel_mod.CellPanel._on_tab_change, p)()
+    assert p._tab_name == 'ALIGN'
+
+
+def test_no_tk_call_is_made_while_holding_a_lock():
+    """Any thread holding a lock must not wait on the Tk thread - a static
+    scan, so the next such call fails here instead of freezing the panel."""
+    import ast
+    tk_names = {'say', 'set_status', 'config', 'configure', 'after', 'pack',
+                'pack_forget', 'insert', 'see', 'select', 'index',
+                'itemconfig', 'coords', 'delete', 'active', 'update'}
+    tree = ast.parse((SRC / 'tools/fr3/cell_panel.py').read_text())
+    found = []
+    for w in ast.walk(tree):
+        if isinstance(w, ast.With) and any(
+                'lock' in ast.unparse(i.context_expr).lower() for i in w.items):
+            found += [f'line {c.lineno}: {c.func.attr}()' for c in ast.walk(w)
+                      if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                      and c.func.attr in tk_names]
+    assert not found, found
+
+
 # ---- review round 2: close, HOLD, restore, exit, live view ---------------------------
 
 def test_close_stays_open_when_the_controller_manager_is_silent(panel_mod):

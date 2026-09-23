@@ -2939,6 +2939,7 @@ class CellPanel:
         self._closing = False
         self._built = False          # panes exist; active() is safe to call
         self._trace_lock = threading.Lock()
+        self._tab_name = '?'         # set by the Tk thread; read by trace()
 
         self.root = tk.Tk()
         self.root.title('FR3 Cell Control  -  align, impedance, track')
@@ -3009,6 +3010,7 @@ class CellPanel:
                                bg=T['page'], font=self.f_caption)
         self.status.pack(fill='x', pady=(6, 0))
         self._built = True
+        self._tab_name = self.active().NAME
 
         node.on_mode_change = self.align._on_mode_change
         node.on_sample = self.ladder._sample
@@ -3027,7 +3029,9 @@ class CellPanel:
         return self.panes[self.tabs.index(self.tabs.select())]
 
     def _on_tab_change(self, _evt=None):
-        self.set_status(f'{self.active().NAME} tab')
+        """Tk thread: cache the tab name that trace() stamps on records."""
+        self._tab_name = self.active().NAME
+        self.set_status(f'{self._tab_name} tab')
 
     def go(self, fn, *a):
         """Dispatch to the active pane. Each pane keeps its own preconditions
@@ -3189,14 +3193,10 @@ class CellPanel:
             if self.tracef is None:
                 return
             rec['t'] = time.time()
-            # Which tab wrote it. Defensive: trace() is reachable from the
-            # spin thread before the panes exist and during teardown.
-            try:
-                tab = self.active().NAME if getattr(self, '_built', False) \
-                    else '?'
-            except Exception:                               # noqa: BLE001
-                tab = '?'
-            rec.setdefault('tab', tab)
+            # Which tab wrote it: the name the Tk thread cached. Asking the
+            # notebook here would be a Tk call under _trace_lock from the
+            # spin thread, which deadlocks against a Tk-thread trace().
+            rec.setdefault('tab', getattr(self, '_tab_name', '?'))
             try:
                 self.tracef.write(json.dumps(rec, default=float) + '\n')
                 self.tracef.flush()
