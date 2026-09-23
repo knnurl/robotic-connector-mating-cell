@@ -13,7 +13,8 @@ safe parameters, and the network/RT hardening the FR3 specifically needs.
 | `cell_panel.py` | The operator panel: ALIGN, the IMPEDANCE ladder, TRACK. Every motion is a button press |
 | `theme.py` | The panel's colour palette |
 | `state_relay.py` | C++ `topic_tools throttle` child that relays the 1 kHz robot state to the panel at 50 Hz |
-| `analyse_trace.py` | Summarises a panel trace (`$FR3_LOG_DIR/YYYY-MM-DD/`) |
+| `analyse_trace.py` | Summarises panel (`cell_*`) and tracking (`tracking_*`) traces; with no argument, the newest under `$FR3_LOG_DIR` |
+| `sim/tracking_smoke.py` | No-robot smoke test: the real `tracking_node` in a fake cell on isolated DDS domain 87 (run by `tools/run_tests.sh`) |
 | `fr3_params.yaml` | Node params (`tracking_node`, and the parked `mating_node`): `fr3_arm`/`fr3_hand_tcp`, OMPL, reduced speeds/depth, **insertion disabled by default** |
 | `cyclonedds_fr3.xml` | DDS interface isolation + buffer tuning (the bandwidth fix) |
 | `realsense_low_bw.yaml` | D405 config: colour-only, 640×480@15, **no pointcloud**. This 15 is also the `/aruco/pose` rate in topic mode — see "Continuous marker tracking" |
