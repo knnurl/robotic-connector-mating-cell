@@ -649,7 +649,11 @@ private:
             std::future_status::ready) {
             return "the controller manager did not answer";
         }
-        for (const auto &c : future.get()->controller) {
+        // Named, not iterated in place: std::future::get() returns the only
+        // owner by value, and a range-for over its member would outlive it
+        // (the 2026-09-23 segfault on the first hardware START).
+        const auto response = future.get();
+        for (const auto &c : response->controller) {
             if (c.name == params_.impedance_controller) {
                 return c.state == "active"
                            ? std::string()
@@ -1122,9 +1126,13 @@ private:
         if (params_.log_dir.empty()) {
             return;
         }
+        // Local time, like cell_panel's cell_*.jsonl, so one session's two
+        // traces sort and pair by name.
         const std::time_t now = std::time(nullptr);
+        std::tm local{};
+        localtime_r(&now, &local);
         char stamp[32] = {0};
-        std::strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", std::gmtime(&now));
+        std::strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", &local);
         const std::string path =
             params_.log_dir + "/tracking_" + stamp + ".jsonl";
         std::lock_guard<std::mutex> lock(log_mutex_);
