@@ -122,6 +122,16 @@ def test_tracking_log_summary(tmp_path):
     assert f'pos error  p50 {p50:.2f}  p95 {p95:.2f}  max 10.00 mm' in out
     assert 'lead       p50' in out and 'max 4.50 mm' in out
     assert 'policy     hold, 7.0 s -> clamp' in out
+    assert 'buzz       none' in out          # logs from before the watchdog
+
+
+def test_the_buzz_level_is_summarised(tmp_path):
+    """How close a run came to the watchdog's stop, from buzz_nm per tick."""
+    ticks = [dict(_tick(t, True, 1.0), buzz_nm=0.02 + 0.01 * t) for t in range(10)]
+    ticks[-1]['buzz_nm'] = 2.4
+    path = _write(tmp_path / 'tracking_20260923_182543.jsonl', ticks)
+    out = _text(path)
+    assert 'buzz       p50 0.07' in out and 'max 2.40 Nm' in out
 
 
 def test_newest_log_prefers_fr3_log_dir_and_its_day_folders(

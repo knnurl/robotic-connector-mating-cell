@@ -84,7 +84,7 @@ def summarise_tracking(path):
     n = published = clamped = 0
     t0 = t1 = None
     holds = collections.Counter()
-    pos, rot, lead_mm, lead_deg, policies = [], [], [], [], []
+    pos, rot, lead_mm, lead_deg, buzz, policies = [], [], [], [], [], []
     for r in records(path):
         n += 1
         t0, t1 = (r['t'] if t0 is None else t0), r['t']
@@ -97,6 +97,7 @@ def summarise_tracking(path):
         rot.append(r.get('rot_err_deg'))
         lead_mm.append(r.get('lead_mm'))
         lead_deg.append(r.get('lead_deg'))
+        buzz.append(r.get('buzz_nm'))            # absent before the watchdog
         if not policies or policies[-1][1] != r.get('policy'):
             policies.append((r['t'], r.get('policy')))
     out = [f'=== {path.name}  (tracking_node, {n} ticks) ===']
@@ -113,7 +114,8 @@ def summarise_tracking(path):
             f'  lead       {spread(lead_mm, "mm")}',
             f'             {spread(lead_deg, "deg")}',
             f'  policy     {policies[0][1]}' + ''.join(
-                f', {t - t0:.1f} s -> {p}' for t, p in policies[1:])]
+                f', {t - t0:.1f} s -> {p}' for t, p in policies[1:]),
+            f'  buzz       {spread(buzz, "Nm")}']
     return out
 
 

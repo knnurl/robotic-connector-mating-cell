@@ -3,6 +3,7 @@
 // over-lead policy and the publish veto - and the whole chain closed around
 // a simulated arm.
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <string>
@@ -767,6 +768,92 @@ TEST(RotationVector, FoldsAtPi)
 
     // An identity rotation has no axis to speak of: it must give exactly zero.
     EXPECT_NEAR(rotation_vector(tf2::Quaternion::getIdentity()).length(), 0.0, 1e-15);
+}
+
+// ---- buzz meter -------------------------------------------------------------
+
+namespace
+{
+
+// A gravity-like static load, a slow 1 Hz tracking motion on every joint,
+// and an optional 40 Hz buzz on J1 - the 2026-09-23 wrist mode, which read
+// ~4 Nm on J1.
+std::array<double, 7> torques(double t, double slow_nm, double buzz_nm)
+{
+    std::array<double, 7> tau{0.2, -21.0, 0.4, 14.0, 0.6, 2.1, 0.1};
+    for (auto &x : tau) {
+        x += slow_nm * std::sin(2.0 * M_PI * 1.0 * t);
+    }
+    tau[0] += buzz_nm * std::sin(2.0 * M_PI * 40.0 * t);
+    return tau;
+}
+
+}  // namespace
+
+TEST(BuzzMeter, AStaticLoadIsQuietFromTheFirstSample)
+{
+    tracking_law::BuzzMeter meter;
+    double worst = 0.0;
+    for (int i = 0; i < 1000; ++i) {
+        worst = std::max(worst, meter.update(torques(i * 1e-3, 0.0, 0.0)));
+    }
+    EXPECT_LT(worst, 1e-9);   // primed: 21 Nm of gravity is not a step
+}
+
+TEST(BuzzMeter, TrackingMotionStaysQuiet)
+{
+    tracking_law::BuzzMeter meter;
+    double worst = 0.0;
+    for (int i = 0; i < 5000; ++i) {
+        worst = std::max(worst, meter.update(torques(i * 1e-3, 3.0, 0.0)));
+    }
+    EXPECT_LT(worst, 0.05);   // 3 Nm at 1 Hz, against the 1 Nm stop
+}
+
+TEST(BuzzMeter, AFortyHertzBuzzTripsWithinFiftyMillisecondsOnItsJoint)
+{
+    tracking_law::BuzzMeter meter;
+    for (int i = 0; i < 1000; ++i) {
+        meter.update(torques(i * 1e-3, 3.0, 0.0));
+    }
+    int joint = -1;
+    int tripped_at = -1;
+    for (int i = 0; i < 300 && tripped_at < 0; ++i) {
+        if (meter.update(torques(1.0 + i * 1e-3, 3.0, 4.0), &joint) > 1.0) {
+            tripped_at = i;
+        }
+    }
+    ASSERT_GE(tripped_at, 0) << "a 4 Nm buzz never reached the 1 Nm stop";
+    EXPECT_LE(tripped_at, 50);
+    EXPECT_EQ(joint, 0);
+    for (int i = 0; i < 1000; ++i) {
+        meter.update(torques(1.3 + i * 1e-3, 3.0, 4.0), &joint);
+    }
+    EXPECT_NEAR(meter.level(), 4.0 / std::sqrt(2.0), 0.25);   // rms of the buzz
+}
+
+TEST(BuzzMeter, ResetPrimesAgainWithoutATransient)
+{
+    tracking_law::BuzzMeter meter;
+    for (int i = 0; i < 200; ++i) {
+        meter.update(torques(i * 1e-3, 0.0, 0.0));
+    }
+    meter.reset();
+    std::array<double, 7> other{5.0, -30.0, 1.0, 20.0, -1.0, 3.0, 0.5};
+    double worst = 0.0;
+    for (int i = 0; i < 200; ++i) {
+        worst = std::max(worst, meter.update(other));
+    }
+    EXPECT_LT(worst, 1e-9);
+}
+
+TEST(ValidateConfig, RejectsABadBuzzStop)
+{
+    auto cfg = shipped();
+    cfg.buzz_stop_nm = 0.0;
+    EXPECT_NE(check(cfg), "");
+    cfg.buzz_stop_nm = kNan;
+    EXPECT_NE(check(cfg), "");
 }
 
 int main(int argc, char **argv)

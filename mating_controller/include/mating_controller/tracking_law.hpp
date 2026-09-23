@@ -6,6 +6,7 @@
 // (see test/test_tracking_law.cpp).
 #pragma once
 
+#include <array>
 #include <cmath>
 #include <optional>
 #include <string>
@@ -40,6 +41,7 @@ struct Config
     // The value validated at startup. It is live-settable, so the node keeps
     // the current one itself and hands it to decide() every tick.
     std::string over_lead_policy{"hold"};
+    double buzz_stop_nm{0.5};        // Nm rms above 20 Hz on any joint ends tracking (BuzzMeter)
 };
 
 // What to do while the equilibrium would lead the arm by more than
@@ -100,6 +102,79 @@ inline bool raw_fresh(double age_s, double timeout_s)
 {
     return age_s <= timeout_s;   // false for NaN
 }
+
+// Energy above ~20 Hz in the measured joint torques: per joint, a 2nd-order
+// Butterworth high-pass and a 0.1 s running rms. Tracking moves at a few Hz,
+// so its torques barely reach this band; the 2026-09-23 40 Hz wrist buzz
+// (rotational damping 2*zeta*sqrt(k_rot) against the wrist's small inertia)
+// read 4-5 Nm rms on J1/J4 over a 0.02-0.07 Nm floor. Primed by the first
+// sample, so a static gravity load is not a step.
+class BuzzMeter
+{
+public:
+    static constexpr int kJoints = 7;
+
+    explicit BuzzMeter(double rate_hz = 1000.0, double cutoff_hz = 20.0,
+                       double window_s = 0.1)
+    {
+        const double k = std::tan(M_PI * cutoff_hz / rate_hz);
+        const double norm = 1.0 / (1.0 + std::sqrt(2.0) * k + k * k);
+        b0_ = norm;
+        b1_ = -2.0 * norm;
+        a1_ = 2.0 * (k * k - 1.0) * norm;
+        a2_ = (1.0 - std::sqrt(2.0) * k + k * k) * norm;
+        alpha_ = 1.0 / (window_s * rate_hz);
+    }
+
+    void reset() { primed_ = false; }
+
+    // One sample of the measured torques; the loudest joint's rms after it.
+    // A non-finite sample is skipped rather than poisoning the filters.
+    double update(const std::array<double, kJoints> &tau, int *loudest = nullptr)
+    {
+        for (double x : tau) {
+            if (!std::isfinite(x)) {
+                return level(loudest);
+            }
+        }
+        if (!primed_) {
+            for (int j = 0; j < kJoints; ++j) {
+                x1_[j] = x2_[j] = tau[j];
+                y1_[j] = y2_[j] = ms_[j] = 0.0;
+            }
+            primed_ = true;
+        }
+        for (int j = 0; j < kJoints; ++j) {
+            const double y = b0_ * tau[j] + b1_ * x1_[j] + b0_ * x2_[j] - a1_ * y1_[j] -
+                             a2_ * y2_[j];
+            x2_[j] = x1_[j];
+            x1_[j] = tau[j];
+            y2_[j] = y1_[j];
+            y1_[j] = y;
+            ms_[j] += alpha_ * (y * y - ms_[j]);
+        }
+        return level(loudest);
+    }
+
+    double level(int *loudest = nullptr) const
+    {
+        int worst = 0;
+        for (int j = 1; j < kJoints; ++j) {
+            if (ms_[j] > ms_[worst]) {
+                worst = j;
+            }
+        }
+        if (loudest) {
+            *loudest = worst;
+        }
+        return std::sqrt(ms_[worst]);
+    }
+
+private:
+    double b0_, b1_, a1_, a2_, alpha_;
+    bool primed_{false};
+    std::array<double, kJoints> x1_{}, x2_{}, y1_{}, y2_{}, ms_{};
+};
 
 // Rescale to max_norm if longer, preserving direction. This is the whole of
 // the anti-windup: the lead can never ask for more than k * max_norm.
@@ -341,6 +416,9 @@ inline std::string validate_config(const Config &cfg, double k_pos_max_n_per_m,
     }
     if (cfg.max_lead_rad > 0.35) {
         return "tracking_max_lead_rad must not exceed 0.35 rad (20 deg)";
+    }
+    if (!std::isfinite(cfg.buzz_stop_nm) || cfg.buzz_stop_nm <= 0.0) {
+        return "tracking_buzz_stop_nm must be finite and positive";
     }
     if (!parse_over_lead(cfg.over_lead_policy)) {
         return "tracking_over_lead_policy must be hold, stop or clamp, not '" +

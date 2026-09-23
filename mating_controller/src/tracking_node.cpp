@@ -32,9 +32,11 @@
 //     the arm is rather than coasting or extrapolating.
 //
 // The subscriptions only store the latest message and its arrival time; all
-// work happens in the wall timer, never in a callback.
+// work happens in the wall timer, never in a callback - except the buzz
+// watchdog's per-sample filter, which has to see every 1 kHz robot state.
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -102,6 +104,7 @@ struct Params
     double max_lead_rad{0.26};
     std::string over_lead_policy{"hold"};
     double z_floor_m{0.10};             // absolute, base frame
+    double buzz_stop_nm{0.5};           // Nm rms above 20 Hz on any joint
     double state_timeout_s{0.1};
     double profile_timeout_s{2.0};
     double settle_s{1.0};
@@ -145,6 +148,7 @@ public:
         cfg_.max_lead_rad = params_.max_lead_rad;
         cfg_.over_lead_policy = params_.over_lead_policy;
         cfg_.z_floor_m = params_.z_floor_m;
+        cfg_.buzz_stop_nm = params_.buzz_stop_nm;
         // A lead that could exceed 15 N must be a startup refusal, not a
         // surprise with the arm moving.
         const std::string why = tracking_law::validate_config(
@@ -194,6 +198,13 @@ public:
                 std::lock_guard<std::mutex> lock(state_mutex_);
                 tf2::fromMsg(msg->o_t_ee.pose, latest_ee_);
                 has_state_ = true;
+                // Every 1 kHz sample, tracking or not: the buzz watchdog.
+                const auto &effort = msg->measured_joint_state.effort;
+                if (effort.size() >= tracking_law::BuzzMeter::kJoints) {
+                    std::array<double, tracking_law::BuzzMeter::kJoints> tau;
+                    std::copy_n(effort.begin(), tau.size(), tau.begin());
+                    buzz_nm_ = buzz_.update(tau, &buzz_joint_);
+                }
                 latest_state_arrival_ = std::chrono::steady_clock::now();
             },
             sub_options);
@@ -374,6 +385,7 @@ private:
         get("tracking_max_lead_rad", p.max_lead_rad);
         get("tracking_over_lead_policy", p.over_lead_policy);
         get("tracking_z_floor_m", p.z_floor_m);
+        get("tracking_buzz_stop_nm", p.buzz_stop_nm);
         get("tracking_state_timeout_s", p.state_timeout_s);
         get("tracking_profile_timeout_s", p.profile_timeout_s);
         get("tracking_settle_s", p.settle_s);
@@ -529,6 +541,16 @@ private:
     // A frozen robot state against a moving goal reads as a constant error
     // and would wind the lead to its clamp on stale data, so the measured
     // pose is freshness-checked exactly like vision is.
+    // The loudest joint's torque rms above 20 Hz, and which joint (0-based).
+    double buzz_level(int *joint = nullptr)
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (joint) {
+            *joint = buzz_joint_;
+        }
+        return buzz_nm_;
+    }
+
     std::optional<tf2::Transform> fresh_measured_ee()
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -933,6 +955,21 @@ private:
             return;
         }
         const auto measured = fresh_measured_ee();
+        // First, whatever vision says: a buzz means these gains are unstable
+        // here, and only putting the operator's gains back stops it.
+        int buzz_joint = 0;
+        const double buzz_nm = buzz_level(&buzz_joint);
+        if (buzz_nm > cfg_.buzz_stop_nm) {
+            char why[160];
+            std::snprintf(why, sizeof(why),
+                          "buzz: J%d %.2f Nm rms above 20 Hz (stop at %.2f Nm) - "
+                          "tracking stopped, gains restored",
+                          buzz_joint + 1, buzz_nm, cfg_.buzz_stop_nm);
+            stop_from_tick(measured, why);
+            log_record(NAN, nullptr, measured ? &*measured : nullptr, NAN, NAN, false, why,
+                       policy_);
+            return report_tick("stopping", why, NAN, NAN);
+        }
         if (!measured) {
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
                                  "Robot state stale on %s - holding.",
@@ -993,14 +1030,7 @@ private:
             state = "holding";
             break;
         case tracking_law::Verdict::Act::kStop:
-            // Ends here, holding where the arm is. The gain restore is
-            // halt_tracking()'s, which needs the lock this tick holds; the
-            // status timer runs it, or a STOP does if it gets there first.
-            RCLCPP_WARN(get_logger(), "Stopping tracking: %s", verdict.reason.c_str());
-            publish_equilibrium(*measured);
-            tracking_ = false;
-            pending_reason_ = verdict.reason;
-            stop_pending_ = true;
+            stop_from_tick(measured, verdict.reason);
             state = "stopping";
             break;
         }
@@ -1009,6 +1039,20 @@ private:
                    verdict.reason, policy);
         report_tick(state, published ? std::string() : verdict.reason, pos_err_mm,
                     rot_err_deg);
+    }
+
+    // Ends tracking from inside tick(), holding where the arm is. The gain
+    // restore is halt_tracking()'s, which needs the lock this tick holds; the
+    // status timer runs it, or a STOP does if it gets there first.
+    void stop_from_tick(const std::optional<tf2::Transform> &measured, const std::string &why)
+    {
+        RCLCPP_WARN(get_logger(), "Stopping tracking: %s", why.c_str());
+        if (measured) {
+            publish_equilibrium(*measured);
+        }
+        tracking_ = false;
+        pending_reason_ = why;
+        stop_pending_ = true;
     }
 
     // A tick that cannot compute a goal: hold, and log and report why with
@@ -1114,6 +1158,7 @@ private:
         add("lead_deg", num(s.lead_deg, 2));
         add("marker_age_s", num(marker_age_s(), 3));
         add("raw_age_s", num(raw_age_s(), 3));
+        add("buzz_nm", num(buzz_level(), 2));
         add("standoff_m", num(s.standoff_m, 3));
         add("inplane_deg", num(s.inplane_deg, 1));
         status_pub_->publish(msg);
@@ -1192,6 +1237,7 @@ private:
               << ",\"rot_err_deg\":" << num(rot_err_deg)
               << ",\"lead_mm\":" << num(lead_.pos.length() * 1000.0)
               << ",\"lead_deg\":" << num(lead_.rot.length() * 180.0 / M_PI)
+              << ",\"buzz_nm\":" << num(buzz_level())
               << ",\"published\":" << (published ? "true" : "false")
               << ",\"policy\":\"" << tracking_law::over_lead_name(policy) << "\""
               << ",\"reason\":\"" << reason << "\"}\n";
@@ -1243,6 +1289,9 @@ private:
 
     std::mutex state_mutex_;
     tf2::Transform latest_ee_;
+    tracking_law::BuzzMeter buzz_;       // these three under state_mutex_
+    double buzz_nm_{0.0};
+    int buzz_joint_{0};
     bool has_state_{false};
     std::chrono::steady_clock::time_point latest_state_arrival_;
 

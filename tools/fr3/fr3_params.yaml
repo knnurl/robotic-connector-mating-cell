@@ -147,6 +147,11 @@
     # hold unless a RAW detection (optical frame, no KF) is this fresh.
     tracking_raw_pose_topic: /aruco/pose_raw
     tracking_raw_timeout_s: 0.25        # s; ~3 frames at 15 fps
+    # Buzz watchdog: tracking stops (gains restored) when any joint's measured
+    # torque above 20 Hz exceeds this rms. 2026-09-23 at 1 kHz: normal work
+    # peaked at 0.15 Nm over 24 min; the 40 Hz wrist buzz read 4-5 Nm, and at
+    # 0.5 Nm this would have stopped it 10 s before the operator did.
+    tracking_buzz_stop_nm: 0.5
 
     # Gain profile (TRACKING_SPEC.md section 4 C1). Sent as ONE atomic
     # set_parameters request; the controller's GainLimits still reject the

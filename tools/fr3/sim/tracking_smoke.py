@@ -121,6 +121,7 @@ class Cell(Node):
         self.eq = None
         self.eq_count = 0
         self.raw_on = True
+        self.buzz_nm = 0.0                 # amplitude of an injected 40 Hz torque on J1
         self.tfb = TransformBroadcaster(self)
         StaticTransformBroadcaster(self).sendTransform(tf_msg(
             T_TCP_CAM, 'fr3_hand_tcp', 'camera_color_optical_frame',
@@ -155,6 +156,12 @@ class Cell(Node):
         state = FrankaRobotState()
         state.header.stamp = now
         state.o_t_ee = pose_msg(tcp @ T_TCP_EE, 'fr3_link0', now)
+        # Gravity-like joint torques, plus the 2026-09-23 wrist buzz on demand.
+        # Published at 100 Hz, not the robot's 1 kHz: this checks the wiring;
+        # the thresholds were checked against recorded 1 kHz data.
+        tau = [0.2, -21.0, 0.4, 14.0, 0.6, 2.1, 0.1]
+        tau[0] += self.buzz_nm * math.sin(2 * math.pi * 40.0 * time.monotonic())
+        state.measured_joint_state.effort = tau
         self.state_pub.publish(state)
 
     def _vision(self):
@@ -325,6 +332,20 @@ def main():
                 if f.startswith('tracking_') and f.endswith('.jsonl')]
         check('tracking log named in local time',
               len(logs) == 1 and logs[0][18:20] == time.strftime('%H'), str(logs))
+
+        # The buzz watchdog: a 40 Hz torque on J1 while tracking must end the
+        # session by itself and put the operator's gains back.
+        time.sleep(1.0)
+        r = call(op.start)
+        check('START again', bool(r and r.success) and ctl.k_pos() == TRACK_GAINS,
+              r.message if r else 'no reply')
+        cell.buzz_nm = 4.0
+        stopped = wait_for(lambda: op.state()[0] in ('stopping', 'idle')
+                           and 'buzz' in op.state()[1], 2)
+        check('a 40 Hz buzz stops tracking by itself', stopped, str(op.state()))
+        check('operator gains restored after the buzz',
+              wait_for(lambda: ctl.k_pos() == OPERATOR_GAINS, 2), str(ctl.k_pos()))
+        cell.buzz_nm = 0.0
         check('node alive throughout', node.poll() is None, f'exit code {node.poll()}')
     finally:
         if node.poll() is None:
