@@ -3,7 +3,7 @@
 
 #include <gtest/gtest.h>
 
-#include "melfa_rv5as_masterclass/mating_geometry.hpp"
+#include "mating_controller/mating_geometry.hpp"
 
 using mating_geometry::clamped_target;
 using mating_geometry::insertion_target;

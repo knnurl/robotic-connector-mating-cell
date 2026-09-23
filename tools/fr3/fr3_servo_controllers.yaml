@@ -10,7 +10,7 @@
 # audible. Streaming positions instead hands tracking to the robot's own
 # joint-impedance controller inside libfranka, which is what it is for.
 #
-# Loaded INACTIVE by fr3_servo.launch.py; align_gui activates it (and
+# Loaded INACTIVE by fr3_servo.launch.py; cell_panel activates it (and
 # deactivates fr3_arm_controller) only for the duration of a servo run, then
 # always switches back. The two cannot run together: franka_hardware allows
 # exactly one command mode at a time.

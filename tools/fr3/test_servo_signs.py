@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Closed-loop checks for align_gui's servo backend - run before hardware.
+"""Closed-loop checks for cell_panel's servo backend - run before hardware.
 
 A sign error in a velocity servo does not fail gracefully: it drives the arm
 AWAY from the target, faster the further it gets. The three discrete steps
@@ -70,7 +70,7 @@ def simulate(ag, err_mm, tilt_deg, ip_deg, tgt_ip, seed, profile='moderate',
     """
     rng = np.random.default_rng(seed)
     gui = _Gui(profile)
-    fn = error_fn or ag.Gui._servo_error
+    fn = error_fn or ag.AlignPane._servo_error
     P = ag.SERVO_PROFILES[profile]
     Rx = _q2R(*HANDEYE_Q)
 
@@ -88,8 +88,8 @@ def simulate(ag, err_mm, tilt_deg, ip_deg, tgt_ip, seed, profile='moderate',
     for k in range(int(max_s / dt)):
         R_cm, p_cm = C_R.T @ M_R, C_R.T @ (M_p - C_p)
         lin, ang, err, tilt, ip = fn(gui, (p_cm, R_cm), tgt_ip)
-        lin = ag.Gui._clamp(lin, P['lin'])
-        ang = ag.Gui._clamp(ang, np.radians(P['ang']))
+        lin = ag.AlignPane._clamp(lin, P['lin'])
+        ang = ag.AlignPane._clamp(ang, np.radians(P['ang']))
         ipe = 0.0 if tgt_ip is None else abs(ag.wrap_deg(ip - tgt_ip))
         hist.append((err, tilt, ipe, float(np.linalg.norm(lin))))
         if err < 0.002 and tilt < ag.ROT_TOL_DEG and ipe < ag.INPLANE_TOL_DEG:
@@ -136,7 +136,7 @@ def test_speed_cap_is_honoured(ag, profile):
 
 def test_linear_sign_bug_would_be_caught(ag):
     """The original bug: linear command negated -> drives AWAY."""
-    orig = ag.Gui._servo_error
+    orig = ag.AlignPane._servo_error
 
     def bug(self, m, tgt_ip):
         lin, ang, err, tilt, ip = orig(self, m, tgt_ip)
@@ -149,7 +149,7 @@ def test_linear_sign_bug_would_be_caught(ag):
 
 def test_inplane_sign_bug_would_be_caught(ag):
     """The original bug: in-plane shared tilt's negation -> spins away."""
-    orig = ag.Gui._servo_error
+    orig = ag.AlignPane._servo_error
 
     def bug(self, m, tgt_ip):
         lin, ang, err, tilt, ip = orig(self, m, tgt_ip)
@@ -166,8 +166,8 @@ def test_inplane_sign_bug_would_be_caught(ag):
 
 def test_clamp_preserves_direction(ag):
     v = np.array([3.0, 4.0, 0.0])
-    c = ag.Gui._clamp(v, 1.0)
+    c = ag.AlignPane._clamp(v, 1.0)
     assert abs(np.linalg.norm(c) - 1.0) < 1e-12
     assert np.allclose(c / np.linalg.norm(c), v / np.linalg.norm(v))
     small = np.array([0.1, 0.0, 0.0])
-    assert np.allclose(ag.Gui._clamp(small, 1.0), small)
+    assert np.allclose(ag.AlignPane._clamp(small, 1.0), small)

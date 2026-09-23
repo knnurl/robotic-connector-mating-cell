@@ -15,8 +15,11 @@ rules it enforces are worth pinning:
     no further than MAX_LEAD_MM from the arm, and never below the Z floor
   * whether impedance is live is asked of the controller manager - on
     RELEASE, on close and at exit - so a stale panel cannot strand the arm
+  * tracking is started and stopped by the operator, STOP TRACKING is never
+    greyed out, and the shipped tracking numbers stay inside the limits the
+    C++ enforces
 
-    python3 -m pytest tools/fr3/test_impedance_panel.py -q
+    python3 -m pytest tools/fr3/test_cell_panel.py -q
 """
 
 import pathlib
@@ -44,6 +47,31 @@ class _Var:
         return self.v
 
 
+class _Button:
+    """Enough of a tk.Button for go()'s disable list and for the show/hide
+    paint_tracking() does."""
+
+    def __init__(self):
+        self.state = 'normal'
+        self.text = ''
+        self.packed = False
+
+    def config(self, state=None, text=None, **_kw):
+        if state is not None:
+            self.state = state
+        if text is not None:
+            self.text = text
+
+    def pack(self, **_kw):
+        self.packed = True
+
+    def pack_forget(self):
+        self.packed = False
+
+    def __getitem__(self, key):
+        return self.text if key == 'text' else self.state
+
+
 class FakeNode:
     """A controller manager + robot that behave like the real pair."""
 
@@ -60,6 +88,8 @@ class FakeNode:
             if loaded == 'active':
                 self.ctrl[ARM] = 'inactive'
         self.calls, self.published = [], []
+        self.track_start_cli, self.track_stop_cli = 'start', 'stop'
+        self.trigger_ok = True
         self.param_ok = self.switch_ok = True
         self.load_ok = self.collision_ok = True
         self.load_args = None
@@ -105,21 +135,24 @@ class FakeNode:
     def publish_equilibrium(self, pos, quat):
         self.published.append((np.asarray(pos), np.asarray(quat)))
 
+    def call_trigger(self, cli, timeout_s=6.0):
+        self.calls.append(('trigger', cli))
+        return self.trigger_ok, ('tracking' if self.trigger_ok
+                                 else 'the tracking node is not running')
+
 
 GAINS_OK = {'k_xy': '150', 'k_z': '800', 'k_rp': '10', 'k_yaw': '20',
             'zeta': '1.0'}
 
 
 def _panel(ip, node, active=False, floating=False, step='10',
-           axis='base Z (up)', preflight_ok=True,
-           payload=('0.15', '60', '0', '40'), gains=None):
+           axis='base Z (up)', preflight_ok=True, gains=None):
     p = types.SimpleNamespace(
         n=node, active=active, floating=floating, setpoint=None, busy=False,
         tracef=None, preflight_ok=preflight_ok, driver_down_logged=False,
-        arm_released=False, after_calls=[],
+        arm_released=False, after_calls=[], tracking=False,
         z_floor=(POS[2] - 0.030) if active else None,
         logs=[], traces=[], destroyed=[], v_step=_Var(step), v_axis=_Var(axis),
-        v_mass=_Var(payload[0]), v_com=[_Var(v) for v in payload[1:]],
         tune={k: _Var(v) for k, v in (gains or GAINS_OK).items()})
     p.root = types.SimpleNamespace(
         destroy=lambda: p.destroyed.append(True),
@@ -129,13 +162,31 @@ def _panel(ip, node, active=False, floating=False, step='10',
     p.set_status = lambda *a, **k: None
     p.open_trace = lambda: None
     p.close_trace = lambda: None
+    # The merge split these: the task methods live on LadderPane, the window
+    # chrome on CellPanel. The stand-in plays both, as the real panel does
+    # through the pane's delegation to its shell.
     for name in ('blocked', '_activate', 'float_on', 'hold_on',
-                 'setpoint_step', 'hold_here', 'release', '_banner_state',
-                 'preflight', 'payload', '_wait_mode', 'gains', 'apply_gains',
-                 'on_close', '_clear_run_state', '_driver_down', '_state_age',
-                 '_sample', '_restore_arm_controller', 'tick', '_on_signal'):
-        setattr(p, name, types.MethodType(getattr(ip.Panel, name), p))
-    p.gain_error = ip.Panel.gain_error
+                 'setpoint_step', 'hold_here', 'release', 'banner_state',
+                 'preflight', '_wait_mode', 'gains', 'apply_gains',
+                 '_clear_run_state', '_driver_down', '_state_age',
+                 '_sample', '_restore_arm_controller', 'go_impl',
+                 'start_tracking', 'stop_tracking', 'refresh', 'pill_states',
+                 'paint_tracking'):
+        setattr(p, name, types.MethodType(getattr(ip.LadderPane, name), p))
+    for name in ('on_close', 'tick', '_on_signal', '_update_image',
+                 'toggle_camera'):
+        setattr(p, name, types.MethodType(getattr(ip.CellPanel, name), p))
+    p.go = p.go_impl
+    p._banner_state = p.banner_state
+    p._refresh = p.refresh
+    p._pill_states = p.pill_states
+    p.panes = (p,)
+    p.active_pane = lambda: p
+    p.ladder = p
+    for name in ('b_pre', 'b_float', 'b_hold', 'b_minus', 'b_plus', 'b_here',
+                 'b_track', 'b_track_stop', 'b_release'):
+        setattr(p, name, _Button())
+    p.gain_error = ip.LadderPane.gain_error
     return p
 
 
@@ -182,10 +233,10 @@ def test_preflight_releases_sets_both_and_restores_in_order(ip):
     assert node.calls == [('switch', (), (ARM,)), ('load',), ('collision',),
                           ('switch', (ARM,), ())]
     assert p.preflight_ok is True
+    # The payload now lives in Desk; PRE-FLIGHT only zeroes the FCI load.
     mass, com, inertia = node.load_args
-    assert mass == pytest.approx(0.15)
-    assert com == pytest.approx([0.060, 0.0, 0.040])   # mm in, m out
-    assert all(i > 0 for i in inertia)
+    assert mass == 0.0
+    assert list(com) == [0.0, 0.0, 0.0] and list(inertia) == [0.0, 0.0, 0.0]
     assert node.ctrl[ARM] == 'active' and node.mode == MOVE
 
 
@@ -202,24 +253,6 @@ def test_reflex_threshold_sits_above_the_controller_force_ceiling(ip):
     assert all(lo <= hi for lo, hi in zip(ip.CONTACT_TORQUE_NM,
                                           ip.COLLISION_TORQUE_NM))
     assert ip.PUSH_LIMIT_N < min(ip.CONTACT_WRENCH[:3])
-
-
-@pytest.mark.parametrize('payload', [('', '60', '0', '40'),
-                                     ('abc', '0', '0', '0'),
-                                     ('5.0', '0', '0', '0'),      # > 2 kg
-                                     ('0.1', '900', '0', '0')])   # CoM 0.9 m
-def test_preflight_refuses_bad_payload_before_touching_robot(ip, payload):
-    node = FakeNode()
-    p = _panel(ip, node, preflight_ok=False, payload=payload)
-    p.preflight()
-    assert not node.calls and p.preflight_ok is False
-
-
-def test_zero_payload_is_allowed_when_desk_has_it(ip):
-    node = FakeNode()
-    p = _panel(ip, node, preflight_ok=False, payload=('0', '0', '0', '0'))
-    p.preflight()
-    assert p.preflight_ok is True
 
 
 def test_preflight_refuses_while_impedance_is_active(ip):
@@ -561,7 +594,7 @@ def test_trace_is_safe_across_threads(ip):
     import io
     p = types.SimpleNamespace(tracef=io.StringIO(),
                               _trace_lock=threading.Lock())
-    trace = types.MethodType(ip.Panel.trace, p)
+    trace = types.MethodType(ip.CellPanel.trace, p)
     threads = [threading.Thread(target=lambda: [trace({'rec': 'x', 'i': i})
                                                 for i in range(500)])
                for _ in range(4)]
@@ -736,7 +769,7 @@ class _SlowWriter:
 def test_trace_lock_keeps_concurrent_records_whole(ip):
     import json
     p = types.SimpleNamespace(tracef=_SlowWriter(), _trace_lock=threading.Lock())
-    trace = types.MethodType(ip.Panel.trace, p)
+    trace = types.MethodType(ip.CellPanel.trace, p)
     threads = [threading.Thread(target=lambda: [trace({'rec': 'x', 'i': i})
                                                 for i in range(200)])
                for _ in range(4)]
@@ -831,3 +864,288 @@ def test_shutdown_hands_the_arm_back_even_if_the_teardown_throws(ip,
     with pytest.raises(RuntimeError):
         ip.shutdown_ros(node, None, Executor(), Spin(), say=lambda m: None)
     assert handed == [True]
+
+
+# ---- tracking ---------------------------------------------------------------
+# The shipped tracking numbers (tools/fr3/fr3_params.yaml) must stay inside
+# the limits the C++ enforces, for the same reason the impedance yaml must:
+# a value outside them is a refusal on the day, at the arm, with the operator
+# waiting. The constants are SCRAPED from the headers so a limit moves in one
+# place - which means they must stay bare decimal literals there.
+IMPEDANCE_HPP = ('fr3_mating_controllers/include/fr3_mating_controllers'
+                 '/impedance_detail.hpp')
+TRACKING_HPP = 'mating_controller/include/mating_controller/tracking_law.hpp'
+
+
+def _consts(rel_path):
+    """A const(name) -> float over one C++ header."""
+    header = (SRC / rel_path).read_text()
+
+    def const(name):
+        return float(re.search(rf'{name}\s*=\s*([0-9.]+)', header).group(1))
+    return const
+
+
+def _shipped():
+    """The tracking parameters as the node will actually receive them."""
+    import yaml
+    cfg = yaml.safe_load((SRC / 'tools' / 'fr3'
+                          / 'fr3_params.yaml').read_text())
+    return cfg['/**']['ros__parameters']
+
+
+def _controller_yaml():
+    import yaml
+    return yaml.safe_load((SRC / 'fr3_mating_controllers' / 'config'
+                           / 'cartesian_impedance_stroke.yaml').read_text()
+                          )['cartesian_impedance_stroke_controller'][
+                              'ros__parameters']
+
+
+def test_track_profile_is_inside_the_controllers_gain_limits(ip):
+    """The track profile is applied atomically at ~/start_tracking; outside
+    GainLimits the controller rejects the whole set and tracking does not
+    start."""
+    const = _consts(IMPEDANCE_HPP)
+    prm = _shipped()
+    k_pos, k_rot = prm['track_k_pos_tool'], prm['track_k_rot_tool']
+    assert all(0 <= k <= const('kPosMax') for k in k_pos)
+    assert all(0 <= k <= const('kRotMax') for k in k_rot)
+    assert len(set(k_pos)) == 1 and len(set(k_rot)) == 1, (
+        'the track profile must be isotropic: an anisotropic tool-frame K '
+        'deflects the commanded force off the commanded direction at the '
+        'measured 18.5 deg median tilt (TRACKING_SPEC.md section 4)')
+    assert const('zetaMin') <= prm['track_damping_ratio'] <= 1.0, (
+        'zeta above 1.0 is not covered by the measurement this profile '
+        'rests on (zero overshoot in 32 clean steps, 2026-09-22). '
+        'TRACKING_SPEC.md O1 asks for zeta 0.5 while walking k_rot up, '
+        'which this range allows; to go above 1.0, re-measure and move '
+        'this bound with the evidence.')
+
+
+def test_track_slew_is_inside_the_controllers_slew_limits(ip):
+    """Slew is live now, but ConfigLimits is still the hard bound: the live
+    path validates against the same numbers the configure path does."""
+    const = _consts(IMPEDANCE_HPP)
+    prm = _shipped()
+    assert (const('slewMpsMin') <= prm['track_setpoint_slew_mps']
+            <= const('slewMpsMax'))
+    assert (const('slewRpsMin') <= prm['track_setpoint_slew_rps']
+            <= const('slewRpsMax'))
+
+
+def test_tracking_ceilings_match_the_controller_yaml(ip):
+    """The node validates its lead against ceilings it is TOLD; if those
+    drift from the controller's own, it validates against fiction."""
+    prm, ctrl = _shipped(), _controller_yaml()
+    assert prm['tracking_max_force_n'] == ctrl['max_force_n']
+    assert prm['tracking_max_force_n'] == ip.CONTROLLER_MAX_FORCE_N
+    assert prm['tracking_max_torque_nm'] == ctrl['max_torque_nm']
+
+
+def test_tracking_lead_force_stays_under_every_ceiling(ip):
+    """The integrator's whole anti-windup is the clamp: worst case the lead
+    adds k * lead_max, and that must stay under the controller's ceiling and
+    well under the reflex that kills the driver."""
+    const = _consts(TRACKING_HPP)
+    prm = _shipped()
+    lead_n = max(prm['track_k_pos_tool']) * prm['tracking_lead_max_m']
+    assert lead_n <= const('kLeadForceMaxN')
+    assert const('kLeadForceMaxN') < ip.CONTROLLER_MAX_FORCE_N
+    assert const('kLeadForceMaxN') < min(ip.COLLISION_WRENCH[:3])
+    lead_nm = max(prm['track_k_rot_tool']) * prm['tracking_lead_max_rad']
+    assert lead_nm < prm['tracking_max_torque_nm']
+
+
+def test_tracking_deadbands_match_the_track_stiffness(ip):
+    """The deadband is F_friction / k, so it belongs to the stiffness in use.
+    This catches a deadband copied from another k - the 1.8 mm measured at
+    k = 3000 is wrong here - and a half-done edit when O1 moves k_rot."""
+    const = _consts(TRACKING_HPP)
+    prm = _shipped()
+    band_m = const('kFrictionBreakawayN') / max(prm['track_k_pos_tool'])
+    assert band_m <= prm['tracking_deadband_m'] <= 3.0 * band_m
+    band_rad = const('kFrictionBreakawayNm') / max(prm['track_k_rot_tool'])
+    assert band_rad <= prm['tracking_deadband_rad'] <= 3.0 * band_rad
+
+
+def test_tracking_lead_cap_and_floor_match_the_panel(ip):
+    """A 50 Hz stream must not be looser than the hand-stepped path: same
+    equilibrium-lead cap, same floor under where the run started."""
+    prm = _shipped()
+    assert prm['tracking_max_lead_m'] * 1000 <= ip.MAX_LEAD_MM
+    assert (prm['tracking_floor_below_start_m'] * 1000
+            == pytest.approx(ip.FLOOR_BELOW_HOLD_MM))
+
+
+def test_the_panel_calls_the_services_the_node_actually_offers(ip):
+    """Both buttons are dead - silently, as "the tracking node is not
+    running" - if the node's name or its two service names drift."""
+    node_cpp = (SRC / 'mating_controller' / 'src'
+                / 'tracking_node.cpp').read_text()
+    name = re.search(r'Node\("([a-z_]+)"', node_cpp).group(1)
+    assert name == ip.TRACKING_NODE
+    assert '"~/start_tracking"' in node_cpp
+    assert '"~/stop_tracking"' in node_cpp
+    assert ip.TRACK_START_SRV == f'/{name}/start_tracking'
+    assert ip.TRACK_STOP_SRV == f'/{name}/stop_tracking'
+
+
+def test_stop_tracking_is_never_disabled_by_a_running_action(ip):
+    """A stop control that greys out while the arm is moving is not a stop
+    control. STOP TRACKING is outside go(): still clickable, still answered,
+    while another action holds the panel busy."""
+    node = FakeNode()
+    p = _panel(ip, node, active=True)
+    running = threading.Event()
+    p.go(lambda: running.wait(2.0))
+    try:
+        assert p.busy is True
+        assert p.b_track['state'] == 'disabled'
+        assert p.b_release['state'] == 'disabled'
+        assert p.b_track_stop['state'] == 'normal'
+        p.stop_tracking()
+        assert ('trigger', 'stop') in node.calls
+    finally:
+        running.set()
+
+
+@pytest.mark.parametrize('node_kwargs,panel_kwargs', [
+    (dict(mode=REFLEX), dict(active=True)),       # robot cannot be driven
+    (dict(), dict(active=True, floating=True)),   # free-floating: no gain step
+    (dict(), dict(active=False)),                 # not holding, no Z floor
+])
+def test_start_tracking_refuses_before_touching_the_tracking_node(
+        ip, node_kwargs, panel_kwargs):
+    node = FakeNode(**node_kwargs)
+    p = _panel(ip, node, **panel_kwargs)
+    p.start_tracking()
+    assert not node.calls, 'asked the node to start anyway'
+    assert said(p, 'REFUSING')
+
+
+def test_release_stops_tracking_before_handing_the_arm_back(ip):
+    """An orphaned tracker resumes autonomous motion at the next activation,
+    so RELEASE must stop the 50 Hz stream, and stop it BEFORE the switch."""
+    node = FakeNode(loaded='active')
+    p = _panel(ip, node)
+    p.release()
+    order = [c for c in node.calls if c[0] in ('trigger', 'switch')]
+    assert order[0] == ('trigger', 'stop'), order
+    assert any(c[0] == 'switch' for c in order), order
+    assert order.index(('trigger', 'stop')) < \
+        next(i for i, c in enumerate(order) if c[0] == 'switch')
+
+
+def test_release_does_not_touch_a_dead_driver(ip):
+    """No stop call when there is nothing alive to stop - the node self-halts
+    on the controller leaving ACTIVE, and a dead driver has no services."""
+    node = FakeNode(loaded='active', cm_ready=False, age=9.0)
+    p = _panel(ip, node)
+    p.release()
+    assert not node.calls
+
+
+def test_exit_release_stops_tracking_only_when_impedance_is_live(ip):
+    live = FakeNode(loaded='active')
+    idle = FakeNode(loaded='inactive')
+    assert ip.release_if_active(live, say=lambda m: None) is True
+    assert ('trigger', 'stop') in live.calls
+    assert ip.release_if_active(idle, say=lambda m: None) is True
+    assert not idle.calls
+
+
+def test_track_timeout_exceeds_the_nodes_own_worst_case_start(ip):
+    """The panel must never report 'not started' while the arm is tracking.
+    The node's start makes three parameter round-trips, each bounded by
+    wait_for_service(1 s) + tracking_profile_timeout_s, plus tool-offset
+    sampling and the settle."""
+    prm = _shipped()
+    worst = 3 * (1.0 + prm['tracking_profile_timeout_s']) \
+        + prm['tracking_settle_s'] + 1.0
+    assert ip.TRACK_CALL_TIMEOUT_S >= worst, (
+        f'TRACK_CALL_TIMEOUT_S {ip.TRACK_CALL_TIMEOUT_S} s is below the '
+        f'node\'s {worst} s worst-case start')
+
+
+def test_camera_toggle_creates_and_destroys_the_subscription(ip):
+    """Turning the view off must take the frames OFF THE WIRE, not just stop
+    drawing them: /aruco/debug_image is subscribe-gated at the publisher, so
+    only destroying the subscription stops it being encoded. (The default is
+    ON - ALIGN cannot work blind, and that is what the proven 2026-09-11/15
+    alignment runs used.)"""
+    calls = []
+
+    class CamNode(FakeNode):
+        def camera(self, on):
+            calls.append(on)
+            return on
+
+    node = CamNode()
+    p = _panel(ip, node)
+    p.v_cam = _Var(False)
+    p.photo = None
+    p.image_label = types.SimpleNamespace(config=lambda **k: None)
+    p.toggle_camera = types.MethodType(ip.LadderPane.toggle_camera, p)
+    p._update_image = types.MethodType(ip.CellPanel._update_image, p)
+
+    # nothing subscribes until the box is ticked
+    p._update_image()
+    assert calls == []
+
+    p.v_cam = _Var(True)
+    p.toggle_camera()
+    assert calls == [True]
+    assert p.traces[-1] == {'rec': 'camera', 'on': True}
+
+    p.v_cam = _Var(False)
+    p.toggle_camera()
+    assert calls == [True, False]
+    assert p.traces[-1] == {'rec': 'camera', 'on': False}
+
+
+def test_preflight_zeroes_the_fci_payload_so_desk_is_the_only_source(ip):
+    """The payload lives in Desk's end-effector profile. PRE-FLIGHT sends a
+    ZERO load so a value left by an earlier session can never be added on
+    top of it - the double-count the old entry fields invited."""
+    node = FakeNode()
+    p = _panel(ip, node, preflight_ok=False)
+    p.preflight()
+    assert ('load',) in node.calls, node.calls
+    mass, com, inertia = node.load_args
+    assert mass == 0.0, f'PRE-FLIGHT set a non-zero FCI load: {mass} kg'
+    assert list(com) == [0.0, 0.0, 0.0] and list(inertia) == [0.0, 0.0, 0.0]
+    assert p.traces[0]['mass_kg'] == 0.0
+
+
+def test_stop_tracking_is_only_offered_while_tracking_runs(ip):
+    """A permanently visible red STOP for an idle feature is noise, and it
+    trains the operator to read red as decoration. It appears when the node
+    starts streaming and goes away when it stops."""
+    node = FakeNode(loaded='active')
+    p = _panel(ip, node, active=True)
+    p.paint_tracking()
+    assert not p.b_track_stop.packed, 'STOP offered before tracking started'
+    assert p.b_track.state == 'normal'
+
+    p.start_tracking()
+    assert p.tracking and p.b_track_stop.packed
+    # the node owns the equilibrium now; hand-stepping it would fight the stream
+    assert p.b_track.state == 'disabled'
+    assert all(b.state == 'disabled'
+               for b in (p.b_minus, p.b_plus, p.b_here))
+
+    p.stop_tracking()
+    assert not p.tracking and not p.b_track_stop.packed
+    assert p.b_track.state == 'normal'
+    assert all(b.state == 'normal' for b in (p.b_minus, p.b_plus, p.b_here))
+
+
+def test_release_takes_the_stop_button_away_too(ip):
+    """RELEASE stops the stream, so the button that stops it must go."""
+    node = FakeNode(loaded='active')
+    p = _panel(ip, node, active=True)
+    p.start_tracking()
+    assert p.b_track_stop.packed
+    p.release()
+    assert not p.tracking and not p.b_track_stop.packed

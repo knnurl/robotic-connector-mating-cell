@@ -4,16 +4,16 @@ One command for the whole CELL side. The ROBOT side (driver + move_group)
 stays on the vendor's own launch files - see SETUP_AND_CALIBRATION.md §4.
 
   # MELFA RV-5AS defaults, camera driver publishing image topics:
-  ros2 launch melfa_rv5as_masterclass cell.launch.py \
+  ros2 launch mating_controller cell.launch.py \
       handeye_xyz:="<x> <y> <z>" handeye_quat:="<qx> <qy> <qz> <qw>"
 
   # in-process capture (no image topics), fixed-frame KF, depth-ICP:
-  ros2 launch melfa_rv5as_masterclass cell.launch.py \
+  ros2 launch mating_controller cell.launch.py \
       vision_source:=realsense filter_frame:=rv5as_base \
       template_stl:=/path/connector.stl
 
 Anything robot-specific is an argument; for a different robot pass
-robot_name/moveit_config_package/params_file exactly as move_l.launch.py.
+robot_name/moveit_config_package/params_file exactly as mating_node.launch.py.
 The hand-eye arguments MUST come from handeye_calib (setup guide §2.3) -
 there is deliberately no default: a guessed transform is the dominant
 roll/pitch error source and should never be launched silently.
@@ -45,8 +45,8 @@ def launch_setup(context, *args, **kwargs):
         robot_name, package_name=moveit_config_package).to_moveit_configs()
 
     controller = Node(
-        package='melfa_rv5as_masterclass',
-        executable='move_l',
+        package='mating_controller',
+        executable='mating_node',
         output='screen',
         parameters=[
             moveit_config.robot_description,
@@ -73,7 +73,7 @@ def launch_setup(context, *args, **kwargs):
 
 def generate_launch_description():
     default_params = os.path.join(
-        get_package_share_directory('melfa_rv5as_masterclass'),
+        get_package_share_directory('mating_controller'),
         'config', 'rv5as_params.yaml')
 
     vision = Node(

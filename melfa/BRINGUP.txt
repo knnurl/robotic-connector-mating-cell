@@ -23,5 +23,5 @@ ros2 run roscam cam_pub
 
 # 6. Connector-mating controller
 #    Phases: WAIT_FOR_VISION -> ALIGN_COARSE -> ALIGN_FINE -> INSERT -> MATED
-#    All thresholds/speeds/offsets: melfa_rv5as_masterclass/config/rv5as_params.yaml
-ros2 launch melfa_rv5as_masterclass move_l.launch.py
+#    All thresholds/speeds/offsets: mating_controller/config/rv5as_params.yaml
+ros2 launch mating_controller mating_node.launch.py

@@ -37,9 +37,10 @@ limit).
   atomically, as the panel does. `damping_ratio` 0 is an
   undamped spring and a negative value injects energy — the force cap bounds
   how hard the arm pushes, not whether it oscillates.
-- configure-time parameters are range-checked (configure fails) and cannot be
-  changed while the controller is configured: clean it up, set them, configure
-  again.
+- configure-time parameters — `arm_id`, `max_force_n`, `max_torque_nm`,
+  `tau_max_nm`, `tau_rate_limit` — are range-checked (configure fails) and
+  cannot be changed while the controller is configured: clean it up, set them,
+  configure again. The slew pair is no longer among them; it is live.
 - `float_mode` is live, and switching it OFF re-seeds the equilibrium where
   the arm is now, discarding any setpoint published before — float → hold
   cannot snap the arm back.
@@ -47,12 +48,47 @@ limit).
   fault paths.
 
 **Division of labour:** this controller tracks an equilibrium, compliantly
-— nothing else. The phase machine in `move_l` stays the brain: with
+— nothing else. The phase machine in `mating_node` stays the brain: with
 `insert_backend: impedance` it switches this controller in for INSERT,
 streams the equilibrium along the tool axis (50 Hz, `~/equilibrium_pose`),
 judges the outcome by the external wrench (seated / jam / snag — same
 thresholds as the guarded MoveIt stroke), and hands the arm back to the
 trajectory controller afterwards, whatever happened.
+
+`~/equilibrium_pose` now has **three** possible publishers: `mating_node`'s
+stroke ramp, `cell_panel.py` (IMPEDANCE & TRACK tab)'s hand-stepped setpoints, and
+`mating_controller`'s `tracking_node` (below). `TargetHandoff` simply
+overwrites under a mutex — there is **no arbitration**, so the last publisher
+wins. That is harmless today, because `insert_backend` is `moveit` and
+tracking is off until an operator starts it, but it has to be decided before
+`insert_backend` flips to `impedance`.
+
+**Continuous marker tracking** (`mating_controller/src/tracking_node.cpp`,
+specified in [TRACKING_SPEC.md](../TRACKING_SPEC.md) §5) is the other client
+of this controller. It streams `~/equilibrium_pose` at 50 Hz so the arm
+follows the marker, and closes the `F/k` friction residual with a bounded
+integrator of the **measured** error — the controller cannot know it is
+stuck, only vision can, so that correction belongs outside it. What it asks
+of this controller:
+
+- `~/start_tracking` reads `k_pos_tool`, `k_rot_tool`, `damping_ratio`,
+  `setpoint_slew_mps` and `setpoint_slew_rps` back from the controller,
+  applies the `track_*` set from `tools/fr3/fr3_params.yaml` in **one**
+  `set_parameters_atomically`, and `~/stop_tracking` restores the snapshot.
+  It restores what was *in force*, not the shipped defaults, because the
+  panel retunes gains live; and it refuses to start if it cannot read them.
+- It refuses to start while `float_mode` is true: a free-floating arm must
+  not be gain-stepped.
+- It re-seeds the equilibrium at the measured pose and waits
+  `tracking_settle_s` **before** the gain step, because `k_pos` 150 → 1500 is
+  a tenfold multiplier on whatever equilibrium error already exists, and
+  20 mm of it saturates the 30 N ceiling instantly.
+- On stale vision it publishes the measured pose **once** and then stops.
+  Merely ceasing to publish would not hold the arm: `slew_equilibrium` keeps
+  stepping toward the last target for as long as `have_target_` is true.
+
+**Compiles, never run, review still in flight.** Nothing below about the
+track profile has been seen on hardware.
 
 ## Build and test
 
@@ -66,7 +102,7 @@ colcon test --packages-select fr3_mating_controllers && colcon test-result --ver
 ```
 
 The gtests cover the pure safety logic — gain limits and the setpoint handoff —
-without a robot. The panel side is covered by `tools/fr3/test_impedance_panel.py`.
+without a robot. The panel side is covered by `tools/fr3/test_cell_panel.py`.
 
 ## Bring-up
 
@@ -84,17 +120,17 @@ ros2 launch franka_fr3_moveit_config moveit.launch.py robot_ip:=$FR3_ROBOT_IP
 ros2 run controller_manager spawner cartesian_impedance_stroke_controller \
     --inactive --param-file "$(pwd)/fr3_mating_controllers/config/cartesian_impedance_stroke.yaml"
 # the commissioning rig:
-python3 tools/fr3/impedance_panel.py
+python3 tools/fr3/cell_panel.py
 ```
 
-`move_l` activates/deactivates it around the stroke via
+`mating_node` activates/deactivates it around the stroke via
 `/controller_manager/switch_controller` — never leave it active alongside
 the trajectory controller (STRICT switching enforces this). Both claim the
 effort interface, so a combined swap changes no franka command mode.
 
 ## Commissioning ladder (do not skip steps)
 
-Run it with `tools/fr3/impedance_panel.py`: one button per rung, the order
+Run it with `tools/fr3/cell_panel.py`: one button per rung, the order
 enforced. **Any libfranka reflex kills `ros2_control_node` on this cell**
 (franka_hardware does not catch the exception). The robot stops — it is not
 freed — and the stack must be relaunched and PRE-FLIGHT run again.
@@ -135,10 +171,10 @@ freed — and the stack must be relaunched and PRE-FLIGHT run again.
 |---|---|---|---|
 | `k_pos_tool` | [150, 150, 800] N/m | live, 0–3000 | Lateral softness = self-alignment; Z = stroke drive. Preload at full lag = overdrive × k_z |
 | `k_rot_tool` | [10, 10, 20] Nm/rad | live, 0–300 | Roll/pitch soft (align to socket plane); yaw firmer (keying) |
-| `damping_ratio` | 1.0 | live, 0.1–2.0 | Effective ~0.5–0.7 on the arm. Raise toward 1.4 if the hold test rings; drop toward 0.7 only if insertion is sluggish |
+| `damping_ratio` | 1.0 | live, 0.1–2.0 | Stays 1.0: zero overshoot in 32 clean steps on 2026-09-22, because friction is itself a damper. The one open experiment is zeta 0.5 while walking `k_rot` above 90 ([TRACKING_SPEC.md](../TRACKING_SPEC.md) O1) — do not raise zeta above 1.0 |
 | `nullspace_stiffness` | 5.0 | live, 0–50 | Elbow posture hold; raise if the arm drifts configuration mid-stroke |
 | `float_mode` | false | live | Coriolis only; switching OFF re-seeds the equilibrium |
-| `setpoint_slew_mps/rps` | 0.05 / 0.5 | configure, ≤ 0.25 / ≤ 1.0 | Hard cap on equilibrium motion (safety net under the 50 Hz stream) |
+| `setpoint_slew_mps/rps` | 0.05 / 0.5 | live, ≤ 0.25 / ≤ 1.0 | Hard cap on equilibrium motion, and the actual speed limit — a 50 mm step took 1.05 s against a 0.96 s slew floor, so this is what to change to make tracking faster, not `k_pos_tool`. `tracking_node` raises it to 0.10 / 0.5 on `~/start_tracking`, in the same atomic set as the gains, and restores it on stop. Live means it can be raised while the arm is moving; `ConfigLimits` still refuses anything above 0.25 / 1.0 |
 | `max_force_n` / `max_torque_nm` | 30 / 10 | configure, 1–100 / 0.5–30 | Ceiling on the commanded wrench. Keep well below the panel's 40 N reflex threshold (it watches the estimated wrench) |
 | `tau_max_nm` | FR3 limits | configure, ≤ FR3 limits | Per-joint torque ceiling |
 | `tau_rate_limit` | 1.0 Nm/cycle | configure, ≤ 1.0 | FCI torque-discontinuity guard — do not raise |
@@ -148,9 +184,25 @@ Stroke-side knobs live in `tools/fr3/fr3_params.yaml`:
 lead), `impedance_settle_s`, and the shared force thresholds
 (`contact_force_n`, `max_lateral_force_n`, `min_contact_depth_m`).
 
+Tracking-side knobs live there too, as `tracking_*` (loop rate, `Ki`, the
+lead clamps, the deadbands, the timeouts) and `track_*` (the profile this
+controller is asked to adopt: `[1500, 1500, 1500]` N/m, `[90, 90, 90]`
+Nm/rad, ζ 1.0, slew 0.10 / 0.5). Three of them are **coupled and checked at
+the tracking node's startup**, not here: the deadband must stay within
+`[F/k, 3F/k]` of the stiffness in use, and `k_pos_tool × tracking_lead_max_m`
+must stay under 15 N. Change the track stiffness without moving the other
+two and the node refuses to start.
+
 ## Status
 
 Compiled clean against `franka_ros2` (this workspace) and plugin-exported;
-safety logic unit-tested; **never run against hardware**. Fake hardware
-cannot verify the control law (the mock system does not integrate torques) —
-commissioning happens on the real arm via the ladder above.
+safety logic unit-tested. **Rungs 0–3 of the ladder ran on the real arm on
+2026-09-16 and again on 2026-09-22**: float smooth, hold solid, setpoints
+tracking to within the friction deadband. Rung 4, the dispatched stroke, waits on the force
+thresholds. Fake hardware cannot verify the control law (the mock system does
+not integrate torques) — commissioning happens on the real arm via the ladder
+above.
+
+The tracking client is a step behind that: `tracking_node` **compiles and
+installs, has never run, and has had no adversarial review**. Its V1–V6 plan
+is [TRACKING_SPEC.md](../TRACKING_SPEC.md) §7.

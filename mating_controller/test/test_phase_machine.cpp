@@ -4,7 +4,7 @@
 // recovery, drift-back, plan-failure accounting, and force outcomes.
 #include <gtest/gtest.h>
 
-#include "melfa_rv5as_masterclass/mating_phase_machine.hpp"
+#include "mating_controller/mating_phase_machine.hpp"
 
 using mating_phase_machine::Action;
 using mating_phase_machine::Config;

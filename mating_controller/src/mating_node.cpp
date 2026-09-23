@@ -60,8 +60,8 @@
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 
-#include "melfa_rv5as_masterclass/mating_geometry.hpp"
-#include "melfa_rv5as_masterclass/mating_phase_machine.hpp"
+#include "mating_controller/mating_geometry.hpp"
+#include "mating_controller/mating_phase_machine.hpp"
 
 using namespace std::chrono_literals;
 

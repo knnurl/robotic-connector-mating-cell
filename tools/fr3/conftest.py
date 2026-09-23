@@ -1,7 +1,7 @@
-"""Shared fixture for the align_gui tests: the GUI module with ROS stubbed.
+"""Shared fixture for the cell_panel tests: the GUI module with ROS stubbed.
 
-No ROS, robot or display needed - only align_gui's pure logic is exercised.
-When align_gui gains a ROS import, add its stub here, once.
+No ROS, robot or display needed - only cell_panel's pure logic is exercised.
+When cell_panel gains a ROS import, add its stub here, once.
 """
 
 import importlib.util
@@ -64,11 +64,11 @@ def _load(filename, request):
 
 @pytest.fixture(scope='module')
 def ag(request):
-    """align_gui: the camera-alignment dashboard."""
-    yield from _load('align_gui.py', request)
+    """cell_panel: ALIGN tab of the merged control panel."""
+    yield from _load('cell_panel.py', request)
 
 
 @pytest.fixture(scope='module')
 def ip(request):
-    """impedance_panel: the impedance commissioning ladder."""
-    yield from _load('impedance_panel.py', request)
+    """cell_panel: IMPEDANCE & TRACK tab of the merged control panel."""
+    yield from _load('cell_panel.py', request)

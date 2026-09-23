@@ -1,6 +1,7 @@
 // The two pieces of the impedance controller that decide safety without any
-// robot state: which live gains are acceptable, and how a setpoint reaches the
-// 1 kHz loop. Runs without franka, ROS or a controller manager.
+// robot state: which live gains and slew caps are acceptable, and how a
+// setpoint reaches the 1 kHz loop. Runs without franka, ROS or a controller
+// manager.
 //
 //   colcon test --packages-select fr3_mating_controllers
 #include <gtest/gtest.h>
@@ -15,11 +16,13 @@
 
 #include "fr3_mating_controllers/impedance_detail.hpp"
 
+using fr3_mating_controllers::detail::ConfigLimits;
 using fr3_mating_controllers::detail::GainLimits;
 using fr3_mating_controllers::detail::kTauSpecNm;
 using fr3_mating_controllers::detail::TargetHandoff;
 using fr3_mating_controllers::detail::validate_gains;
 using fr3_mating_controllers::detail::validate_limits;
+using fr3_mating_controllers::detail::validate_slew;
 
 namespace
 {
@@ -192,4 +195,36 @@ TEST(ValidateLimits, RejectsCeilingsThatDisableTheLawOrExceedFci)
     auto over = kTauSpecNm;
     over[5] = 20.0;                                                              // wrist > 12
     EXPECT_NE(validate_limits(30.0, 10.0, 1.0, 0.05, 0.5, over), "");
+}
+
+TEST(ValidateSlew, AcceptsTheStrokeAndTrackingRates)
+{
+    EXPECT_EQ(validate_slew(0.005, 0.5), "");   // the insertion stroke
+    EXPECT_EQ(validate_slew(0.10, 0.5), "");    // the tracking range, both ends
+    EXPECT_EQ(validate_slew(0.25, 0.5), "");
+}
+
+TEST(ValidateSlew, RejectsSlewAboveTheHardBound)
+{
+    EXPECT_NE(validate_slew(ConfigLimits::slewMpsMax + 0.01, 0.5), "");
+    EXPECT_NE(validate_slew(0.10, ConfigLimits::slewRpsMax + 0.1), "");
+}
+
+TEST(ValidateSlew, RejectsZeroOrNonFiniteSlew)
+{
+    // A zero or NaN cap freezes the equilibrium where it stands: the arm would
+    // never reach a target it was told to follow.
+    EXPECT_NE(validate_slew(0.0, 0.5), "");
+    EXPECT_NE(validate_slew(0.10, 0.0), "");
+    EXPECT_NE(validate_slew(kNan, 0.5), "");
+    EXPECT_NE(validate_slew(0.10, kInf), "");
+}
+
+TEST(ValidateSlew, LiveSlewUsesTheSameBoundAsConfigure)
+{
+    // The live path must not admit anything configure refuses, or the panel
+    // could raise the cap past the bound a reconfigure would have rejected.
+    EXPECT_EQ(validate_slew(ConfigLimits::slewMpsMax, ConfigLimits::slewRpsMax), "");
+    EXPECT_EQ(validate_limits(30.0, 10.0, 1.0, ConfigLimits::slewMpsMax,
+                              ConfigLimits::slewRpsMax, kTauSpecNm), "");
 }

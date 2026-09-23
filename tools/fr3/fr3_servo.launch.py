@@ -8,11 +8,11 @@ SRDF the upstream launch renders so the two cannot disagree about the model.
     source tools/fr3/fr3_env.sh
     ros2 launch tools/fr3/fr3_servo.launch.py
 
-Then align_gui's "servo" backend streams TwistStamped on
+Then cell_panel's "servo" backend streams TwistStamped on
 /servo_node/delta_twist_cmds and servo converts it to a continuous joint
 POSITION stream on /fr3_servo_position_controller/commands.
 
-This launch also loads that controller, INACTIVE. align_gui activates it
+This launch also loads that controller, INACTIVE. cell_panel activates it
 (deactivating fr3_arm_controller) for the duration of a servo run and always
 switches back afterwards, because franka_hardware allows exactly one command
 mode at a time:
@@ -23,7 +23,7 @@ Streaming into the effort trajectory controller is what left the arm stalled
 and buzzing - see fr3_servo_controllers.yaml for the measurements.
 
 Servo starts PAUSED: nothing moves until /servo_node/start_servo is called
-(align_gui does this when you select the servo backend).
+(cell_panel does this when you select the servo backend).
 """
 
 import os
@@ -67,7 +67,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         # Loaded and configured but NOT activated: fr3_arm_controller keeps
-        # the arm until align_gui swaps them for a servo run.
+        # the arm until cell_panel swaps them for a servo run.
         Node(
             package='controller_manager',
             executable='spawner',

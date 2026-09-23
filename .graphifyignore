@@ -17,3 +17,6 @@ tools/gui/foxglove_layout.json
 *.md
 *.txt
 *.xml
+
+# Parked MELFA side - FR3 is the only active target
+melfa/

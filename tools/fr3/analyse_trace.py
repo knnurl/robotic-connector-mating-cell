@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarise an align_gui auto-converge trace.
+"""Summarise an cell_panel auto-converge trace.
 
     python3 tools/fr3/analyse_trace.py                  # newest trace
     python3 tools/fr3/analyse_trace.py logs/foo.jsonl

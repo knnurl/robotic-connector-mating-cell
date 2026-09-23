@@ -95,10 +95,10 @@ def _gui(ag, node, profile='conservative', converge='hold'):
     g.z_floor = lambda: 0.050
     g.inplane_target = lambda: None
     g.load_calib = lambda quiet=False: None
-    g._clamp = ag.Gui._clamp
+    g._clamp = ag.AlignPane._clamp
     for name in ('servo_converge', '_servo_error', 'robot_block', 'wait_gate',
                  '_gate_fault', '_resume_hint'):
-        setattr(g, name, types.MethodType(getattr(ag.Gui, name), g))
+        setattr(g, name, types.MethodType(getattr(ag.AlignPane, name), g))
     return g
 
 
@@ -234,7 +234,7 @@ def _node_with_switch(ag, results):
         node.sent.append((tuple(activate), tuple(deactivate)))
         return next(answers)
     node._switch_once = once
-    node.switch_controllers = types.MethodType(ag.AlignNode.switch_controllers,
+    node.switch_controllers = types.MethodType(ag.CellNode.switch_controllers,
                                                node)
     return node
 

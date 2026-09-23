@@ -8,9 +8,9 @@ safe parameters, and the network/RT hardening the FR3 specifically needs.
 | File | Purpose |
 |---|---|
 | `fr3_params.yaml` | Controller params: `fr3_arm`/`fr3_hand_tcp`, OMPL, reduced speeds/depth, **insertion disabled by default** |
-| `fr3_mating.launch.py` | Cell side: hand-eye TF + `cam_pub` (KF in `fr3_link0`) + `move_l` |
+| `fr3_mating.launch.py` | Cell side: hand-eye TF + `cam_pub` (KF in `fr3_link0`) + `mating_node` + `tracking_node` (idle until asked) |
 | `cyclonedds_fr3.xml` | DDS interface isolation + buffer tuning (the bandwidth fix) |
-| `realsense_low_bw.yaml` | D405 config: colour-only, 640×480@15, **no pointcloud** |
+| `realsense_low_bw.yaml` | D405 config: colour-only, 640×480@15, **no pointcloud**. This 15 is also the `/aruco/pose` rate in topic mode — see "Continuous marker tracking" |
 | `fr3_preflight.sh` | RT-kernel / latency / DDS-isolation / bandwidth checks |
 
 ## Why ROS 2 (franka_ros2), not raw libfranka
@@ -100,7 +100,8 @@ ros2 launch franka_fr3_moveit_config moveit.launch.py robot_ip:=$FR3_ROBOT_IP
 #    marker+ICP on one camera.
 ros2 launch realsense2_camera rs_launch.py config_file:="$PWD/tools/fr3/realsense_low_bw.yaml"
 
-# 4. Cell: hand-eye TF + vision + controller (insertion disabled by default)
+# 4. Cell: hand-eye TF + vision + controller (insertion disabled by default).
+#    tracking_node comes up here too, publishing nothing until it is started.
 ros2 launch tools/fr3/fr3_mating.launch.py robot_ip:=$FR3_ROBOT_IP
 # out-of-ROS capture variant (no camera driver, no image topics):
 ros2 launch tools/fr3/fr3_mating.launch.py robot_ip:=$FR3_ROBOT_IP vision_source:=realsense
@@ -133,9 +134,43 @@ off, plus one opt-in:
   stroke runs on a Cartesian-impedance torque controller
   ([fr3_mating_controllers](../../fr3_mating_controllers/README.md)) —
   soft lateral, firm axial, so the connector self-aligns under contact.
-  `move_l` switches controllers around the stroke and judges seating by
+  `mating_node` switches controllers around the stroke and judges seating by
   the wrench. Commission via that package's ladder (float → hold →
   setpoint → dispatch), only after the force-guarded moveit stroke works.
+- **Continuous marker tracking** (opt-in, off until asked;
+  `mating_controller`'s `tracking_node`, specified in
+  [TRACKING_SPEC.md](../../TRACKING_SPEC.md)): instead of stepping a MoveIt
+  plan per cycle, the node streams `~/equilibrium_pose` at 50 Hz so the arm
+  *follows* the marker on the impedance controller. The goal comes from the
+  same `mating_geometry::standoff_goal` the stepped backend uses; a bounded
+  integrator of the **measured** error pushes the equilibrium past that goal
+  until the friction residual `F/k` closes, because the controller cannot
+  know it is stuck and only vision can. **Compiles, never run, no adversarial
+  review yet** — treat every number in this bullet as a prediction until the
+  spec's V1–V6 have been done on the arm.
+  - It comes up **idle** and is started by hand:
+    `ros2 service call /tracking_node/start_tracking std_srvs/srv/Trigger`,
+    stopped by `/tracking_node/stop_tracking`. The panel's START/STOP
+    TRACKING buttons are **not built yet**, so this is the one motion path in
+    the cell that is not behind a GUI button — a deliberate gap, not a
+    finished state.
+  - Starting it **snapshots the controller's live gains**, applies the
+    `track_*` profile from `fr3_params.yaml` atomically, and stopping puts
+    the snapshot back. It refuses to start if it cannot read what it would
+    have to restore, if `float_mode` is on, or if the `fr3_hand_tcp` →
+    controller-EE offset cannot be measured from TF and `o_t_ee` together.
+  - The `track` profile raises the **now-live** `setpoint_slew_mps` /
+    `setpoint_slew_rps` to 0.10 / 0.5 (`track_setpoint_slew_*`), because the
+    slew, not the stiffness, is the speed limit — a 50 mm step took 1.05 s
+    against a 0.96 s slew floor. `ConfigLimits` still caps them at
+    0.25 m/s / 1.0 rad/s, and that bound is unchanged.
+  - **Vision rate matters here.** `/aruco/pose` is one pose per captured
+    frame, so in topic mode it is the 15 fps of `realsense_low_bw.yaml` and
+    in `source:=realsense` mode it is `capture_fps`, which also defaults to
+    15. The 50 Hz loop then repeats its last error for ~3 ticks at a time.
+    For the 90 fps the D405 is capable of, use defence 0 with
+    `-p capture_fps:=90` — never the driver profile, which would put six
+    times the colour traffic on the graph.
 - **Servo alignment** (opt-in, `align_mode: servo` + `fr3_servo.yaml`):
   ALIGN phases publish Cartesian twists for a moveit_servo node instead of
   stepped plan-execute cycles — smooth continuous tracking. Requires
@@ -162,8 +197,9 @@ off, plus one opt-in:
 ## Future (deliberate non-goals of this scaffolding)
 
 - `computeCartesianPath` INSERT fallback for Pilz-less robots (FR3 is one).
-- Continuous tracking via `moveit_servo`, or a libfranka
-  cartesian-impedance backend for compliant insertion — revisit after the
-  stepped pipeline mates reliably.
+- ~~Continuous tracking via `moveit_servo`~~ — settled: it runs on the
+  impedance backend instead (above). `moveit_servo` stays parked.
+- A libfranka cartesian-impedance backend for compliant insertion — revisit
+  after the stepped pipeline mates reliably.
 - The parked mock dry run (`tools/dryrun_fr3/`) still works for
   no-hardware regression tests of the phase machine.

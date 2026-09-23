@@ -49,7 +49,7 @@ def _gui(ag, node, gate_on=True, busy=True):
     g.load_calib = load_calib
     for name in ('robot_block', 'wait_gate', '_gate_fault',
                  '_on_mode_change', '_resume_hook', '_resume_hint'):
-        setattr(g, name, types.MethodType(getattr(ag.Gui, name), g))
+        setattr(g, name, types.MethodType(getattr(ag.AlignPane, name), g))
     return g
 
 
@@ -260,7 +260,7 @@ def test_interrupt_counts_before_halting(ag):
     seen = []
     fake = types.SimpleNamespace(_lock=threading.Lock(), gate_edges=0)
     fake.halt = lambda: seen.append(fake.gate_edges)
-    ag.AlignNode.interrupt(fake)
+    ag.CellNode.interrupt(fake)
     assert fake.gate_edges == 1 and seen == [1]
 
 
@@ -275,7 +275,7 @@ def test_paused_cartesian_step_resumes(ag, fast_hold):
         calls.append(1)
         if len(calls) == 1:
             g.user_paused = True
-            ag.AlignNode.interrupt(fake)
+            ag.CellNode.interrupt(fake)
             _later(0.10, lambda: setattr(g, 'user_paused', False))
             return False, 'execution error code -7'
         return True, 'executed'
@@ -309,7 +309,7 @@ def test_mode_cb_counts_move_exits_and_reports_changes(ag):
     changes = []
     fake.on_mode_change = lambda prev, mode: changes.append((prev, mode))
     for mode in (MOVE, MOVE, USER_STOPPED, USER_STOPPED, MOVE, REFLEX, IDLE):
-        ag.AlignNode._mode_cb(fake, types.SimpleNamespace(robot_mode=mode))
+        ag.CellNode._mode_cb(fake, types.SimpleNamespace(robot_mode=mode))
     assert fake.gate_edges == 2
     assert changes == [(None, MOVE), (MOVE, USER_STOPPED),
                        (USER_STOPPED, MOVE), (MOVE, REFLEX), (REFLEX, IDLE)]

@@ -1,5 +1,5 @@
 // Pure mating-sequence state machine. No ROS, no MoveIt - just the
-// decision logic, extracted from move_l.cpp so every transition is unit-
+// decision logic, extracted from mating_node.cpp so every transition is unit-
 // testable (see test/test_phase_machine.cpp). The node owns time, poses,
 // TF, planning and execution; this class owns WHAT to do next and WHICH
 // phase follows from each outcome.

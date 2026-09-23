@@ -2,7 +2,7 @@
 
 Proves the controller end-to-end without any robot hardware:
   mock ros2_control FR3 + move_group (OMPL) + fake hand-eye TF
-  + synthetic marker vision (fake_marker_pub.py) + move_l controller.
+  + synthetic marker vision (fake_marker_pub.py) + mating_node controller.
 
 Run:
   source /opt/ros/humble/setup.sh
@@ -10,7 +10,7 @@ Run:
   ros2 launch <this file>
 
 Expected: phases WAIT_FOR_VISION -> ALIGN_COARSE -> ALIGN_FINE -> INSERT ->
-MATED in the move_l log, with the alignment error converging to < 2.5 mm / 1 deg.
+MATED in the mating_node log, with the alignment error converging to < 2.5 mm / 1 deg.
 """
 
 import os
@@ -137,8 +137,8 @@ def generate_launch_description():
     )
 
     controller = Node(
-        package='melfa_rv5as_masterclass',
-        executable='move_l',
+        package='mating_controller',
+        executable='mating_node',
         output='screen',
         parameters=[
             robot_description,

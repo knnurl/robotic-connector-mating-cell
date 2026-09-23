@@ -2,8 +2,8 @@
 
 Robot-agnostic: point it at any MoveIt config package.
 
-  ros2 launch melfa_rv5as_masterclass move_l.launch.py                 # MELFA RV-5AS
-  ros2 launch melfa_rv5as_masterclass move_l.launch.py \
+  ros2 launch mating_controller mating_node.launch.py                 # MELFA RV-5AS
+  ros2 launch mating_controller mating_node.launch.py \
       robot_name:=ur5e moveit_config_package:=ur5e_moveit_config \
       params_file:=/path/to/my_robot_params.yaml
 """
@@ -27,8 +27,8 @@ def launch_setup(context, *args, **kwargs):
         robot_name, package_name=moveit_config_package).to_moveit_configs()
 
     controller_node = Node(
-        package='melfa_rv5as_masterclass',
-        executable='move_l',
+        package='mating_controller',
+        executable='mating_node',
         output='screen',
         parameters=[
             moveit_config.robot_description,
@@ -42,7 +42,7 @@ def launch_setup(context, *args, **kwargs):
 
 def generate_launch_description():
     default_params = os.path.join(
-        get_package_share_directory('melfa_rv5as_masterclass'),
+        get_package_share_directory('mating_controller'),
         'config', 'rv5as_params.yaml')
 
     return LaunchDescription([

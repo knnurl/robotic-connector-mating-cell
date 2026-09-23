@@ -1,13 +1,18 @@
 # Project Status — Robotic Connector Mating Cell
 
-*Written 2026-07-12. Comprehensive snapshot of what exists, what is proven,
-how to use it at the current stage, and what remains. Companion docs:
+*Written 2026-07-12, capability inventory refreshed 2026-09-22. What exists
+and what is proven. Companion docs: [DOCS.md](DOCS.md) (index of every
+document and which copy to believe),
 [SETUP_AND_CALIBRATION.md](SETUP_AND_CALIBRATION.md) (reference manual),
 [TODO.md](TODO.md) (task list), [HANDOFF.md](HANDOFF.md) (original audit,
-2026-07-05, now historical).*
+2026-07-05, historical).*
 
 > **Short, current version: [PROJECT_STATE.md](PROJECT_STATE.md)** — where the
-> project stands, what is next, and the open risks (updated 2026-09-15).
+> project stands, what is next, and the open risks.
+>
+> Section 1 below is a dated snapshot and duplicates PROJECT_STATE.md; the
+> value here is section 2 (capability inventory) and section 3 (what is
+> actually proven). See [DOCS.md](DOCS.md).
 
 ---
 
@@ -32,7 +37,7 @@ launch.
 **Updated 2026-09-11 — the robot has now moved.** The FR3 ran under
 closed-loop vision control on real hardware: FCI active, MoveIt +
 ros2_control live, the arm driven from camera measurements via
-`tools/fr3/align_gui.py` (a human-in-the-loop alignment panel added this
+`tools/fr3/cell_panel.py` (a human-in-the-loop alignment panel added this
 session). Camera-relative position alignment converges to ~1 mm, and the
 marker-orientation measurement — previously unusable — is now trustworthy
 after fixing two stacked defects in it (IPPE mirror-solution flipping at
@@ -49,7 +54,7 @@ to ~1 mm and is the trustworthy one. The servo backend turned out to be
 streaming into an **effort-mode** trajectory controller, which stalled the
 arm outright (90 s of commanded motion, 0.00 mm/s measured) and made it
 buzz; it now streams joint positions to a dedicated position controller that
-`align_gui` swaps in for the duration of a run. That rebuild is unit-tested
+`cell_panel` swaps in for the duration of a run. That rebuild is unit-tested
 but **not yet validated on hardware**. See TODO.md lessons 6-9.
 
 **The active path is now impedance commissioning.** The servo alignment
@@ -59,7 +64,7 @@ works. The insertion backend is the real open risk — never run, and it
 commands torque — so it gained pre-contact guards (force/moment and
 per-joint ceilings, non-finite guards, live gains, and a float→hold re-seed
 so the ladder cannot snap the arm back) and a commissioning rig,
-`tools/fr3/impedance_panel.py`, with one button per rung of its README
+`tools/fr3/cell_panel.py`, with one button per rung of its README
 ladder.
 
 What is still NOT proven: **mating**, the impedance backend on hardware, and
@@ -101,13 +106,13 @@ long robot session.
 - **`teach_offsets`** — auto-teaches `connector_offset_*` + yaw by pairing
   `/aruco/pose_raw` with `/connector/pose` (replaces the caliper loop).
 
-### Motion control — `melfa_rv5as_masterclass` (C++)
-- **`move_l`** (`connector_mating_node`) — the controller. Subscription
+### Motion control — `mating_controller` (C++)
+- **`mating_node`** (`connector_mating_node`) — the controller. Subscription
   stores latest pose only; all planning/execution in a dedicated control
   thread. TF looked up at the **image timestamp**; staleness by header
   stamp; insertion armed only on fresh **raw** detections (predictions
   steer, never arm).
-  - **Phase machine** extracted to [`mating_phase_machine.hpp`](melfa_rv5as_masterclass/include/melfa_rv5as_masterclass/mating_phase_machine.hpp)
+  - **Phase machine** extracted to [`mating_phase_machine.hpp`](mating_controller/include/mating_controller/mating_phase_machine.hpp)
     — pure, header-only, 14 gtests covering the whole transition matrix.
   - **Insertion backends** (`insert_backend`): `moveit` (default;
     `insert_planner: pipeline` = Pilz LIN, or `cartesian` =
@@ -136,7 +141,7 @@ long robot session.
   diagonal in the **tool frame** (soft lateral X/Y + roll/pitch = self-
   align, firm tool-Z = stroke drive), slew-limited equilibrium from
   `~/equilibrium_pose`, torque-rate saturation, `float_mode` commissioning
-  switch. `move_l` switches it in for INSERT, streams the equilibrium along
+  switch. `mating_node` switches it in for INSERT, streams the equilibrium along
   the tool axis, judges seating by the wrench, hands the arm back.
 
 ### FR3 integration — `tools/fr3/`
@@ -154,24 +159,41 @@ Retract), rqt recipe. All bind the state topics + Trigger services.
 
 ## 3. Verification matrix — what is and isn't proven
 
+*Refreshed 2026-09-22.*
+
 | Component | Status |
 |---|---|
-| C++ build, `-Wall -Wextra -Wpedantic` | ✅ clean |
-| Geometry + phase-machine logic | ✅ **32 gtests** |
-| Vision KF, fixed-frame, auto-teach math | ✅ **20 pytests** |
+| C++ build, `-Wall -Wextra -Wpedantic` | ✅ clean (`mating_node` needs `-DBUILD_MATING_NODE=ON` and a working MoveIt — see below) |
+| Geometry + phase-machine + tracking-law logic | ✅ **52 gtests** (`mating_controller`: 16 + 14 + 22) |
+| Impedance safety logic (gain/config limits, setpoint handoff, slew) | ✅ **17 gtests** (`fr3_mating_controllers`) |
+| Operator-panel and servo logic | ✅ **170 pytests** (`tools/fr3`) |
+| Vision KF, fixed-frame, auto-teach, plane-normal math | ✅ **47 pytests** (`roscam`) |
 | Vision end-to-end (synthetic marker → pose) | ✅ 0.3 mm; board incl. half-occluded |
-| Out-of-ROS capture switch (topic/external) | ✅ synthetic; ❌ real `pyrealsense2` |
-| `fr3_mating_controllers` | ✅ compiles + plugin-exported vs `franka_ros2`; ❌ never run |
-| **Controller vs live move_group (any robot)** | ❌ **never run** — the top risk |
-| Marker-frame flip vs real TCP | ❌ first RViz run will show it |
-| Hand-eye on the real cell | ❌ tool ready, not done |
-| Connector offsets | ❌ **all zero** — must be taught (auto or manual) |
+| Out-of-ROS capture on real hardware | ✅ 2026-09-11: D405 at 89.9 fps, 640×480 colour+depth |
+| **Controller vs live move_group on real hardware** | ✅ 2026-09-11 — closed; the arm moved under closed-loop vision |
+| Marker orientation measurement | ✅ 2026-09-11 — two stacked defects fixed (TODO lesson 1) |
+| Hand-eye on the real cell | ✅ 2026-09-15 — Tsai, 21 poses, 3.17 mm / 1.57° |
+| Camera→marker alignment | ✅ ~1 mm, all 6 DOF (cartesian backend) |
+| **Impedance controller on hardware** | ✅ 2026-09-16 and 09-22 — ladder rungs 0–3 passed |
+| Friction deadband characterised | ✅ 2026-09-22 — `F/k`, ~3.5–6.5 N, both stiffness ceilings found (TODO lesson 10) |
+| Tracking law | ⚠️ 22 gtests pass, but review found two load-bearing behaviours that survive mutation; ❌ never run |
+| Tracking node | ❌ **reviewed 2026-09-22: NOT safe to run** - 5 blockers in the start/stop path (see TODO) |
+| Connector offsets | ❌ **all zero** — must be taught |
 | Force-guard thresholds | ❌ need one manual mate to tune |
-| Impedance stroke, servo align | ❌ real-arm commissioning only (fake HW can't) |
-| `communication_constraints_violation` avoided end-to-end | ❌ unverified |
+| Impedance stroke (rung 4), servo align | ❌ not attempted |
+| Full mate | ❌ not attempted |
+| `communication_constraints_violation` avoided end-to-end | ❌ **no** — killed the stack three times; twice traced to running on battery |
 
-**Bottom line:** the code is mature and well-tested at the unit level; the
-entire risk surface is *runtime behavior on hardware*, which is untouched.
+**Bottom line:** the arm now moves under this stack, and the compliant
+controller has been commissioned as far as it can be without a connector.
+What remains unproven is *mating itself* — the taught geometry, the force
+thresholds, and the dispatched stroke — plus everything about tracking
+beyond its unit tests.
+
+**Known environment breakage:** this machine's MoveIt install raises CMake
+errors from its own config files (missing `tl::expected` and
+`random_numbers` imported targets), so `mating_node` cannot be built here.
+Everything else builds with `--cmake-args -DBUILD_MATING_NODE=OFF`.
 
 ---
 
@@ -206,7 +228,7 @@ safely**, not to attempt a real mate. Recommended path:
 
 ### 4.2 If you have the RV-5AS
 Same shape, on the robot PC (where `plc_`/`hmi_` build): copy repo,
-`colcon build`, fake-hardware dry run via `move_l.launch.py` /
+`colcon build`, fake-hardware dry run via `mating_node.launch.py` /
 `cell.launch.py`, hand-eye, teach, ladder. `insert_backend` stays `moveit`
 (no wrench source unless F/T hardware is fitted); Pilz LIN is available so
 keep `insert_planner: pipeline`.
@@ -240,7 +262,7 @@ Keep `cyclonedds_fr3.xml` isolation as the backstop. Verify with
         /aruco/pose[_raw] │ /connector/pose   (~2 KB/s — the only vision on DDS)
                           ▼
    ┌──────────────────────────────────────────┐
-   │  move_l (connector_mating_node)           │
+   │  mating_node (connector_mating_node)           │
    │  ┌────────────────────────────────────┐   │   TF @ image stamp
    │  │ mating_phase_machine.hpp (pure)    │   │   wrench guard
    │  │ WAIT→COARSE→FINE→INSERT→MATED/FAULT │   │

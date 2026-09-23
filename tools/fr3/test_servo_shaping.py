@@ -96,8 +96,8 @@ def simulate(ag, profile, shaped, seed=3, max_s=30.0, sub_hz=300):
             R_d, p_d = hist[0]
             R_cm = R_d.T @ _expR(rng.normal(0, [SIG_TILT, SIG_TILT, SIG_IP]))
             p_cm = R_d.T @ (-p_d) + rng.normal(0, SIG_POS, 3)
-            lin, ang, err, tilt, ip = ag.Gui._servo_error(gui, (p_cm, R_cm),
-                                                          90.0)
+            lin, ang, err, tilt, ip = ag.AlignPane._servo_error(
+                gui, (p_cm, R_cm), 90.0)
             ipe = abs(ag.wrap_deg(ip - 90.0))
             if (tnow > 1.0 and err < 0.002 and tilt < ag.ROT_TOL_DEG
                     and ipe < ag.INPLANE_TOL_DEG):
@@ -105,8 +105,8 @@ def simulate(ag, profile, shaped, seed=3, max_s=30.0, sub_hz=300):
                             ang_steps=ang_steps, watchdog_tripped=tripped)
             if shaped:
                 lin, ang = shaper.filter(lin, ang, tilt, ipe)
-            lin = ag.Gui._clamp(lin, P['lin'])
-            ang = ag.Gui._clamp(ang, np.radians(P['ang']))
+            lin = ag.AlignPane._clamp(lin, P['lin'])
+            ang = ag.AlignPane._clamp(ang, np.radians(P['ang']))
             if shaped:
                 lin, ang = shaper.limit(lin, ang, ctl)
                 tripped = tripped or shaper.oscillating()

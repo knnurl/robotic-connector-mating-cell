@@ -1,9 +1,11 @@
 # Project state — Robotic Connector Mating Cell
 
-*Snapshot: 2026-09-16. The short, current answer to "where are we?".
+*Snapshot: 2026-09-22. The short, current answer to "where are we?".
 Detail lives in [STATUS.md](STATUS.md) (capabilities), [TODO.md](TODO.md)
-(tasks, plus lessons 1–9 that should not be re-learned) and
-[SETUP_AND_CALIBRATION.md](SETUP_AND_CALIBRATION.md) (reference manual).*
+(tasks, plus lessons 1–11 that should not be re-learned),
+[TRACKING_SPEC.md](TRACKING_SPEC.md) (continuous tracking) and
+[SETUP_AND_CALIBRATION.md](SETUP_AND_CALIBRATION.md) (reference manual).
+[DOCS.md](DOCS.md) indexes all of them and says which copy to believe.*
 
 ## In one paragraph
 
@@ -23,15 +25,43 @@ commissioning rungs 0-3 (pre-flight, float, hold, setpoint) passed on
 | Camera: D405, 90 fps with depth | Working | Out-of-ROS capture; USB no-suspend udev rule; self-healing capture |
 | Marker orientation measurement | Working | IPPE mirror flip (62% of frames) and 2.6° bias fixed — TODO lesson 1 |
 | Hand-eye calibration | Done 2026-09-15, committed | Tsai, 21 poses, residual 3.17 mm / 1.57°. Validated: 8.14 mm static-marker scatter vs 170.6 mm for the old guess |
-| Camera→marker alignment | Working | Cartesian backend in `tools/fr3/align_gui.py`, ~1 mm, all 6 DOF including in-plane |
+| Camera→marker alignment | Working | Cartesian backend in `tools/fr3/cell_panel.py`, ~1 mm, all 6 DOF including in-plane |
 | Servo alignment backend | Parked, never validated | Stall and noise root-caused (TODO lesson 6); position-controller fix built but never run |
 | Impedance insertion controller | **Rungs 0-3 run on hardware 2026-09-16** | Float smooth, hold solid, setpoints track; friction deadband measured (TODO lesson 10) |
+| Continuous marker tracking | **Written, never run** | `mating_controller`'s `tracking_node`; compiles, pure law unit-tested, no adversarial review yet, no operator button yet |
 | Force thresholds | Not tuned | Shared by the MoveIt stroke and the impedance stroke |
 | Connector offsets | Not taught | `tools/fr3/fr3_params.yaml` |
 | Full mate | Not attempted | |
 
 ## Where we are right now
 
+- **2026-09-22: continuous tracking is written, and has never run.**
+  - [TRACKING_SPEC.md](TRACKING_SPEC.md) was written first, against the
+    measured numbers, and then **amended where the implementation proved it
+    wrong** - the vision rate, the reachable static accuracy, the gain-profile
+    mechanism and the frame the error is computed in. The amendments are
+    marked in place.
+  - The controller side is done: `setpoint_slew_mps` / `setpoint_slew_rps`
+    are now **live** parameters, which matters because the slew, not the
+    stiffness, is the speed limit (a 50 mm step took 1.05 s against a 0.96 s
+    slew floor).
+  - `mating_controller/src/tracking_node.cpp` streams `~/equilibrium_pose` at
+    50 Hz from `standoff_goal` plus a bounded integral of the *measured*
+    error; the pure law is in `tracking_law.hpp` and unit-tested. Starting it
+    snapshots the controller's live gains and stopping restores them, so it
+    never has to guess what the operator had. It refuses to start if it
+    cannot read those gains, if `float_mode` is on, or if it cannot measure
+    the `fr3_hand_tcp` → controller-EE offset.
+  - **Three things are honestly missing.** The node has **never been run** -
+    not on hardware, not against a live graph. It has had **no adversarial
+    review**; an RT-safety critique called an earlier draft unsound and its
+    fixes went in unverified. And the panel's **START / STOP TRACKING buttons
+    do not exist**, so the only way to start it today is a `ros2 service
+    call` - the one motion path in this cell that is not behind a GUI button.
+  - The workspace was restructured the same day:
+    `melfa_rv5as_masterclass` split into `mating_controller` (the active FR3
+    work) and `melfa/` (parked), and `move_l` became `mating_node`. The ROS
+    node name `connector_mating_node` is unchanged.
 - **2026-09-16: the impedance controller ran on the real arm, rungs 0-3.**
   - Payload is configured in **Desk** ("Franka Hand with D405", 0.83 kg at
     [-5 -5 32] mm), so the panel's own payload is entered as **0 kg** - never
@@ -46,7 +76,7 @@ commissioning rungs 0-3 (pre-flight, float, hold, setpoint) passed on
     limit. Consequence: the stroke is fine (4.4 mm at k_z=800, covered by the
     10 mm overdrive), but **tracking and mating want opposite stiffness** -
     that is a gain schedule, and the spec for it is still to be written.
-  - `impedance_panel.py` aborted at exit (daemon spin thread outliving the
+  - `cell_panel.py` (IMPEDANCE & TRACK tab) aborted at exit (daemon spin thread outliving the
     rclpy context). The arm HAD been handed back first, by luck of the race,
     not by construction. Fixed and mutation-tested - TODO lesson 11.
 - **Earlier: two review rounds on the impedance work, all fixes applied.**
@@ -79,18 +109,18 @@ commissioning rungs 0-3 (pre-flight, float, hold, setpoint) passed on
 - **Checked live, no robot needed:** SIGTERM closes the panel through the
   guarded path; the state-relay child dies with its parent; a symlinked
   `fr3_env.sh` finds the plugin from any directory.
-- **Tests:** 157 pytest in `tools/fr3`, 47 in `roscam`, 13 gtests in
-  `fr3_mating_controllers`. All pass, lint clean; the new trace-lock test is
-  mutation-checked (it fails with the lock removed).
+- **Tests (2026-09-22):** 170 pytest in `tools/fr3`, 47 in `roscam`, 17 gtests
+  in `fr3_mating_controllers`, 52 in `mating_controller`. All pass.
 - **Robot stack:** up since 2026-09-16 (driver + move_group + MoveIt), with
   `fr3_arm_controller` active and the impedance controller loaded inactive.
   The FCI link measured 0% loss over 60 packets, 0.34 ms max - the cleanest it
   has been; keep Desk's browser tab closed.
-- **Uncommitted:** 31 changed or new paths since commit `91cfbc0` - the
-  align_gui dashboard with its servo backend, gate, PAUSE and pills; the servo
-  launch and controller config; the impedance guards, gtests and panel; the
-  test suites; and the docs, including this file. Commit as Kaan Ural once
-  approved.
+- **Uncommitted:** everything since commit `4080be5` - the workspace
+  restructure (`mating_controller` / `melfa/`, `move_l` -> `mating_node`),
+  the tracking spec and its amendments, `tracking_node.cpp` with
+  `tracking_law.hpp` and its gtests, the live slew parameters, and the docs
+  including this file and the new `DOCS.md`. Commit as Kaan Ural once
+  approved - and see next action 4 before any of it drives the arm.
 
 ## Next actions, in order
 
@@ -103,12 +133,21 @@ commissioning rungs 0-3 (pre-flight, float, hold, setpoint) passed on
    ros2 launch franka_fr3_moveit_config moveit.launch.py robot_ip:=$FR3_ROBOT_IP
    ros2 run controller_manager spawner cartesian_impedance_stroke_controller \
        --inactive --param-file "$(pwd)/fr3_mating_controllers/config/cartesian_impedance_stroke.yaml"
-   python3 tools/fr3/impedance_panel.py
+   python3 tools/fr3/cell_panel.py
    ```
-3. **Write the tracking spec** before writing any tracking code - gain
-   profiles and live slew limits (see TODO, "Improvements"). Lesson 10 is the
-   reason it cannot be one gain set.
-4. Then the rest of the staged plan:
+3. ~~**Write the tracking spec**~~ done 2026-09-22
+   ([TRACKING_SPEC.md](TRACKING_SPEC.md)), and amended after implementation.
+4. **Review `tracking_node.cpp` adversarially, before it goes near the arm.**
+   It is ~800 lines of new code that commands a torque controller, it has
+   never run, and the one critique it has had called an earlier draft unsound
+   on RT-safety grounds. Nothing about it should be trusted yet.
+5. **Build the panel's START / STOP TRACKING buttons** so tracking obeys the
+   same rule as every other motion here: a human presses something. Until
+   then it starts from a service call, which is a gap, not a design.
+6. **Then run V1-V6** from the spec, in order, on the real arm. Expect V1 to
+   land near 5 mm, not 2 mm - that is the friction deadband at the shipped
+   `track` stiffness, and the spec now says so.
+7. Then the rest of the staged plan:
    - tune the force thresholds on the MoveIt stroke
    - teach the connector offsets
    - rung 4, the dispatched impedance stroke
@@ -143,7 +182,7 @@ commissioning rungs 0-3 (pre-flight, float, hold, setpoint) passed on
   the stack mid-run on 2026-09-15. Earlier packet loss was traced to Desk
   browser connections, so keep Desk closed while running.
 - **franka_hardware 2.0.2 crashes on a combined cross-mode controller switch**
-  (position↔effort). Use two separate calls, as `align_gui` does.
+  (position↔effort). Use two separate calls, as `cell_panel` does.
   Effort↔effort swaps (impedance ↔ arm controller) are safe as a single call.
 - **The payload is not configured yet.** Until PRE-FLIGHT sets it, expect a
   1–3 N bias in the wrench estimate, against mating thresholds of 8 N / 12 N.
@@ -156,10 +195,11 @@ commissioning rungs 0-3 (pre-flight, float, hold, setpoint) passed on
 
 | Path | What |
 |---|---|
-| `tools/fr3/align_gui.py` | Camera-alignment dashboard (cartesian backend; servo parked) |
-| `tools/fr3/impedance_panel.py` | Impedance commissioning ladder, rungs 0–4 |
+| `tools/fr3/cell_panel.py` | Camera-alignment dashboard (cartesian backend; servo parked) |
+| `tools/fr3/cell_panel.py` | Impedance commissioning ladder, rungs 0–4 |
 | `fr3_mating_controllers/` | The torque controller; safety logic in `impedance_detail.hpp`, gtests in `test/` |
 | `tools/fr3/fr3_env.sh` | Per-terminal environment: DDS isolation, robot IP, this workspace |
-| `tools/fr3/logs/` | Per-run JSONL traces (gitignored) |
+| `mating_controller/` | The FR3 nodes: `mating_node` (phase machine), `tracking_node` (continuous tracking), pure logic in `include/` with gtests in `test/` |
+| `tools/fr3/logs/` | Per-run JSONL traces (gitignored), including `tracking_*.jsonl` when `tracking_log_dir` is set |
 | `tools/fr3/test_*.py` | Pure-logic tests, no ROS or robot needed (`python3 -m pytest tools/fr3 -q`) |
 | `TODO.md` → Lessons | 1–5 from the 2026-09-11 bring-up, 6–9 from the 2026-09-15 servo and impedance work |

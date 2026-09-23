@@ -13,9 +13,12 @@ fr3_link0), and the mating controller with FR3 parameters. The ROBOT side
 
   # Terminal 3 - this file
   source /opt/ros/humble/setup.sh && source ~/franka_ros2_ws/install/setup.sh
-  export AMENT_PREFIX_PATH="$PWD/install/melfa_rv5as_masterclass:\
+  export AMENT_PREFIX_PATH="$PWD/install/mating_controller:\
 $PWD/install/roscam:$AMENT_PREFIX_PATH"
   ros2 launch tools/fr3/fr3_mating.launch.py robot_ip:=172.16.0.3
+
+The tracking node comes up idle: it publishes no equilibrium until an
+operator presses START TRACKING on tools/fr3/cell_panel.py.
 
 Run tools/fr3/fr3_preflight.sh FIRST - it checks the RT kernel, DDS
 interface isolation, and camera bandwidth traps that stop the 1 kHz FCI
@@ -30,6 +33,7 @@ import os
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo, TimerAction
+from launch.conditions import IfCondition
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -44,6 +48,8 @@ def generate_launch_description():
     params_file = LaunchConfiguration('params_file')
     filter_frame = LaunchConfiguration('filter_frame')
     vision_source = LaunchConfiguration('vision_source')
+    start_mating_node = LaunchConfiguration('start_mating_node')
+    marker_id = LaunchConfiguration('marker_id')
 
     args = [
         DeclareLaunchArgument('robot_ip', default_value='172.16.0.3',
@@ -53,6 +59,21 @@ def generate_launch_description():
                               default_value=os.path.join(THIS_DIR, 'fr3_params.yaml')),
         DeclareLaunchArgument('filter_frame', default_value='fr3_link0',
                               description="KF frame for cam_pub ('' = optical/legacy)"),
+        # mating_node is the autonomous phase machine: given a marker it
+        # aligns the arm by itself. That is deliberate for a mating run and
+        # wrong for panel-driven work, where every motion is behind a button.
+        # It also needs a working MoveIt, which this machine does not have.
+        # The default is the documented cell marker (SETUP_AND_CALIBRATION
+        # 2.1: DICT_6X6_250 id 11, 21 mm). Override it when the connector
+        # carries a different one - cam_pub decodes every marker it sees and
+        # then DISCARDS any whose id does not match, so a mismatch looks
+        # exactly like "no marker": debug_image flows, /aruco/pose is silent.
+        DeclareLaunchArgument('marker_id', default_value='11',
+                              description='ArUco id to track (DICT_6X6_250)'),
+        DeclareLaunchArgument('start_mating_node', default_value='true',
+                              description='start the autonomous phase '
+                                          'machine (needs MoveIt; it moves '
+                                          'the arm on its own)'),
         DeclareLaunchArgument('vision_source', default_value='topic',
                               description='topic = camera driver publishes images (default); '
                                           'realsense = in-process capture, no image topics '
@@ -105,11 +126,16 @@ def generate_launch_description():
 
     return LaunchDescription(args + [handeye_reminder,
                                      _static_tf(),
-                                     _vision(filter_frame, vision_source),
+                                     _vision(filter_frame, vision_source,
+                                             marker_id),
                                      TimerAction(period=3.0, actions=[
-                                         _controller(robot_description,
-                                                     robot_description_semantic,
-                                                     kinematics, params_file)])])
+                                         _controller(
+                                             robot_description,
+                                             robot_description_semantic,
+                                             kinematics, params_file,
+                                             condition=IfCondition(
+                                                 start_mating_node)),
+                                         _tracking(params_file)])])
 
 
 def _static_tf():
@@ -134,7 +160,7 @@ def _static_tf():
     return OpaqueFunction(function=make)
 
 
-def _vision(filter_frame, vision_source):
+def _vision(filter_frame, vision_source, marker_id):
     return Node(
         package='roscam',
         executable='cam_pub',
@@ -147,6 +173,7 @@ def _vision(filter_frame, vision_source):
             'camera_info_topic': '/camera/camera/color/camera_info',
             'source': vision_source,
             'filter_frame': filter_frame,
+            'marker_id': ParameterValue(marker_id, value_type=int),
             # Debug image is only encoded/published while something
             # subscribes - keep GUI subscriptions off the robot NIC.
             'publish_debug_image': True,
@@ -154,11 +181,23 @@ def _vision(filter_frame, vision_source):
     )
 
 
-def _controller(robot_description, robot_description_semantic, kinematics,
-                params_file):
+def _tracking(params_file):
+    # fr3_params.yaml reaches a node only through params_file, so without
+    # this the tracking_* values never arrive. Idle until START TRACKING.
     return Node(
-        package='melfa_rv5as_masterclass',
-        executable='move_l',
+        package='mating_controller',
+        executable='tracking_node',
+        output='screen',
+        parameters=[params_file],
+    )
+
+
+def _controller(robot_description, robot_description_semantic, kinematics,
+                params_file, condition=None):
+    return Node(
+        condition=condition,
+        package='mating_controller',
+        executable='mating_node',
         output='screen',
         parameters=[robot_description,
                     robot_description_semantic,

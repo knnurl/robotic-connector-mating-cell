@@ -12,7 +12,7 @@ import yaml
 
 def generate_launch_description():
     config = os.path.join(
-        get_package_share_directory('melfa_rv5as_masterclass'),
+        get_package_share_directory('melfa_cell'),
         'config',
         'rv5as_params.yaml'
     )
@@ -20,7 +20,7 @@ def generate_launch_description():
     moveit_config = MoveItConfigsBuilder("rv5as", package_name="melfa_rv5as_moveit_config").to_moveit_configs()
 
     pnp_node = Node(
-        package="melfa_rv5as_masterclass",
+        package="melfa_cell",
         executable="pick_n_place_",  # Ensure this matches your compiled executable name
         output="screen",
         parameters=[

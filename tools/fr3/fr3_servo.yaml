@@ -37,7 +37,7 @@
       # stalled at 12.7 mm while servo commanded 10 mm/s, and made the
       # 100 Hz torque steps audible (measured 2026-09-15). Positions are
       # tracked by the robot's own joint-impedance controller instead.
-      # See fr3_servo_controllers.yaml; align_gui switches controllers
+      # See fr3_servo_controllers.yaml; cell_panel switches controllers
       # around each servo run.
       command_out_type: std_msgs/Float64MultiArray
       command_out_topic: /fr3_servo_position_controller/commands
