@@ -8,6 +8,8 @@ exactly when a logic slip is least welcome. So:
   * robot_block fails closed, and a REFLEX ends a run even with the gate off
   * wait_gate needs an unbroken all-clear before resuming; STOP always wins
   * the mode callback counts MOVE exits and halts motion from the spin thread
+  * ALIGN never moves while the impedance controller or the tracking node
+    holds the arm
 
     python3 -m pytest tools/fr3/test_enable_gate.py -q
 """
@@ -313,3 +315,78 @@ def test_mode_cb_counts_move_exits_and_reports_changes(ag):
     assert fake.gate_edges == 2
     assert changes == [(None, MOVE), (MOVE, USER_STOPPED),
                        (USER_STOPPED, MOVE), (MOVE, REFLEX), (REFLEX, IDLE)]
+
+
+# ---- torque interlock --------------------------------------------------------------
+# ALIGN plans on fr3_arm_controller (or swaps in the servo controller). While
+# the impedance controller holds the arm, and above all while the tracking
+# node streams its equilibrium, an ALIGN move would fight them.
+
+class _Btn:
+    def __init__(self):
+        self.state = 'normal'
+
+    def config(self, state=None, **_kw):
+        if state is not None:
+            self.state = state
+
+
+def _align(ag, ctrl, tracking=False, active=False):
+    node = _Node(MOVE)
+    node.asked = []                 # thread idents controllers() blocked
+
+    def controllers(timeout_s=3.0):
+        node.asked.append(threading.get_ident())
+        return ctrl
+    node.controllers = controllers
+    g = _gui(ag, node, busy=False)
+    g.statuses = []
+    g.set_status = lambda m, *_a, **_k: g.statuses.append(m)
+    g.ladder = types.SimpleNamespace(tracking=tracking, active=active)
+    g.root = types.SimpleNamespace(after=lambda ms, fn, *a: fn(*a))
+    g.gatecb, g.pauseb = _Btn(), _Btn()
+    g.tb, g.lb, g.ipb, g.ab = _Btn(), _Btn(), _Btn(), _Btn()
+    g._paint_pause = lambda: None
+    g.auto_converge = lambda: None
+    g.stopped = g.last_outcome = None
+    for name in ('go_impl', '_torque_block', '_run_finished'):
+        setattr(g, name, types.MethodType(getattr(ag.AlignPane, name), g))
+    return g
+
+
+def _press(g):
+    """One ALIGN button press; True if the motion action actually ran."""
+    ran = []
+    g.go_impl(lambda: ran.append(True))
+    end = time.monotonic() + 2.0
+    while g.busy and time.monotonic() < end:
+        time.sleep(0.01)
+    return bool(ran)
+
+
+ARM_ONLY = {'fr3_arm_controller': 'active',
+            'cartesian_impedance_stroke_controller': 'inactive'}
+
+
+@pytest.mark.parametrize('ctrl,kwargs,moves', [
+    (ARM_ONLY, {}, True),
+    ({'fr3_arm_controller': 'active'}, {}, True),       # impedance not loaded
+    (ARM_ONLY, dict(tracking=True), False),
+    (ARM_ONLY, dict(active=True), False),
+    # a restarted panel remembers nothing: the controller manager decides
+    ({'fr3_arm_controller': 'inactive',
+      'cartesian_impedance_stroke_controller': 'active'}, {}, False),
+    (None, {}, False),                                  # cannot rule it out
+])
+def test_align_never_moves_under_impedance_or_tracking(ag, ctrl, kwargs,
+                                                        moves):
+    g = _align(ag, ctrl, **kwargs)
+    assert _press(g) is moves
+    assert any('REFUSING' in m for m in g.logs) is not moves
+    assert all(b.state == 'normal' for b in (g.tb, g.lb, g.ipb, g.ab))
+    # the controller manager can take seconds to answer: never on the Tk thread
+    assert threading.get_ident() not in g.n.asked
+    if kwargs:
+        # the panel's own memory refuses on the spot, before anything greys
+        # out or a worker starts - and without asking at all
+        assert not g.n.asked and 'moving...' not in g.statuses

@@ -23,6 +23,7 @@ none of it replaces the hardware E-stop or the enabling device.
 import collections
 import datetime
 import json
+import os
 import pathlib
 import signal
 import sys
@@ -36,17 +37,18 @@ import numpy as np
 import rclpy
 from builtin_interfaces.msg import Duration
 from controller_manager_msgs.srv import ListControllers, SwitchController
+from diagnostic_msgs.msg import DiagnosticStatus
 from franka_msgs.msg import FrankaRobotState
 from franka_msgs.srv import SetForceTorqueCollisionBehavior, SetLoad
 from geometry_msgs.msg import Pose, PoseStamped, TwistStamped
 from moveit_msgs.action import ExecuteTrajectory
 from moveit_msgs.srv import GetCartesianPath
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
-from rcl_interfaces.srv import SetParametersAtomically
+from rcl_interfaces.srv import SetParameters, SetParametersAtomically
 from rclpy.action import ActionClient
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import Image, JointState
 from std_msgs.msg import String
@@ -216,7 +218,9 @@ PLOT_WINDOW_S = 30.0      # seconds of convergence history shown
 CALIB_PATH = pathlib.Path(__file__).with_name('handeye_rotation.json')
 
 # Per-iteration JSONL trace of auto-converge: what was measured, what was
-# commanded, what the robot actually did. One file per run.
+# commanded, what the robot actually did. One file per run. With FR3_LOG_DIR
+# set (fr3_env.sh) it goes to $FR3_LOG_DIR/YYYY-MM-DD/ beside the tracking
+# node's logs instead - see trace_dir().
 LOG_DIR = pathlib.Path(__file__).with_name('logs')
 
 
@@ -231,12 +235,28 @@ EQUILIBRIUM_TOPIC = f'/{IMPEDANCE_CONTROLLER}/equilibrium_pose'
 TRACKING_NODE = 'tracking_node'
 TRACK_START_SRV = f'/{TRACKING_NODE}/start_tracking'
 TRACK_STOP_SRV = f'/{TRACKING_NODE}/stop_tracking'
-# The node's start makes THREE parameter round-trips (read float_mode, read
-# the gains it must restore, apply the profile), each bounded by
-# wait_for_service(1 s) + tracking_profile_timeout_s (2 s), on top of ~1 s of
-# tool-offset sampling and tracking_settle_s (1 s): ~14 s worst case. At the
-# old 6 s the panel reported failure while the arm was in fact tracking.
-TRACK_CALL_TIMEOUT_S = 15.0
+# The node's start makes FOUR service round-trips (ListControllers, read
+# float_mode, read the gains it must restore, apply the profile), each bounded
+# by wait_for_service(1 s) + tracking_profile_timeout_s (2 s), on top of ~1 s
+# of tool-offset sampling and tracking_settle_s (1 s): ~14 s worst case, and
+# 5 s in hand. At the old 6 s the panel reported failure while the arm was in
+# fact tracking; a reply later still is caught by the status topic, which
+# adopts a live tracker.
+TRACK_CALL_TIMEOUT_S = 20.0
+# The node's parameters (fr3_params.yaml). START writes ALIGN's goal with
+# set_parameters_atomically - all of it or none - and the over-lead dropdown
+# writes its one value live with plain set_parameters.
+TRACK_PARAMS_SRV = f'/{TRACKING_NODE}/set_parameters_atomically'
+TRACK_PARAM_SRV = f'/{TRACKING_NODE}/set_parameters'
+OVER_LEAD_CHOICES = ['hold', 'stop', 'clamp']
+OVER_LEAD_DEFAULT = 'hold'
+# The node's own word on tracking: latched (transient_local), ~5 Hz and on
+# every state change. Older than this, the node is silent - maybe gone.
+TRACK_STATUS_TOPIC = f'/{TRACKING_NODE}/status'
+TRACK_STATUS_STALE_S = 1.0
+# Every state but idle: the node drives the arm, is about to, or is still
+# putting back its gain snapshot.
+TRACK_LIVE_STATES = ('starting', 'tracking', 'holding', 'stopping')
 STATE_STALE_S = 0.3
 DRIVER_DOWN_S = 2.0       # robot state silent this long: the driver is gone
 
@@ -301,7 +321,11 @@ GAIN_LIMITS = {'k_xy': (0.0, 3000.0), 'k_z': (0.0, 3000.0),
 IMAGE_TOPIC = '/aruco/debug_image'
 
 
-LOG_DIR = pathlib.Path(__file__).with_name('logs')
+def trace_dir():
+    """Where a new trace goes, created on demand by open_trace."""
+    root = os.environ.get('FR3_LOG_DIR')
+    return (pathlib.Path(root) / datetime.date.today().isoformat() if root
+            else LOG_DIR)
 
 
 def q2R(x, y, z, w):
@@ -531,6 +555,28 @@ def exit_handoff(node, panel, say=print, wait_s=None):
     return result
 
 
+def _param_msg(name, v):
+    """One rcl_interfaces Parameter, typed from the Python value. The type
+    must be the one the receiving node declared, or the set is refused."""
+    p = Parameter()
+    p.name = name
+    pv = ParameterValue()
+    if isinstance(v, bool):
+        pv.type = ParameterType.PARAMETER_BOOL
+        pv.bool_value = v
+    elif isinstance(v, str):
+        pv.type = ParameterType.PARAMETER_STRING
+        pv.string_value = v
+    elif isinstance(v, (list, tuple)):
+        pv.type = ParameterType.PARAMETER_DOUBLE_ARRAY
+        pv.double_array_value = [float(x) for x in v]
+    else:
+        pv.type = ParameterType.PARAMETER_DOUBLE
+        pv.double_value = float(v)
+    p.value = pv
+    return p
+
+
 class CellNode(Node):
     """One node for the whole panel.
 
@@ -545,14 +591,18 @@ class CellNode(Node):
         self.declare_parameter('base_frame', 'fr3_link0')
         self.declare_parameter('tcp_link', 'fr3_hand_tcp')
         self.declare_parameter('group', 'fr3_arm')
+        # The frame every ALIGN error is measured in (see marker()).
+        self.declare_parameter('camera_frame', 'camera_color_optical_frame')
         self.base = self.get_parameter('base_frame').value
         self.tcp = self.get_parameter('tcp_link').value
         self.group = self.get_parameter('group').value
+        self.cam = self.get_parameter('camera_frame').value
 
         self._lock = threading.Lock()
 
         # --- vision + joints (ALIGN) ---
-        self._pose = None          # (pos(3), R_cam_marker, stamp_s)
+        self._pose = None          # (pos(3), R, stamp_s, frame_id) as received
+        self.marker_why = None     # why marker() cannot use it, or None
         self._joints = None        # (names, positions)
         self.create_subscription(PoseStamped, '/aruco/pose', self._cb, 10)
         self.create_subscription(JointState, '/joint_states',
@@ -607,6 +657,16 @@ class CellNode(Node):
             '/service_server/set_force_torque_collision_behavior')
         self.track_start_cli = self.create_client(Trigger, TRACK_START_SRV)
         self.track_stop_cli = self.create_client(Trigger, TRACK_STOP_SRV)
+        self.track_params_cli = self.create_client(SetParametersAtomically,
+                                                   TRACK_PARAMS_SRV)
+        self.track_param_cli = self.create_client(SetParameters,
+                                                  TRACK_PARAM_SRV)
+        # Latched: a panel started mid-run still gets the node's last word.
+        self._track_status = None  # (fields, monotonic stamp)
+        self.create_subscription(
+            DiagnosticStatus, TRACK_STATUS_TOPIC, self._track_status_cb,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
         # --- one robot-state relay, two readers ---
         self._mode = None          # (robot_mode, monotonic stamp)
@@ -737,7 +797,8 @@ class CellNode(Node):
         o = m.pose.orientation
         with self._lock:
             self._pose = (p, q2R(o.x, o.y, o.z, o.w),
-                          self.get_clock().now().nanoseconds * 1e-9)
+                          self.get_clock().now().nanoseconds * 1e-9,
+                          m.header.frame_id)
 
     def _joint_cb(self, m):
         with self._lock:
@@ -750,14 +811,35 @@ class CellNode(Node):
         return {} if j is None else dict(zip(j[0], j[1]))
 
     def marker(self):
-        """Fresh marker measurement, or None if missing/stale."""
+        """Fresh marker measurement in the camera optical frame, or None if
+        missing, stale or not transformable.
+
+        cam_pub publishes /aruco/pose in its filter_frame - fr3_link0 on this
+        cell (fr3_mating.launch.py) - while every ALIGN error is a camera
+        frame error. So anything else is re-expressed through the latest TF:
+        the filter frame is fixed, the camera is what moved.
+        """
         with self._lock:
             if self._pose is None:
                 return None
-            p, R, t = self._pose
+            p, R, t, frame = self._pose
         if self.get_clock().now().nanoseconds * 1e-9 - t > POSE_STALE_S:
             return None
-        return p, R
+        if frame == self.cam:
+            return p, R
+        try:
+            tf = self.tf_buf.lookup_transform(self.cam, frame,
+                                              rclpy.time.Time())
+        except Exception as e:                              # noqa: BLE001
+            if self.marker_why is None:     # once per outage, not per tick
+                self.get_logger().warning(
+                    f'marker in {frame!r}, no TF to {self.cam}: {e}')
+            self.marker_why = f'marker in {frame}: no TF to {self.cam}'
+            return None
+        self.marker_why = None
+        tr, ro = tf.transform.translation, tf.transform.rotation
+        R_cf = q2R(ro.x, ro.y, ro.z, ro.w)
+        return R_cf @ p + np.array([tr.x, tr.y, tr.z]), R_cf @ R
 
     def tcp_pose(self):
         tf = self.tf_buf.lookup_transform(self.base, self.tcp,
@@ -1036,26 +1118,46 @@ class CellNode(Node):
             return False, f'{IMPEDANCE_CONTROLLER} parameters unavailable'
         req = SetParametersAtomically.Request()
         for name, v in values.items():
-            p = Parameter()
-            p.name = name
-            pv = ParameterValue()
-            if isinstance(v, bool):
-                pv.type = ParameterType.PARAMETER_BOOL
-                pv.bool_value = v
-            elif isinstance(v, (list, tuple)):
-                pv.type = ParameterType.PARAMETER_DOUBLE_ARRAY
-                pv.double_array_value = [float(x) for x in v]
-            else:
-                pv.type = ParameterType.PARAMETER_DOUBLE
-                pv.double_value = float(v)
-            p.value = pv
-            req.parameters.append(p)
+            req.parameters.append(_param_msg(name, v))
         fut = self.param_cli.call_async(req)
         if not self._wait(fut, timeout_s) or fut.result() is None:
             return False, 'set_parameters_atomically timed out'
         res = fut.result().result
         return bool(res.successful), ('applied' if res.successful
                                       else (res.reason or 'refused'))
+
+    def set_tracking_params(self, values, atomic=True, timeout_s=5.0):
+        """Write tracking_node parameters: atomic for START's goal, plain for
+        the live policy. Answered, not waited on, like call_trigger."""
+        cli = self.track_params_cli if atomic else self.track_param_cli
+        if not cli.service_is_ready():
+            return False, 'the tracking node is not running'
+        req = (SetParametersAtomically if atomic else SetParameters).Request()
+        for name, v in values.items():
+            req.parameters.append(_param_msg(name, v))
+        fut = cli.call_async(req)
+        if not self._wait(fut, timeout_s) or fut.result() is None:
+            return False, f'no answer from {cli.srv_name} in {timeout_s:.0f} s'
+        res = fut.result()
+        bad = [r for r in ([res.result] if atomic else res.results)
+               if not r.successful]
+        return not bad, ('applied' if not bad
+                         else (bad[0].reason or 'refused'))
+
+    def _track_status_cb(self, m):
+        """Spin thread: keep it for the Tk tick, which is the only reader."""
+        lvl = m.level          # a msg `byte`: rclpy delivers bytes of length 1
+        lvl = lvl[0] if isinstance(lvl, (bytes, bytearray)) else int(lvl)
+        f = {'level': lvl, 'message': m.message}
+        f.update((kv.key, kv.value) for kv in m.values)
+        with self._lock:
+            self._track_status = (f, time.monotonic())
+
+    def track_status(self):
+        """(fields, age_s) of the tracking node's latest status, or None."""
+        with self._lock:
+            s = self._track_status
+        return None if s is None else (s[0], time.monotonic() - s[1])
 
     def call_trigger(self, cli, timeout_s=TRACK_CALL_TIMEOUT_S):
         """One Trigger call, answered rather than waited on: the tracking
@@ -1176,7 +1278,8 @@ class AlignPane(Pane):
             for t_ in self.tiles.values():
                 t_['val'].config(text='--', fg=T['critical'])
                 t_['dot'].itemconfig(t_['id'], fill=T['critical'])
-            self.sub.config(text='marker NOT VISIBLE / STALE')
+            self.sub.config(text=self.n.marker_why
+                            or 'marker NOT VISIBLE / STALE')
         else:
             p, Rm = m
             mz = Rm[:, 2]
@@ -1462,11 +1565,19 @@ class AlignPane(Pane):
         self.trace({'rec': 'stop_graceful'})
 
     def stop_now(self):
-        """Instant: halt the trajectory (or servo stream) where it is."""
+        """Instant: halt the trajectory (or servo stream) where it is - and
+        a live tracker, which that halt does not reach."""
         self.abort = True
         self.stopped = True
         self.n.stop_now()
-        self.say('*** STOP NOW - halting motion mid-move ***')
+        ladder = self.ladder
+        if ladder.tracking or ladder._track_state() in TRACK_LIVE_STATES:
+            ladder.stop_tracking_now()      # off the Tk thread, never refused
+            self.say('*** STOP NOW - stopping the tracking node; the arm '
+                     'follows the marker until it answers (logged as STOP '
+                     'TRACKING) ***')
+        else:
+            self.say('*** STOP NOW - halting motion mid-move ***')
         self.set_status('STOPPED (instant)', T['critical'])
         self.trace({'rec': 'stop_now'})
 
@@ -1847,6 +1958,31 @@ class AlignPane(Pane):
 
     # ------------------------------------------------------------ actions
 
+    def _torque_block(self, ask=False):
+        """Why ALIGN must not move the arm now, or None.
+
+        ALIGN plans on fr3_arm_controller or swaps in the servo controller;
+        while the impedance controller holds the arm - above all while the
+        tracking node streams its equilibrium - either would fight it. ask
+        also asks the controller manager (it blocks, so worker thread only):
+        a restarted panel's memory says nothing, and silence is no answer.
+        """
+        if self.ladder.tracking:
+            return 'the tracking node is driving the arm - STOP TRACKING first'
+        if self.ladder.active:
+            return (f'{IMPEDANCE_CONTROLLER} holds the arm - RELEASE it on '
+                    'IMPEDANCE & TRACK first')
+        if not ask:
+            return None
+        states = self.n.controllers()
+        if states is None:
+            return ('the controller manager did not answer - cannot rule '
+                    f'out {IMPEDANCE_CONTROLLER}')
+        if states.get(IMPEDANCE_CONTROLLER) == 'active':
+            return (f'{IMPEDANCE_CONTROLLER} is active - RELEASE it on '
+                    'IMPEDANCE & TRACK first')
+        return None
+
     def go_impl(self, fn, *a):
         """Run an action in a worker thread with the motion buttons disabled."""
         if self.busy:
@@ -1857,6 +1993,11 @@ class AlignPane(Pane):
                      + ('' if blk[1] else
                         ' (robot-state gate is on - TARGET + SAFETY)'))
             self.set_status(f'refused: {blk[0]}', T['serious'])
+            return
+        why = self._torque_block()
+        if why is not None:
+            self.say(f'REFUSING: {why}')
+            self.set_status(f'refused: {why}', T['serious'])
             return
         self.busy = True
         self.stopped = False
@@ -1875,6 +2016,11 @@ class AlignPane(Pane):
 
         def run():
             try:
+                why = self._torque_block(ask=True)
+                if why is not None:
+                    self.say(f'REFUSING: {why}')
+                    self.set_status(f'refused: {why}', T['serious'])
+                    return
                 fn(*a)
             except Exception as e:                      # noqa: BLE001
                 self.say(f'ERROR: {e}')
@@ -2398,6 +2544,9 @@ class LadderPane(Pane):
         self.arm_released = False
         self.driver_down_logged = False
         self.tracking = False        # the node is streaming; STOP is offered
+        self._tracking_at = float('-inf')   # monotonic, last set by the panel
+        self._track_seen = None      # last traced (state, reason, policy)
+        self._painted = None         # what paint_tracking last showed
 
     def build(self, parent):
         self._build_ladder_readout(parent)
@@ -2407,7 +2556,8 @@ class LadderPane(Pane):
 
     def buttons(self):
         return [self.b_pre, self.b_float, self.b_hold, self.b_minus,
-                self.b_plus, self.b_here, self.b_track, self.b_release]
+                self.b_plus, self.b_here, self.b_track, self.b_release,
+                self.b_gains]
 
     def _build_ladder_readout(self, parent):
         card = self._card(parent, 'ARM')
@@ -2496,12 +2646,20 @@ class LadderPane(Pane):
                                     lambda: self.go(self.start_tracking),
                                     pady=6)
         self.b_track.pack(fill='x', padx=10, pady=(0, 6))
-        # Outside go(): a stop that greys out while another action runs is
-        # not a stop control, so this one is never disabled and never queued
-        # behind self.busy.
-        # Packed by paint_tracking() only while the node is streaming.
-        self.b_track_stop = self._button(card, 'STOP TRACKING', T['critical'],
-                                         self.stop_tracking_now, pady=6)
+        pol = tk.Frame(card, bg=T['surface'])
+        pol.pack(fill='x', padx=10, pady=(0, 8))
+        tk.Label(pol, text='over the lead cap', font=self.f_caption,
+                 fg=T['ink2'], bg=T['surface']).pack(side='left')
+        self.v_policy = tk.StringVar(value=OVER_LEAD_DEFAULT)
+        cb = self._combo(pol, self.v_policy, OVER_LEAD_CHOICES)
+        cb.pack(side='left', padx=4)
+        # live, the call off the Tk thread: the node reads it on every tick
+        cb.bind('<<ComboboxSelected>>', self._on_policy_selected)
+        tk.Label(pol, text='hold = wait, stop = end, clamp = follow capped',
+                 font=self.f_caption, fg=T['muted'],
+                 bg=T['surface']).pack(side='left', padx=4)
+        # STOP TRACKING is in the window header (CellPanel): the node drives
+        # the arm whichever tab is on top.
         self.b_release = self._button(card, '4.  RELEASE  ->  arm controller',
                                       T['critical'],
                                       lambda: self.go(self.release),
@@ -2528,9 +2686,9 @@ class LadderPane(Pane):
                      fg=T['muted'], bg=T['surface']).grid(row=r, column=2,
                                                           sticky='w')
             self.tune[key] = var
-        self._button(card, 'apply gains', T['grid'],
-                     lambda: self.go(self.apply_gains), pady=6).pack(
-            fill='x', padx=10, pady=(0, 10))
+        self.b_gains = self._button(card, 'apply gains', T['grid'],
+                                    lambda: self.go(self.apply_gains), pady=6)
+        self.b_gains.pack(fill='x', padx=10, pady=(0, 10))
 
     # ------------------------------------------------------------ helpers
 
@@ -2589,9 +2747,7 @@ class LadderPane(Pane):
         if self.busy:
             return
         self.busy = True
-        btns = [self.b_pre, self.b_float, self.b_hold, self.b_minus,
-                self.b_plus, self.b_here, self.b_track, self.b_release]
-        for b in btns:
+        for b in self.buttons():
             b.config(state='disabled')
 
         def run():
@@ -2602,31 +2758,143 @@ class LadderPane(Pane):
                 self.set_status(f'error: {e}', T['critical'])
             finally:
                 self.busy = False
-                self.root.after(0, lambda: [b.config(state='normal')
-                                            for b in btns])
+                self.root.after(0, self._run_finished)
         threading.Thread(target=run, daemon=True).start()
+
+    def _run_finished(self):
+        """Tk thread, after every action. Waking every button here is what
+        un-greyed SETPOINT and TRACK under a running stream, so paint_tracking
+        has the last word."""
+        if self.busy:                # a newer action owns the buttons now
+            return
+        for b in self.buttons():
+            b.config(state='normal')
+        self.paint_tracking()
 
     def paint_tracking(self):
         """STOP TRACKING only exists while there is something to stop.
 
         A permanently visible stop button for an idle feature is noise, and
         worse, it trains the operator to read a red button as decoration.
+        It and the TRACKING indicator sit in the window header, seen from
+        every tab, from START (the node arms for seconds) until the end.
         While tracking IS live the ladder buttons go quiet instead: the node
-        owns the equilibrium, so stepping it by hand would fight the stream.
+        owns the equilibrium, so stepping it by hand would fight the stream,
+        FLOAT would free the arm under it, and it puts back its own gain
+        snapshot on stop.
         """
-        if self.tracking:
-            self.b_track_stop.pack(fill='x', padx=10, pady=(0, 8))
-            self.b_track.config(text='3b.  TRACKING...  (the node is driving)',
-                                state='disabled')
-            for b in (self.b_minus, self.b_plus, self.b_here):
-                b.config(state='disabled')
+        if self.tracking or self._track_state() == 'starting':
+            tb = self.track_banner()
+            text, color = tb[:2] if tb else ('TRACKING', T['good'])
+            self.track_ind.config(text=text, bg=color, fg=text_on(color))
+            self.track_ind.pack(side='left', padx=(12, 0))
+            self.b_track_stop.pack(side='left', padx=(8, 0))
         else:
+            self.track_ind.pack_forget()
             self.b_track_stop.pack_forget()
-            self.b_track.config(
-                text='3b.  TRACK  (continuous, follows the marker)',
-                state='normal')
-            for b in (self.b_minus, self.b_plus, self.b_here):
-                b.config(state='normal')
+        self.b_track.config(text='3b.  TRACKING...  (the node is driving)'
+                            if self.tracking else
+                            '3b.  TRACK  (continuous, follows the marker)')
+        quiet = 'disabled' if self.tracking or self.busy else 'normal'
+        for b in (self.b_float, self.b_track, self.b_minus, self.b_plus,
+                  self.b_here, self.b_gains):
+            b.config(state=quiet)
+
+    def _set_tracking(self, on):
+        """The panel's own start/stop, stamped: a status the node sent
+        before it cannot flip it back (see _follow_track_status). Called
+        from workers, so the repaint goes to the Tk thread."""
+        self.tracking = on
+        self.setpoint = None     # the node owns, then re-seeds, the anchor
+        self._tracking_at = time.monotonic()
+        self.root.after(0, self.paint_tracking)
+
+    def _track_state(self):
+        """The node's state if its status is fresh, else None."""
+        got = self.n.track_status()
+        if got is None or got[1] > TRACK_STATUS_STALE_S:
+            return None
+        return got[0].get('state')
+
+    def track_banner(self):
+        """(STATE, colour, subtitle) from the node's own status, or None
+        when it has nothing to add to the ladder's banner."""
+        got = self.n.track_status()
+        if got is None or got[1] > TRACK_STATUS_STALE_S:
+            if not self.tracking:
+                return None
+            return ('TRACKING?', T['critical'],
+                    f'no status from {TRACKING_NODE}'
+                    + ('' if got is None else f' for {got[1]:.0f} s')
+                    + '  -  is it still running? Press STOP TRACKING')
+        f = got[0]
+        state, reason = f.get('state'), f.get('reason', '')
+        if state == 'tracking':
+            return ('TRACKING', T['good'],
+                    f'error {f.get("pos_err_mm")} mm / '
+                    f'{f.get("rot_err_deg")} deg   lead '
+                    f'{f.get("lead_mm")} mm / {f.get("lead_deg")} deg   '
+                    f'over lead: {f.get("policy")}  -  STOP TRACKING ends it')
+        if state == 'holding':
+            return (f'HOLDING - {reason}', T['warning'],
+                    'armed, the arm holds still - it follows again by itself '
+                    'once clear  -  STOP TRACKING ends it')
+        if state == 'starting':
+            return ('TRACK STARTING', T['series'],
+                    'tool offset, gain profile, settle  -  STOP TRACKING '
+                    'aborts it')
+        if state == 'idle' and f.get('level', 0) >= 1 and reason:
+            return (f'STOPPED - {reason}',
+                    T['critical'] if f['level'] >= 2 else T['serious'],
+                    'tracking is off; the arm holds where it is on the '
+                    'impedance controller  -  TRACK starts it again')
+        return None
+
+    def _follow_track_status(self):
+        """Tk thread, every tick. The node's latched status is the truth
+        about tracking: a tracker found live is adopted (a panel restarted
+        mid-run), one the node ended itself - over-lead stop, controller
+        transition - is dropped. Never mid-action, and only by a message
+        that arrived after the panel's own last start/stop, so a status
+        already in flight cannot undo a press."""
+        got = self.n.track_status()
+        fresh = got is not None and got[1] <= TRACK_STATUS_STALE_S
+        key = None
+        if fresh:
+            f, age = got
+            key = (f.get('state'), f.get('reason'), f.get('policy'))
+            if key != self._track_seen:
+                self._track_seen = key
+                self.trace({'rec': 'track_status', **f})
+            live = f.get('state') in TRACK_LIVE_STATES
+            if (live != self.tracking and not self.busy
+                    and time.monotonic() - age > self._tracking_at):
+                if live:
+                    # the node tracks only on an ACTIVE, holding controller
+                    self.active, self.floating = True, False
+                    if f.get('policy') in OVER_LEAD_CHOICES:
+                        self.v_policy.set(f['policy'])
+                    self.say(f'{TRACKING_NODE} is already tracking - adopted;'
+                             ' STOP TRACKING is at the top of the window')
+                else:
+                    self.say(f'{TRACKING_NODE} stopped tracking: '
+                             f'{f.get("reason") or f.get("message")}')
+                self._set_tracking(live)
+        look = (self.tracking, self.busy, key)
+        if look != self._painted:
+            self._painted = look
+            self.paint_tracking()
+
+    def _refuse_while_tracking(self, what):
+        """True, and says why, while the node streams: it owns the
+        equilibrium, and on stop it restores the gains it snapshotted at
+        START - a hand step fights the stream, new gains would be undone."""
+        if not self.tracking:
+            return False
+        self.say(f'REFUSING: {what} while tracking - press STOP TRACKING '
+                 'first')
+        self.set_status('refused: tracking', T['serious'])
+        return True
 
     def _clear_run_state(self):
         """Forget what this panel was doing. Tracking is NOT cleared here:
@@ -2794,6 +3062,8 @@ class LadderPane(Pane):
         return True
 
     def float_on(self):
+        if self._refuse_while_tracking('FLOAT'):     # frees the arm under it
+            return
         if not self._activate(True):
             return
         self.say('FLOAT: move the arm gently by hand - smooth, no buzz, no '
@@ -2809,6 +3079,15 @@ class LadderPane(Pane):
             # nothing would change in the arm - and resetting the floor or the
             # anchor here would let repeated presses walk the floor down and
             # blank the spring-lead readout while the arm is still gliding.
+            st = self.n.state()
+            if self.z_floor is None and st is not None:
+                # holding without a floor: a tracker this panel adopted
+                self.z_floor = float(st[0][2]) - FLOOR_BELOW_HOLD_MM / 1000.0
+                self.say(f'already holding - Z floor set '
+                         f'{self.z_floor*1000:.0f} mm, '
+                         f'{FLOOR_BELOW_HOLD_MM:.0f} mm under the arm')
+                self.trace({'rec': 'hold_on', 'z_floor': self.z_floor})
+                return
             self.say('already holding - nothing to change. To re-seed the '
                      'equilibrium where the arm is, use "hold HERE".')
             return
@@ -2841,6 +3120,8 @@ class LadderPane(Pane):
                     'z_floor': self.z_floor})
 
     def setpoint_step(self, sign):
+        if self._refuse_while_tracking('SETPOINT'):
+            return
         if not self.active or self.floating:
             self.say('SETPOINT needs the controller holding (step 2 first)')
             return
@@ -2891,6 +3172,8 @@ class LadderPane(Pane):
                     'anchor': anchor.tolist(), 'lead_mm': lead * 1000})
 
     def hold_here(self):
+        if self._refuse_while_tracking('hold HERE'):
+            return
         if not self.active or self.floating:
             self.say('nothing to re-seed: the controller is not holding')
             return
@@ -2922,17 +3205,32 @@ class LadderPane(Pane):
             self.say('REFUSING: no Z floor - press 2. HOLD first')
             self.set_status('refused: no Z floor', T['serious'])
             return
+        # The node holds the CAMERA where ALIGN would leave it, so it gets
+        # ALIGN's goal first, all or nothing: half a goal is a wrong goal.
+        # In-plane 'off' holds whatever angle the node sees at START.
+        tgt_ip = self.align.inplane_target()
+        goal = {'tracking_standoff_m': self.align.target_m(),
+                'tracking_inplane_hold': tgt_ip is None,
+                'tracking_over_lead_policy': self.v_policy.get()}
+        if tgt_ip is not None:
+            goal['tracking_inplane_deg'] = float(tgt_ip)
+        ok, msg = self.n.set_tracking_params(goal)
+        self.trace({'rec': 'track_goal', 'ok': ok, 'msg': msg, **goal})
+        if not ok:
+            self.say(f'REFUSING: could not hand the goal to {TRACKING_NODE} '
+                     f'({msg})')
+            self.set_status(f'refused: {msg}', T['serious'])
+            return
         ok, msg = self.n.call_trigger(self.n.track_start_cli)
         if ok:
-            self.tracking = True
+            self._set_tracking(True)
             self.say(f'TRACKING: {msg} - the arm follows the marker from '
-                     'now on. STOP TRACKING is live below.')
+                     'now on. STOP TRACKING is live at the top.')
             self.set_status('tracking', T['good'])
         else:
             self.say(f'tracking NOT started: {msg}')
             self.set_status(f'refused: {msg}', T['serious'])
         self.trace({'rec': 'track_start', 'ok': ok, 'msg': msg})
-        self.paint_tracking()
 
     def stop_tracking_now(self):
         """What STOP TRACKING is wired to: off the Tk thread so the live view
@@ -2945,14 +3243,39 @@ class LadderPane(Pane):
         stops publishing, re-seeds the equilibrium where the arm is and puts
         back the gains it changed; the arm stays compliant and still held."""
         ok, msg = self.n.call_trigger(self.n.track_stop_cli)
-        self.tracking = False
+        self._set_tracking(False)
         self.say(f'STOP TRACKING: {msg}')
         if ok:
             self.set_status('tracking stopped')
         else:
             self.set_status(f'stop tracking: {msg}', T['serious'])
         self.trace({'rec': 'track_stop', 'ok': ok, 'msg': msg})
-        self.paint_tracking()
+
+    def _on_policy_selected(self, _evt=None):
+        """Tk thread, the dropdown's handler: read the choice here, where Tk
+        variables may be read, and write it from a worker."""
+        threading.Thread(target=self.write_policy,
+                         args=(self.v_policy.get(),), daemon=True).start()
+
+    def write_policy(self, v=None):
+        """Off the Tk thread. Live at any time - START sends it again with
+        the goal anyway. Refused by a node that is there, the dropdown goes
+        back to the policy the node reports, not the one it does not run."""
+        v = self.v_policy.get() if v is None else v
+        ok, msg = self.n.set_tracking_params(
+            {'tracking_over_lead_policy': v}, atomic=False)
+        got = None if ok else self.n.track_status()
+        has = None
+        if (got is not None and got[1] <= TRACK_STATUS_STALE_S
+                and got[0].get('policy') in OVER_LEAD_CHOICES):
+            has = got[0]['policy']
+            self.root.after(0, self.v_policy.set, has)
+        self.say(f'over-lead policy -> {v}'
+                 + ('' if ok else f': NOT written ({msg}) - '
+                    + (f'the node keeps {has}' if has
+                       else 'TRACK sends it at start')))
+        self.trace({'rec': 'track_policy', 'policy': v, 'ok': ok,
+                    'msg': msg})
 
     def release(self):
         """Hand the arm back, deciding from the controller manager's state.
@@ -2982,8 +3305,7 @@ class LadderPane(Pane):
         t_ok, t_msg = self.n.call_trigger(self.n.track_stop_cli)
         if t_ok:
             self.say(f'tracking stopped first: {t_msg}')
-        self.tracking = False
-        self.paint_tracking()
+        self._set_tracking(False)
         ok, msg = self.n.switch([ARM_CONTROLLER], [IMPEDANCE_CONTROLLER])
         if not ok:
             self.say(f'*** RELEASE FAILED ({msg}) - the arm is still on the '
@@ -2999,6 +3321,8 @@ class LadderPane(Pane):
         self.close_trace()
 
     def apply_gains(self):
+        if self._refuse_while_tracking('apply gains'):
+            return
         g = self.gains()
         if g is None:
             self.say('REFUSING: gains must be numbers')
@@ -3024,6 +3348,7 @@ class LadderPane(Pane):
 
     def refresh(self):
         self._update_image()
+        self._follow_track_status()
         st = self.n.state()
         if st is None or st[5] > DRIVER_DOWN_S:
             if not self.driver_down_logged:
@@ -3105,6 +3430,11 @@ class LadderPane(Pane):
                     'state relay silent but the controller manager answers - '
                     'impedance may still be live: press RELEASE')
         why = self.blocked()
+        # A live tracker outranks the ladder's view, a robot fault outranks
+        # both; the node's STOPPED only replaces the plain HOLDING below.
+        track = self.track_banner()
+        if track is not None and why is None and self._track_state() != 'idle':
+            return track
         if not self.active:
             if why:
                 return ('NOT READY', T['critical'], why)
@@ -3130,8 +3460,9 @@ class LadderPane(Pane):
             return ('MOVING', T['warning'],
                     f'equilibrium {lead:.1f} mm from the arm  -  gliding at '
                     'the slew limit')
-        return ('HOLDING', T['good'],
-                'compliant hold  -  push the TCP gently to feel the spring')
+        return track or ('HOLDING', T['good'],
+                         'compliant hold  -  push the TCP gently to feel the '
+                         'spring')
 
 
 class CellPanel:
@@ -3180,6 +3511,17 @@ class CellPanel:
         head.pack(fill='x')
         tk.Label(head, text='FR3 CELL CONTROL', font=(base, 10, 'bold'),
                  fg=T['muted'], bg=T['page'], anchor='w').pack(side='left')
+        # Tracking is shown and stopped here, above the tabs: the node drives
+        # the arm whichever tab is on top. Both are packed by
+        # LadderPane.paint_tracking only while there is something to stop.
+        # STOP is outside go(): a stop that greys out while another action
+        # runs is not a stop control, so it is never disabled or queued
+        # behind self.busy.
+        self.track_ind = tk.Label(head, text='', font=self.f_button, padx=10,
+                                  pady=3)
+        self.b_track_stop = self._button(
+            head, 'STOP TRACKING', T['critical'], self.header_stop_tracking,
+            pady=3)
         self.pills = tk.Canvas(head, height=26, width=10, bg=T['page'],
                                highlightthickness=0)
         self.pills.pack(side='right')
@@ -3241,6 +3583,13 @@ class CellPanel:
         - ALIGN checks the robot-state gate, the ladder checks pre-flight -
         so neither inherits rules written for the other."""
         self.active().go_impl(fn, *a)
+
+    def header_stop_tracking(self):
+        """The header's STOP TRACKING. Never through go(): that drops a press
+        while busy and hands it to the tab on top, whose own guards - ALIGN's
+        torque interlock - would refuse the stop itself. The Trigger runs
+        off the Tk thread, so the window stays live while the node answers."""
+        self.ladder.stop_tracking_now()
 
     # ------------------------------------------------------------ chrome
 
@@ -3408,13 +3757,14 @@ class CellPanel:
         with self._trace_lock:
             if self.tracef is not None:
                 return
-            LOG_DIR.mkdir(exist_ok=True)
+            folder = trace_dir()
+            folder.mkdir(parents=True, exist_ok=True)
             name = ('cell_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
                     + '.jsonl')
-            self.tracepath = LOG_DIR / name
+            self.tracepath = folder / name
             self.tracef = self.tracepath.open('w')
         self.trace({'rec': 'session_start', **(header or {})})
-        self.say(f'trace -> tools/fr3/logs/{name}')
+        self.say(f'trace -> {self.tracepath}')
 
     def close_trace(self, outcome=None):
         self.trace({'rec': 'session_end', 'outcome': outcome})

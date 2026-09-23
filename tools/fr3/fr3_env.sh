@@ -23,6 +23,11 @@ export CYCLONEDDS_URI="file://${_FR3_DIR}/cyclonedds_fr3.xml"
 # built-in default (172.16.0.3) is NOT this cell.
 export FR3_ROBOT_IP=172.16.0.2
 
+# Run logs (panel traces, tracking_node V1-V6 data) live OUTSIDE the repo,
+# next to the demo videos: <project>/runs/YYYY-MM-DD/. Writers create the
+# day folder. Set FR3_LOG_DIR before sourcing to put them elsewhere.
+export FR3_LOG_DIR="${FR3_LOG_DIR:-$(readlink -f "${_FR3_DIR}/../../..")/runs}"
+
 # This repo's own packages - fr3_mating_controllers above all. The terminal
 # that starts the controller manager (moveit.launch.py) must see them, or
 # spawning the impedance controller fails with "Loader for controller ... not
@@ -44,6 +49,7 @@ echo "FR3 env set:"
 echo "  RMW_IMPLEMENTATION = $RMW_IMPLEMENTATION"
 echo "  CYCLONEDDS_URI     = $CYCLONEDDS_URI"
 echo "  FR3_ROBOT_IP       = $FR3_ROBOT_IP"
+echo "  FR3_LOG_DIR        = $FR3_LOG_DIR"
 echo "  this workspace     = $_FR3_WS_STATE"
 echo "check with: tools/fr3/fr3_preflight.sh \$FR3_ROBOT_IP"
 

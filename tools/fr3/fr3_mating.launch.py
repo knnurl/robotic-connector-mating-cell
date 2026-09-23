@@ -1,34 +1,23 @@
-"""Connector-mating stack for a Franka FR3 (real or fake hardware).
+"""Connector-mating stack for a Franka FR3 - the CELL side only.
 
-Launches the CELL side only: hand-eye static TF, ArUco vision (filtered in
-fr3_link0), and the mating controller with FR3 parameters. The ROBOT side
-(FCI driver + move_group) is launched separately with upstream tooling:
+Hand-eye static TF, ArUco vision (in-process D405 capture, filtered in
+fr3_link0) and the tracking node, all with tools/fr3/fr3_params.yaml. The
+ROBOT side (FCI driver + move_group) is launched separately; the bring-up
+order is GUIDE.md section 2, the only maintained copy.
 
-  # Terminal 1 - robot driver + MoveIt (add use_fake_hardware:=true for dry runs)
-  source ~/franka_ros2_ws/install/setup.sh
-  ros2 launch franka_fr3_moveit_config moveit.launch.py robot_ip:=172.16.0.3
+The zero-argument launch is the panel-driven one: the tracking node comes up
+idle and publishes nothing until an operator presses TRACK on
+tools/fr3/cell_panel.py. The autonomous phase machine (mating_node) moves the
+arm by itself, so it is opt-in: start_mating_node:=true.
 
-  # Terminal 2 - camera (LOW-BANDWIDTH config - see README.md, this matters)
-  ros2 launch realsense2_camera rs_launch.py config_file:=$(pwd)/tools/fr3/realsense_low_bw.yaml
+vision_source:=topic instead expects a separate realsense2_camera driver
+(tools/fr3/realsense_low_bw.yaml) and gives cam_pub colour only - no depth,
+so the depth tilt and mirror disambiguation fall back to IPPE.
 
-  # Terminal 3 - this file
-  source /opt/ros/humble/setup.sh && source ~/franka_ros2_ws/install/setup.sh
-  export AMENT_PREFIX_PATH="$PWD/install/mating_controller:\
-$PWD/install/roscam:$AMENT_PREFIX_PATH"
-  ros2 launch tools/fr3/fr3_mating.launch.py robot_ip:=172.16.0.3
-
-The tracking node comes up idle: it publishes no equilibrium until an
-operator presses START TRACKING on tools/fr3/cell_panel.py.
-
-Run tools/fr3/fr3_preflight.sh FIRST - it checks the RT kernel, DDS
-interface isolation, and camera bandwidth traps that stop the 1 kHz FCI
-loop (communication_constraints_violation).
-
-The hand-eye defaults below are the dry-run GUESS. Calibrate with
-`ros2 run roscam handeye_calib --ros-args -p base_frame:=fr3_link0
--p tcp_frame:=fr3_hand_tcp` and pass the printed values as launch args.
+Tracking traces go to $FR3_LOG_DIR/YYYY-MM-DD/ when fr3_env.sh has set it.
 """
 
+import datetime
 import os
 
 from launch import LaunchDescription
@@ -50,6 +39,7 @@ def generate_launch_description():
     vision_source = LaunchConfiguration('vision_source')
     start_mating_node = LaunchConfiguration('start_mating_node')
     marker_id = LaunchConfiguration('marker_id')
+    capture_fps = LaunchConfiguration('capture_fps')
 
     args = [
         DeclareLaunchArgument('robot_ip', default_value='172.16.0.3',
@@ -70,14 +60,17 @@ def generate_launch_description():
         # exactly like "no marker": debug_image flows, /aruco/pose is silent.
         DeclareLaunchArgument('marker_id', default_value='11',
                               description='ArUco id to track (DICT_6X6_250)'),
-        DeclareLaunchArgument('start_mating_node', default_value='true',
+        DeclareLaunchArgument('start_mating_node', default_value='false',
                               description='start the autonomous phase '
                                           'machine (needs MoveIt; it moves '
                                           'the arm on its own)'),
-        DeclareLaunchArgument('vision_source', default_value='topic',
-                              description='topic = camera driver publishes images (default); '
-                                          'realsense = in-process capture, no image topics '
-                                          '(skip the camera-driver terminal)'),
+        DeclareLaunchArgument('vision_source', default_value='realsense',
+                              description='realsense = in-process capture with depth, no '
+                                          'image topics (default); topic = a separate camera '
+                                          'driver publishes colour only'),
+        DeclareLaunchArgument('capture_fps', default_value='15',
+                              description='D405 capture rate in realsense mode; '
+                                          '/aruco/pose is published at this rate'),
         # Hand-eye TCP->optical transform. MEASURED 2026-09-15 with
         # roscam.handeye_calib: 21 poses, Tsai selected (all four solvers
         # agreed to 0.05 mm / 0.01 deg), residual 3.17 mm / 1.57 deg.
@@ -127,7 +120,7 @@ def generate_launch_description():
     return LaunchDescription(args + [handeye_reminder,
                                      _static_tf(),
                                      _vision(filter_frame, vision_source,
-                                             marker_id),
+                                             marker_id, capture_fps),
                                      TimerAction(period=3.0, actions=[
                                          _controller(
                                              robot_description,
@@ -160,7 +153,7 @@ def _static_tf():
     return OpaqueFunction(function=make)
 
 
-def _vision(filter_frame, vision_source, marker_id):
+def _vision(filter_frame, vision_source, marker_id, capture_fps):
     return Node(
         package='roscam',
         executable='cam_pub',
@@ -174,6 +167,7 @@ def _vision(filter_frame, vision_source, marker_id):
             'source': vision_source,
             'filter_frame': filter_frame,
             'marker_id': ParameterValue(marker_id, value_type=int),
+            'capture_fps': ParameterValue(capture_fps, value_type=int),
             # Debug image is only encoded/published while something
             # subscribes - keep GUI subscriptions off the robot NIC.
             'publish_debug_image': True,
@@ -184,11 +178,20 @@ def _vision(filter_frame, vision_source, marker_id):
 def _tracking(params_file):
     # fr3_params.yaml reaches a node only through params_file, so without
     # this the tracking_* values never arrive. Idle until START TRACKING.
+    # FR3_LOG_DIR (fr3_env.sh) overrides tracking_log_dir so every TRACK run
+    # is recorded; the node does not create directories, so make the day
+    # folder here.
+    overrides = {}
+    log_root = os.environ.get('FR3_LOG_DIR')
+    if log_root:
+        day_dir = os.path.join(log_root, datetime.date.today().isoformat())
+        os.makedirs(day_dir, exist_ok=True)
+        overrides['tracking_log_dir'] = day_dir
     return Node(
         package='mating_controller',
         executable='tracking_node',
         output='screen',
-        parameters=[params_file],
+        parameters=[params_file, overrides],
     )
 
 

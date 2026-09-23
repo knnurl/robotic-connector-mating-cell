@@ -120,8 +120,32 @@
     tracking_settle_s: 1.0              # s to let the equilibrium re-seed before the gain step at start
     tracking_max_force_n: 30.0          # must equal max_force_n in cartesian_impedance_stroke.yaml (pinned by a test)
     tracking_max_torque_nm: 10.0        # must equal max_torque_nm in that yaml (pinned by a test)
-    tracking_log_dir: ''                # '' = no log. Set to tools/fr3/logs to record the V1-V6 data
+    tracking_log_dir: ''                # '' = no log. fr3_mating.launch.py overrides it with $FR3_LOG_DIR/YYYY-MM-DD
     tracking_gain_profile: track        # prefix of the <profile>_* keys below, applied atomically on start
+
+    # Camera-centred goal. TRACK holds the CAMERA where ALIGN leaves it:
+    # optical axis along the marker normal, the marker tracking_standoff_m
+    # ahead, marker X at tracking_inplane_deg in the image (cell_panel's
+    # INPLANE convention: 0 = right, +90 = down). cell_panel writes these
+    # from its ALIGN target and in-plane dropdowns before every START. The
+    # connector offset is NOT applied here - a later, separate approach step
+    # does that - so tracking ignores connector_offset_* and standoff_height_m.
+    tracking_camera_frame: camera_color_optical_frame
+    tracking_standoff_m: 0.10           # m; = cell_panel TARGET_MM_DEFAULT
+    tracking_inplane_deg: 90.0          # deg; = cell_panel INPLANE_TARGET_DEFAULT
+    tracking_inplane_hold: false        # true = keep the in-plane angle seen at START (panel 'off')
+    # While the equilibrium would sit beyond tracking_max_lead_m or
+    # tracking_max_lead_rad from the arm: hold (stay armed, resume once back
+    # inside), stop (end tracking, restore gains) or clamp (keep following
+    # with the lead limited to the caps). Live-settable; cell_panel's
+    # dropdown writes it. The Z floor and a non-finite pose hold under every
+    # policy, stop included; under clamp the floor judges the clamped pose.
+    tracking_over_lead_policy: hold
+    tracking_max_lead_rad: 0.26         # rad, ~15 deg; angular twin of tracking_max_lead_m. The node refuses above 0.35
+    # Predictions never drive committed motion (TRACKING_SPEC Decision 5):
+    # hold unless a RAW detection (optical frame, no KF) is this fresh.
+    tracking_raw_pose_topic: /aruco/pose_raw
+    tracking_raw_timeout_s: 0.25        # s; ~3 frames at 15 fps
 
     # Gain profile (TRACKING_SPEC.md section 4 C1). Sent as ONE atomic
     # set_parameters request; the controller's GainLimits still reject the

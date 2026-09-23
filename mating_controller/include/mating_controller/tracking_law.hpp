@@ -1,11 +1,13 @@
 // Pure control law for continuous marker tracking on the Cartesian-impedance
-// backend (TRACKING_SPEC.md section 5): the bounded integrator that closes the
-// friction residual the spring cannot, the TCP-to-EE frame conversion, and the
-// veto that guards what may be published. No ROS node code here so the law is
-// unit-testable (see test/test_tracking_law.cpp).
+// backend (TRACKING_SPEC.md section 5): the camera-centred goal, the bounded
+// integrator that closes the friction residual the spring cannot, the
+// TCP-to-EE frame conversion, and the over-lead policy and veto that guard
+// what may be published. No ROS node code here so the law is unit-testable
+// (see test/test_tracking_law.cpp).
 #pragma once
 
 #include <cmath>
+#include <optional>
 #include <string>
 
 #include <tf2/LinearMath/Quaternion.h>
@@ -16,8 +18,8 @@ namespace tracking_law
 {
 
 // Worst extra force the bounded integrator may add is k * lead_max.
-// TRACKING_SPEC.md section 6. tools/fr3/test_impedance_panel.py scrapes
-// these three constants by name, so keep them bare decimal literals.
+// TRACKING_SPEC.md section 6. tools/fr3/test_cell_panel.py scrapes these
+// three constants by name, so keep them bare decimal literals.
 inline constexpr double kLeadForceMaxN = 15.0;
 inline constexpr double kFrictionBreakawayN = 6.5;    // N,  spec section 2, worst case
 inline constexpr double kFrictionBreakawayNm = 0.6;   // Nm, spec section 2
@@ -32,9 +34,46 @@ struct Config
     double lead_max_rad{0.017};      // rad
     double deadband_m{0.005};        // m,   kFrictionBreakawayN / track k_pos 1500
     double deadband_rad{0.007};      // rad, kFrictionBreakawayNm / k_rot 90
-    double max_lead_m{0.060};        // m, mirrors impedance_panel MAX_LEAD_MM
+    double max_lead_m{0.060};        // m, mirrors cell_panel MAX_LEAD_MM
+    double max_lead_rad{0.26};       // rad, the angular twin of max_lead_m
     double z_floor_m{0.0};           // m, seeded on ~/start_tracking
+    // The value validated at startup. It is live-settable, so the node keeps
+    // the current one itself and hands it to decide() every tick.
+    std::string over_lead_policy{"hold"};
 };
+
+// What to do while the equilibrium would lead the arm by more than
+// max_lead_m or max_lead_rad (tracking_over_lead_policy): hold where the arm
+// is and resume once it is back inside, end tracking, or keep following with
+// the lead cut back to the caps.
+enum class OverLead { kHold, kStop, kClamp };
+
+inline std::optional<OverLead> parse_over_lead(const std::string &name)
+{
+    if (name == "hold") {
+        return OverLead::kHold;
+    }
+    if (name == "stop") {
+        return OverLead::kStop;
+    }
+    if (name == "clamp") {
+        return OverLead::kClamp;
+    }
+    return std::nullopt;
+}
+
+inline const char *over_lead_name(OverLead policy)
+{
+    switch (policy) {
+    case OverLead::kStop:
+        return "stop";
+    case OverLead::kClamp:
+        return "clamp";
+    case OverLead::kHold:
+        break;
+    }
+    return "hold";
+}
 
 // The integrator state: how far past the goal the equilibrium is pushed.
 struct Lead
@@ -48,6 +87,20 @@ inline bool finite_vec(const tf2::Vector3 &v)
     return std::isfinite(v.x()) && std::isfinite(v.y()) && std::isfinite(v.z());
 }
 
+inline bool finite_pose(const tf2::Transform &t)
+{
+    const tf2::Quaternion q = t.getRotation();
+    return finite_vec(t.getOrigin()) && std::isfinite(q.x()) && std::isfinite(q.y()) &&
+           std::isfinite(q.z()) && std::isfinite(q.w());
+}
+
+// Whether a raw detection this old lets the tick move the arm (TRACKING_SPEC
+// Decision 5). The age is NaN before the first detection: not fresh.
+inline bool raw_fresh(double age_s, double timeout_s)
+{
+    return age_s <= timeout_s;   // false for NaN
+}
+
 // Rescale to max_norm if longer, preserving direction. This is the whole of
 // the anti-windup: the lead can never ask for more than k * max_norm.
 inline tf2::Vector3 clamp_norm(const tf2::Vector3 &v, double max_norm)
@@ -59,6 +112,11 @@ inline tf2::Vector3 clamp_norm(const tf2::Vector3 &v, double max_norm)
 inline std::string mm(double metres)
 {
     return std::to_string(static_cast<int>(std::lround(metres * 1000.0)));
+}
+
+inline std::string deg(double radians)
+{
+    return std::to_string(static_cast<int>(std::lround(radians * 180.0 / M_PI)));
 }
 
 // Rotation as axis * shortest angle, so the lead is a vector and can be
@@ -98,7 +156,34 @@ inline Lead advance_lead(const Lead &lead, const tf2::Vector3 &pos_err,
     return next;
 }
 
-// standoff_goal targets EEF_FRAME_ID (fr3_hand_tcp), but the controller holds
+// TRACK holds the CAMERA where ALIGN leaves it: optical axis anti-parallel
+// to the marker normal, the marker standoff_m straight ahead, marker X at
+// inplane_rad in the image (roscam.plane_normal.inplane_angle: 0 = right,
+// +pi/2 = down). The camera goal in the marker frame is the flip about X
+// followed by -inplane about the new Z, which puts marker X at +inplane in
+// the image. Returned as the TCP pose in t_base_marker's frame; t_tcp_cam is
+// the hand-eye transform (TF EEF_FRAME_ID -> camera optical frame).
+inline tf2::Transform camera_centred_goal(const tf2::Transform &t_base_marker,
+                                          double standoff_m, double inplane_rad,
+                                          const tf2::Transform &t_tcp_cam)
+{
+    tf2::Quaternion q_flip, q_inplane;
+    q_flip.setRPY(M_PI, 0.0, 0.0);
+    q_inplane.setRPY(0.0, 0.0, -inplane_rad);
+    const tf2::Transform t_marker_cam(q_flip * q_inplane, tf2::Vector3(0.0, 0.0, standoff_m));
+    return t_base_marker * t_marker_cam * t_tcp_cam.inverse();
+}
+
+// Angle of the marker X axis in the camera image, radians, in (-pi, pi]: the
+// same quantity as roscam.plane_normal.inplane_angle, from the marker's
+// orientation in the camera optical frame.
+inline double inplane_rad(const tf2::Quaternion &q_cam_marker)
+{
+    const tf2::Vector3 x = tf2::quatRotate(q_cam_marker, tf2::Vector3(1.0, 0.0, 0.0));
+    return std::atan2(x.y(), x.x());
+}
+
+// The TCP goal is at EEF_FRAME_ID (fr3_hand_tcp), but the controller holds
 // its equilibrium at franka::Frame::kEndEffector. t_tcp_ee is that fixed tool
 // offset, measured at startup and never assumed: identity only means the two
 // frames coincide.
@@ -108,35 +193,69 @@ inline tf2::Transform goal_in_ee(const tf2::Transform &goal_tcp,
     return goal_tcp * t_tcp_ee;
 }
 
+// The rotation a rotation vector (axis * angle) stands for.
+inline tf2::Quaternion quaternion_from(const tf2::Vector3 &rot)
+{
+    tf2::Quaternion q = tf2::Quaternion::getIdentity();
+    const double angle = rot.length();
+    if (angle > 1e-12) {
+        q.setRotation(rot / angle, angle);
+    }
+    return q;
+}
+
 // The published equilibrium: the vision goal pushed out by the lead. It takes
 // no measured pose, so the orientation target can only come from vision
 // (TRACKING_SPEC.md Decision 3). The lead composes on the LEFT, the same
 // convention as the controller's err_q = equilibrium * orientation.inverse().
 inline tf2::Transform equilibrium_from(const tf2::Transform &goal_ee, const Lead &lead)
 {
-    tf2::Quaternion q_lead = tf2::Quaternion::getIdentity();
-    const double angle = lead.rot.length();
-    if (angle > 1e-12) {
-        q_lead.setRotation(lead.rot / angle, angle);
-    }
-    return tf2::Transform(q_lead * goal_ee.getRotation(), goal_ee.getOrigin() + lead.pos);
+    return tf2::Transform(quaternion_from(lead.rot) * goal_ee.getRotation(),
+                          goal_ee.getOrigin() + lead.pos);
 }
 
-// Empty if the equilibrium may be published, otherwise why it may not. These
-// are the two bounds impedance_panel already enforces on this topic
-// (MAX_LEAD_MM and FLOOR_BELOW_HOLD_MM); a 50 Hz stream must not bypass them.
-inline std::string publish_veto(const tf2::Transform &eq,
-                                const tf2::Transform &measured_ee, const Config &cfg)
+// Empty if the equilibrium sits within max_lead_m and max_lead_rad of the
+// arm, otherwise how far out it is. The position cap is cell_panel's
+// MAX_LEAD_MM; a 50 Hz stream must not be looser than the stepped path.
+inline std::string lead_excess(const tf2::Transform &eq, const tf2::Transform &measured_ee,
+                               const Config &cfg)
 {
-    const tf2::Quaternion q = eq.getRotation();
-    if (!finite_vec(eq.getOrigin()) || !std::isfinite(q.x()) || !std::isfinite(q.y()) ||
-        !std::isfinite(q.z()) || !std::isfinite(q.w())) {
-        return "the equilibrium pose is not finite";
-    }
     const double lead = (eq.getOrigin() - measured_ee.getOrigin()).length();
     if (lead > cfg.max_lead_m) {
         return "the equilibrium would sit " + mm(lead) + " mm from the arm (cap " +
-               mm(cfg.max_lead_m) + " mm) - wait for the arm to catch up";
+               mm(cfg.max_lead_m) + " mm)";
+    }
+    const double turn =
+        rotation_vector(eq.getRotation() * measured_ee.getRotation().inverse()).length();
+    if (turn > cfg.max_lead_rad) {
+        return "the equilibrium would sit " + deg(turn) + " deg from the arm (cap " +
+               deg(cfg.max_lead_rad) + " deg)";
+    }
+    return {};
+}
+
+// The clamp policy: the equilibrium cut back to the caps around the arm -
+// position along the straight line to it, rotation along the shortest path
+// from the measured orientation.
+inline tf2::Transform clamp_lead(const tf2::Transform &eq, const tf2::Transform &measured_ee,
+                                 const Config &cfg)
+{
+    const tf2::Vector3 turn = clamp_norm(
+        rotation_vector(eq.getRotation() * measured_ee.getRotation().inverse()),
+        cfg.max_lead_rad);
+    return tf2::Transform(
+        quaternion_from(turn) * measured_ee.getRotation(),
+        measured_ee.getOrigin() +
+            clamp_norm(eq.getOrigin() - measured_ee.getOrigin(), cfg.max_lead_m));
+}
+
+// Empty if the equilibrium may be published, otherwise why it may not. These
+// hold whatever the over-lead policy says: a non-finite pose, and the floor
+// under where the run started (cell_panel's FLOOR_BELOW_HOLD_MM).
+inline std::string publish_veto(const tf2::Transform &eq, const Config &cfg)
+{
+    if (!finite_pose(eq)) {
+        return "the equilibrium pose is not finite";
     }
     if (eq.getOrigin().z() < cfg.z_floor_m) {
         return "the equilibrium would sit at z " + mm(eq.getOrigin().z()) +
@@ -144,6 +263,54 @@ inline std::string publish_veto(const tf2::Transform &eq,
                " mm - the camera bracket hangs below the flange";
     }
     return {};
+}
+
+// What one tick may do with an equilibrium. kHold publishes the measured
+// pose (once); kStop ends tracking exactly like ~/stop_tracking.
+struct Verdict
+{
+    enum class Act { kPublish, kHold, kStop };
+    Act act{Act::kPublish};
+    tf2::Transform eq;    // the pose to publish when act is kPublish
+    std::string reason;   // why it holds or stops, or what the clamp cut; empty otherwise
+};
+
+// A non-finite pose holds, whatever the policy - NaN is not "far". So does
+// one below the floor under hold and stop, before any cap is judged: the
+// floor is what holds, 'stop' included, and the reason names it. Past a cap
+// the policy decides; under clamp the floor then vetoes the clamped pose,
+// which is what would actually be published.
+inline Verdict decide(const tf2::Transform &eq, const tf2::Transform &measured_ee,
+                      const Config &cfg, OverLead policy)
+{
+    if (!finite_pose(eq)) {
+        return {Verdict::Act::kHold, eq, publish_veto(eq, cfg)};
+    }
+    if (policy != OverLead::kClamp) {
+        const std::string floor = publish_veto(eq, cfg);
+        if (!floor.empty()) {
+            return {Verdict::Act::kHold, eq, floor};
+        }
+    }
+    Verdict v{Verdict::Act::kPublish, eq, {}};
+    std::string why = lead_excess(eq, measured_ee, cfg);
+    if (!why.empty()) {
+        switch (policy) {
+        case OverLead::kHold:
+            return {Verdict::Act::kHold, eq, why + " - wait for the arm to catch up"};
+        case OverLead::kStop:
+            return {Verdict::Act::kStop, eq, why + " - over-lead policy 'stop'"};
+        case OverLead::kClamp:
+            v.eq = clamp_lead(eq, measured_ee, cfg);
+            v.reason = "clamped: " + why;
+            break;
+        }
+    }
+    why = publish_veto(v.eq, cfg);
+    if (!why.empty()) {
+        return {Verdict::Act::kHold, v.eq, why};
+    }
+    return v;
 }
 
 // Empty if the tracking configuration is acceptable, otherwise why it is not.
@@ -168,6 +335,16 @@ inline std::string validate_config(const Config &cfg, double k_pos_max_n_per_m,
     }
     if (cfg.max_lead_m > 0.060) {
         return "tracking_max_lead_m must not exceed the panel's 60 mm equilibrium-lead cap";
+    }
+    if (!std::isfinite(cfg.max_lead_rad) || cfg.max_lead_rad <= 0.0) {
+        return "tracking_max_lead_rad must be finite and positive";
+    }
+    if (cfg.max_lead_rad > 0.35) {
+        return "tracking_max_lead_rad must not exceed 0.35 rad (20 deg)";
+    }
+    if (!parse_over_lead(cfg.over_lead_policy)) {
+        return "tracking_over_lead_policy must be hold, stop or clamp, not '" +
+               cfg.over_lead_policy + "'";
     }
     if (!std::isfinite(cfg.z_floor_m)) {
         return "the tracking Z floor must be finite";

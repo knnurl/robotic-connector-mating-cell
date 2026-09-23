@@ -61,7 +61,8 @@ if(franka_msgs_FOUND)
     $<INSTALL_INTERFACE:include>)
   target_compile_features(tracking_node PUBLIC cxx_std_17)
   ament_target_dependencies(tracking_node
-    rclcpp geometry_msgs tf2 tf2_ros tf2_geometry_msgs std_srvs franka_msgs lifecycle_msgs)
+    rclcpp geometry_msgs tf2 tf2_ros tf2_geometry_msgs std_srvs franka_msgs lifecycle_msgs
+    controller_manager_msgs diagnostic_msgs)
   list(APPEND INSTALL_TARGETS tracking_node)
 else()
   message(WARNING "franka_msgs not found - skipping tracking_node (source ~/franka_ros2_ws/install/setup.sh to build it)")
