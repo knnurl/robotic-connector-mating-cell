@@ -70,6 +70,13 @@ if(franka_msgs_FOUND)
     rclcpp geometry_msgs tf2 tf2_ros tf2_geometry_msgs std_srvs franka_msgs lifecycle_msgs
     controller_manager_msgs diagnostic_msgs)
   list(APPEND INSTALL_TARGETS tracking_node)
+
+  # Read-only 1 kHz robot-state recorder for diagnosis (what the 50 Hz logs
+  # can only alias).
+  add_executable(state_recorder src/state_recorder.cpp)
+  target_compile_features(state_recorder PUBLIC cxx_std_17)
+  ament_target_dependencies(state_recorder rclcpp franka_msgs)
+  list(APPEND INSTALL_TARGETS state_recorder)
 else()
   message(WARNING "franka_msgs not found - skipping tracking_node (source ~/franka_ros2_ws/install/setup.sh to build it)")
 endif()
