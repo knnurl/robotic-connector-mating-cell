@@ -65,8 +65,8 @@ std::string check(const tracking_law::Config &cfg)
     return validate_config(cfg, 1500.0, 90.0, 30.0, 10.0);
 }
 
-// The hand-eye transform measured 2026-09-15 (fr3_mating.launch.py
-// handeye_xyz / handeye_quat): TCP -> camera optical frame, turned ~90 deg
+// The hand-eye transform measured 2026-09-15 (tools/fr3/calib/handeye.yaml
+// xyz / quat_xyzw): TCP -> camera optical frame, turned ~90 deg
 // about the optical axis and 62 mm off it. Anything but identity, so a
 // composition in the wrong order cannot pass by accident.
 tf2::Transform handeye()
@@ -161,7 +161,8 @@ struct Outcome
     bool stopped{false};
 };
 
-// tick() closed around the Arm, in the spirit of tools/fr3/test_servo_signs.py:
+// tick() closed around the Arm, in the spirit of the archived servo sign tests
+// (test_servo_signs.py, tag pre-cleanup-2026-09-23):
 // vision -> camera-centred goal -> lead -> equilibrium -> over-lead policy ->
 // publish (or hold the measured pose once) -> the arm moves. It is judged
 // against align_end_ee, never against the goal it computed, so a goal in

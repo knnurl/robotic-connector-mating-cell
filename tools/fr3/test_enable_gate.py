@@ -37,7 +37,7 @@ class _Node:
         self.halts += 1
 
 
-def _gui(ag, node, gate_on=True, busy=True):
+def _gui(panel_mod, node, gate_on=True, busy=True):
     g = types.SimpleNamespace(
         n=node, gate_on=gate_on, abort=False, paused=False, pause_reason='',
         gate_fault=None, user_paused=False, busy=busy, logs=[], traces=[], reloads=0,
@@ -51,7 +51,7 @@ def _gui(ag, node, gate_on=True, busy=True):
     g.load_calib = load_calib
     for name in ('robot_block', 'wait_gate', '_gate_fault',
                  '_on_mode_change', '_resume_hook', '_resume_hint'):
-        setattr(g, name, types.MethodType(getattr(ag.AlignPane, name), g))
+        setattr(g, name, types.MethodType(getattr(panel_mod.AlignPane, name), g))
     return g
 
 
@@ -62,26 +62,28 @@ def _later(delay_s, fn):
 
 
 @pytest.fixture
-def fast_hold(ag, monkeypatch):
-    monkeypatch.setattr(ag, 'GATE_RESUME_HOLD_S', 0.15)
+def fast_hold(panel_mod, monkeypatch):
+    monkeypatch.setattr(panel_mod, 'GATE_RESUME_HOLD_S', 0.15)
     return 0.15
 
 
 # ---- run_resumable ---------------------------------------------------------
 
-def test_mode_constants_match_franka_msgs(ag):
+def test_mode_constants_match_franka_msgs(panel_mod):
     """franka_msgs/FrankaRobotState: MOVE=2, REFLEX=4, USER_STOPPED=5."""
-    assert (ag.MODE_MOVE, ag.MODE_REFLEX, ag.MODE_USER_STOPPED) == (2, 4, 5)
+    assert (panel_mod.MODE_MOVE, panel_mod.MODE_REFLEX,
+            panel_mod.MODE_USER_STOPPED) == (2, 4, 5)
 
 
-def test_success_runs_once(ag):
+def test_success_runs_once(panel_mod):
     calls = []
-    ok, _ = ag.run_resumable(lambda: calls.append(1) or (True, 'executed'),
-                             lambda: 0, lambda: True)
+    ok, _ = panel_mod.run_resumable(
+        lambda: calls.append(1) or (True, 'executed'), lambda: 0,
+        lambda: True)
     assert ok and len(calls) == 1
 
 
-def test_real_failure_is_never_retried(ag):
+def test_real_failure_is_never_retried(panel_mod):
     """A planning failure with nothing interrupting must not loop forever."""
     calls = []
 
@@ -90,11 +92,11 @@ def test_real_failure_is_never_retried(ag):
         # fail fast instead of hanging if retrying ever creeps back in
         assert len(calls) <= 2, 'retried a failure the robot did not cause'
         return False, 'path only 40% complete'
-    ok, msg = ag.run_resumable(attempt, lambda: 0, lambda: True)
+    ok, msg = panel_mod.run_resumable(attempt, lambda: 0, lambda: True)
     assert not ok and msg == 'path only 40% complete' and len(calls) == 1
 
 
-def test_interrupted_attempt_resumes_and_finishes(ag):
+def test_interrupted_attempt_resumes_and_finishes(panel_mod):
     edges, calls = [0], []
 
     def attempt():
@@ -103,36 +105,36 @@ def test_interrupted_attempt_resumes_and_finishes(ag):
             edges[0] += 1               # robot left MOVE during this attempt
             return False, 'execution error code -7'
         return True, 'executed'
-    ok, _ = ag.run_resumable(attempt, lambda: edges[0], lambda: True)
+    ok, _ = panel_mod.run_resumable(attempt, lambda: edges[0], lambda: True)
     assert ok and len(calls) == 2
 
 
-def test_stop_during_pause_gives_up_without_moving(ag):
+def test_stop_during_pause_gives_up_without_moving(panel_mod):
     edges, calls, answers = [0], [], iter([True, False])
 
     def attempt():
         calls.append(1)
         edges[0] += 1
         return False, 'execution error code -7'
-    ok, _ = ag.run_resumable(attempt, lambda: edges[0], lambda: next(answers))
+    ok, _ = panel_mod.run_resumable(attempt, lambda: edges[0], lambda: next(answers))
     assert not ok and len(calls) == 1
 
 
-def test_no_resume_hook_means_no_retry(ag):
+def test_no_resume_hook_means_no_retry(panel_mod):
     edges, calls = [0], []
 
     def attempt():
         calls.append(1)
         edges[0] += 1
         return False, 'execution error code -7'
-    ok, _ = ag.run_resumable(attempt, lambda: edges[0], None)
+    ok, _ = panel_mod.run_resumable(attempt, lambda: edges[0], None)
     assert not ok and len(calls) == 1
 
 
-def test_blocked_at_start_and_stopped_never_attempts(ag):
+def test_blocked_at_start_and_stopped_never_attempts(panel_mod):
     calls = []
-    ok, _ = ag.run_resumable(lambda: calls.append(1) or (True, ''),
-                             lambda: 0, lambda: False)
+    ok, _ = panel_mod.run_resumable(lambda: calls.append(1) or (True, ''),
+                                    lambda: 0, lambda: False)
     assert not ok and not calls
 
 
@@ -150,35 +152,35 @@ def test_blocked_at_start_and_stopped_never_attempts(ag):
     (REFLEX, 0.0, False, 'fatal'),       # a reflex ends a run regardless
     (REFLEX, 5.0, False, None),          # stale: unknown, not asserted
 ])
-def test_robot_block_table(ag, mode, age, gate_on, expect):
-    blk = _gui(ag, _Node(mode, age), gate_on).robot_block()
+def test_robot_block_table(panel_mod, mode, age, gate_on, expect):
+    blk = _gui(panel_mod, _Node(mode, age), gate_on).robot_block()
     got = None if blk is None else ('fatal' if blk[1] else 'pause')
     assert got == expect, blk
 
 
-def test_user_stop_reason_names_the_mode(ag):
+def test_user_stop_reason_names_the_mode(panel_mod):
     """Not 'enabling device': measured 2026-09-15, it is invisible over FCI."""
-    blk = _gui(ag, _Node(USER_STOPPED)).robot_block()
+    blk = _gui(panel_mod, _Node(USER_STOPPED)).robot_block()
     assert 'USER_STOPPED' in blk[0] and 'enabling' not in blk[0]
 
 
 # ---- wait_gate ------------------------------------------------------------------
 
-def test_open_gate_returns_at_once(ag):
-    g = _gui(ag, _Node(MOVE))
+def test_open_gate_returns_at_once(panel_mod):
+    g = _gui(panel_mod, _Node(MOVE))
     assert g.wait_gate() is True
     assert not g.logs and g.reloads == 0
 
 
-def test_open_gate_still_honours_stop(ag):
-    g = _gui(ag, _Node(MOVE))
+def test_open_gate_still_honours_stop(panel_mod):
+    g = _gui(panel_mod, _Node(MOVE))
     g.abort = True
     assert g.wait_gate() is False
 
 
-def test_resumes_only_after_an_unbroken_hold(ag, fast_hold):
+def test_resumes_only_after_an_unbroken_hold(panel_mod, fast_hold):
     node = _Node(USER_STOPPED)
-    g = _gui(ag, node)
+    g = _gui(panel_mod, node)
     seen_paused = []
     _later(0.10, lambda: seen_paused.append(g.paused))
     _later(0.20, lambda: setattr(node, 'mode', MOVE))
@@ -191,10 +193,10 @@ def test_resumes_only_after_an_unbroken_hold(ag, fast_hold):
     assert [t['rec'] for t in g.traces] == ['gate_pause', 'gate_resume']
 
 
-def test_flicker_does_not_resume(ag, fast_hold):
+def test_flicker_does_not_resume(panel_mod, fast_hold):
     """Held 50 ms then released again: the hold timer must restart."""
     node = _Node(USER_STOPPED)
-    g = _gui(ag, node)
+    g = _gui(panel_mod, node)
     _later(0.10, lambda: setattr(node, 'mode', MOVE))
     _later(0.15, lambda: setattr(node, 'mode', USER_STOPPED))
     _later(0.40, lambda: setattr(node, 'mode', MOVE))
@@ -203,51 +205,51 @@ def test_flicker_does_not_resume(ag, fast_hold):
     assert time.monotonic() - t0 >= 0.40 + fast_hold - 0.03
 
 
-def test_stop_during_pause_ends_the_wait(ag, fast_hold):
-    g = _gui(ag, _Node(USER_STOPPED))
+def test_stop_during_pause_ends_the_wait(panel_mod, fast_hold):
+    g = _gui(panel_mod, _Node(USER_STOPPED))
     _later(0.10, lambda: setattr(g, 'abort', True))
     assert g.wait_gate() is False
     assert g.paused is False and g.reloads == 0 and g.gate_fault is None
 
 
-def test_reflex_during_pause_is_a_fault(ag, fast_hold):
+def test_reflex_during_pause_is_a_fault(panel_mod, fast_hold):
     node = _Node(USER_STOPPED)
-    g = _gui(ag, node)
+    g = _gui(panel_mod, node)
     _later(0.10, lambda: setattr(node, 'mode', REFLEX))
     assert g.wait_gate() is False
     assert g.gate_fault == 'robot_reflex' and g.paused is False
 
 
-def test_reflex_at_start_is_a_fault_without_pausing(ag):
-    g = _gui(ag, _Node(REFLEX))
+def test_reflex_at_start_is_a_fault_without_pausing(panel_mod):
+    g = _gui(panel_mod, _Node(REFLEX))
     assert g.wait_gate() is False
     assert g.gate_fault == 'robot_reflex'
     assert 'gate_pause' not in [t['rec'] for t in g.traces]
 
 
-def test_resume_hook_exists_with_gate_off(ag):
+def test_resume_hook_exists_with_gate_off(panel_mod):
     """PAUSE must be able to resume a Cartesian step with the gate off too."""
-    assert _gui(ag, _Node(), gate_on=True)._resume_hook() is not None
-    assert _gui(ag, _Node(), gate_on=False)._resume_hook() is not None
+    assert _gui(panel_mod, _Node(), gate_on=True)._resume_hook() is not None
+    assert _gui(panel_mod, _Node(), gate_on=False)._resume_hook() is not None
 
 
 # ---- operator PAUSE ------------------------------------------------------------
 
 @pytest.mark.parametrize('gate_on', [True, False])
-def test_operator_pause_blocks_whatever_the_gate(ag, gate_on):
-    g = _gui(ag, _Node(MOVE), gate_on=gate_on)
+def test_operator_pause_blocks_whatever_the_gate(panel_mod, gate_on):
+    g = _gui(panel_mod, _Node(MOVE), gate_on=gate_on)
     g.user_paused = True
     assert g.robot_block() == ('paused by operator', False)
 
 
-def test_reflex_outranks_operator_pause(ag):
-    g = _gui(ag, _Node(REFLEX))
+def test_reflex_outranks_operator_pause(panel_mod):
+    g = _gui(panel_mod, _Node(REFLEX))
     g.user_paused = True
     assert g.robot_block()[1] is True
 
 
-def test_resume_button_continues_after_hold(ag, fast_hold):
-    g = _gui(ag, _Node(MOVE), gate_on=False)
+def test_resume_button_continues_after_hold(panel_mod, fast_hold):
+    g = _gui(panel_mod, _Node(MOVE), gate_on=False)
     g.user_paused = True
     _later(0.10, lambda: setattr(g, 'user_paused', False))
     t0 = time.monotonic()
@@ -256,33 +258,33 @@ def test_resume_button_continues_after_hold(ag, fast_hold):
     assert 'RESUME' in g.logs[0]
 
 
-def test_interrupt_counts_before_halting(ag):
+def test_interrupt_counts_before_halting(panel_mod):
     """Counted BEFORE halt, or the halted step would look like a real failure
     and end the run instead of resuming."""
     seen = []
     fake = types.SimpleNamespace(_lock=threading.Lock(), gate_edges=0)
     fake.halt = lambda: seen.append(fake.gate_edges)
-    ag.CellNode.interrupt(fake)
+    panel_mod.CellNode.interrupt(fake)
     assert fake.gate_edges == 1 and seen == [1]
 
 
-def test_paused_cartesian_step_resumes(ag, fast_hold):
+def test_paused_cartesian_step_resumes(panel_mod, fast_hold):
     """PAUSE mid-move -> execution fails -> RESUME -> retried to the goal."""
     fake = types.SimpleNamespace(_lock=threading.Lock(), gate_edges=0)
     fake.halt = lambda: None
-    g = _gui(ag, _Node(MOVE), gate_on=False)
+    g = _gui(panel_mod, _Node(MOVE), gate_on=False)
     calls = []
 
     def attempt():
         calls.append(1)
         if len(calls) == 1:
             g.user_paused = True
-            ag.CellNode.interrupt(fake)
+            panel_mod.CellNode.interrupt(fake)
             _later(0.10, lambda: setattr(g, 'user_paused', False))
             return False, 'execution error code -7'
         return True, 'executed'
-    ok, _ = ag.run_resumable(attempt, lambda: fake.gate_edges,
-                             g._resume_hook())
+    ok, _ = panel_mod.run_resumable(attempt, lambda: fake.gate_edges,
+                                    g._resume_hook())
     assert ok and len(calls) == 2
 
 
@@ -297,30 +299,30 @@ def test_paused_cartesian_step_resumes(ag, fast_hold):
     (True, True, USER_STOPPED, MOVE, 0),    # re-held: resume is wait_gate's job
     (True, True, None, USER_STOPPED, 0),
 ])
-def test_on_mode_change_halts(ag, busy, gate_on, prev, mode, halts):
+def test_on_mode_change_halts(panel_mod, busy, gate_on, prev, mode, halts):
     node = _Node()
-    g = _gui(ag, node, gate_on=gate_on, busy=busy)
+    g = _gui(panel_mod, node, gate_on=gate_on, busy=busy)
     g._on_mode_change(prev, mode)
     assert node.halts == halts
     assert list(g._mode_log)[-1][1:] == (prev, mode)
 
 
-def test_mode_cb_counts_move_exits_and_reports_changes(ag):
+def test_mode_cb_counts_move_exits_and_reports_changes(panel_mod):
     fake = types.SimpleNamespace(_lock=threading.Lock(), _mode=None,
                                  gate_edges=0, on_mode_change=None)
     changes = []
     fake.on_mode_change = lambda prev, mode: changes.append((prev, mode))
     for mode in (MOVE, MOVE, USER_STOPPED, USER_STOPPED, MOVE, REFLEX, IDLE):
-        ag.CellNode._mode_cb(fake, types.SimpleNamespace(robot_mode=mode))
+        panel_mod.CellNode._mode_cb(fake, types.SimpleNamespace(robot_mode=mode))
     assert fake.gate_edges == 2
     assert changes == [(None, MOVE), (MOVE, USER_STOPPED),
                        (USER_STOPPED, MOVE), (MOVE, REFLEX), (REFLEX, IDLE)]
 
 
 # ---- torque interlock --------------------------------------------------------------
-# ALIGN plans on fr3_arm_controller (or swaps in the servo controller). While
-# the impedance controller holds the arm, and above all while the tracking
-# node streams its equilibrium, an ALIGN move would fight them.
+# ALIGN plans on fr3_arm_controller. While the impedance controller holds the
+# arm, and above all while the tracking node streams its equilibrium, an
+# ALIGN move would fight them.
 
 class _Btn:
     def __init__(self):
@@ -331,7 +333,7 @@ class _Btn:
             self.state = state
 
 
-def _align(ag, ctrl, tracking=False, active=False):
+def _align(panel_mod, ctrl, tracking=False, active=False):
     node = _Node(MOVE)
     node.asked = []                 # thread idents controllers() blocked
 
@@ -339,7 +341,7 @@ def _align(ag, ctrl, tracking=False, active=False):
         node.asked.append(threading.get_ident())
         return ctrl
     node.controllers = controllers
-    g = _gui(ag, node, busy=False)
+    g = _gui(panel_mod, node, busy=False)
     g.statuses = []
     g.set_status = lambda m, *_a, **_k: g.statuses.append(m)
     g.ladder = types.SimpleNamespace(tracking=tracking, active=active)
@@ -350,7 +352,7 @@ def _align(ag, ctrl, tracking=False, active=False):
     g.auto_converge = lambda: None
     g.stopped = g.last_outcome = None
     for name in ('go_impl', '_torque_block', '_run_finished'):
-        setattr(g, name, types.MethodType(getattr(ag.AlignPane, name), g))
+        setattr(g, name, types.MethodType(getattr(panel_mod.AlignPane, name), g))
     return g
 
 
@@ -378,9 +380,9 @@ ARM_ONLY = {'fr3_arm_controller': 'active',
       'cartesian_impedance_stroke_controller': 'active'}, {}, False),
     (None, {}, False),                                  # cannot rule it out
 ])
-def test_align_never_moves_under_impedance_or_tracking(ag, ctrl, kwargs,
+def test_align_never_moves_under_impedance_or_tracking(panel_mod, ctrl, kwargs,
                                                         moves):
-    g = _align(ag, ctrl, **kwargs)
+    g = _align(panel_mod, ctrl, **kwargs)
     assert _press(g) is moves
     assert any('REFUSING' in m for m in g.logs) is not moves
     assert all(b.state == 'normal' for b in (g.tb, g.lb, g.ipb, g.ab))

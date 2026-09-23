@@ -18,37 +18,34 @@ _STUBS = {
     'rclpy.executors': {'SingleThreadedExecutor': object},
     'rclpy.action': {'ActionClient': object},
     'rclpy.signals': {'SignalHandlerOptions': object},
-    'rclpy.qos': {'DurabilityPolicy': object, 'QoSDurabilityPolicy': object,
-                  'QoSProfile': object, 'ReliabilityPolicy': object},
+    'rclpy.qos': {'DurabilityPolicy': object, 'QoSProfile': object,
+                  'ReliabilityPolicy': object},
     'rcl_interfaces': {},
     'rcl_interfaces.msg': {'Parameter': object, 'ParameterType': object,
                            'ParameterValue': object},
-    'rcl_interfaces.srv': {'GetParameters': object, 'SetParameters': object,
+    'rcl_interfaces.srv': {'SetParameters': object,
                            'SetParametersAtomically': object},
     'franka_msgs': {}, 'franka_msgs.msg': {'FrankaRobotState': object},
     'franka_msgs.srv': {'SetLoad': object,
                         'SetForceTorqueCollisionBehavior': object},
-    'builtin_interfaces': {}, 'builtin_interfaces.msg': {'Duration': object},
     'controller_manager_msgs': {},
     'controller_manager_msgs.srv': {'SwitchController': object,
                                     'ListControllers': object},
     'diagnostic_msgs': {}, 'diagnostic_msgs.msg': {'DiagnosticStatus': object},
     'geometry_msgs': {},
-    'geometry_msgs.msg': {'Pose': object, 'PoseStamped': object,
-                          'TwistStamped': object},
+    'geometry_msgs.msg': {'Pose': object, 'PoseStamped': object},
     'moveit_msgs': {}, 'moveit_msgs.action': {'ExecuteTrajectory': object},
     'moveit_msgs.srv': {'GetCartesianPath': object},
     'sensor_msgs': {}, 'sensor_msgs.msg': {'JointState': object,
                                            'Image': object},
-    'std_msgs': {}, 'std_msgs.msg': {'String': object, 'Bool': object,
-                                     'Float64': object},
+    'std_msgs': {}, 'std_msgs.msg': {'String': object},
     'std_srvs': {}, 'std_srvs.srv': {'Trigger': object},
     'tf2_ros': {'Buffer': object, 'TransformListener': object},
 }
 
 
 def _load(filename, request):
-    """Import one of the tools/fr3 GUIs with every ROS import stubbed."""
+    """Import a tools/fr3 GUI with every ROS import stubbed."""
     with pytest.MonkeyPatch.context() as mp:
         for name, attrs in _STUBS.items():
             mod = types.ModuleType(name)
@@ -64,12 +61,6 @@ def _load(filename, request):
 
 
 @pytest.fixture(scope='module')
-def ag(request):
-    """cell_panel: ALIGN tab of the merged control panel."""
-    yield from _load('cell_panel.py', request)
-
-
-@pytest.fixture(scope='module')
-def ip(request):
-    """cell_panel: IMPEDANCE & TRACK tab of the merged control panel."""
+def panel_mod(request):
+    """cell_panel, the module: both tabs and the window."""
     yield from _load('cell_panel.py', request)

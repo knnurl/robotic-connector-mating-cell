@@ -1,7 +1,8 @@
 # Connector-mating controller parameters for a REAL Franka FR3
 # (franka_ros2 + franka_fr3_moveit_config, OMPL pipeline).
 #
-# Differences from the MELFA reference (rv5as_params.yaml), per
+# Differences from the MELFA reference (rv5as_params.yaml, parked in
+# melfa/parked/mating_controller/config/), per
 # SETUP_AND_CALIBRATION.md section 7: the FR3 MoveIt config has NO Pilz
 # pipeline, so the insertion stroke is not path-guaranteed. Depth, speeds
 # and tolerances are reduced accordingly. Validate in fake hardware first.
@@ -77,10 +78,10 @@
     cartesian_eef_step_m: 0.002
 
     # --- Alignment mode -------------------------------------------------------
-    # step (default). To try continuous tracking: install
-    # ros-humble-moveit-servo, run a servo node with tools/fr3/fr3_servo.yaml,
-    # then set align_mode: servo and control_period_s: 0.05 (must be shorter
-    # than the servo command timeout). INSERT stays a discrete stroke.
+    # step (default). mating_node still accepts align_mode: servo, but the
+    # moveit_servo node config it streamed to (tools/fr3/fr3_servo.yaml and
+    # its launch) was archived at tag pre-cleanup-2026-09-23; continuous
+    # tracking is tracking_node on the impedance controller instead.
     align_mode: step
     servo_twist_topic: /servo_node/delta_twist_cmds
     servo_pos_gain: 1.5
@@ -120,7 +121,7 @@
     tracking_settle_s: 1.0              # s to let the equilibrium re-seed before the gain step at start
     tracking_max_force_n: 30.0          # must equal max_force_n in cartesian_impedance_stroke.yaml (pinned by a test)
     tracking_max_torque_nm: 10.0        # must equal max_torque_nm in that yaml (pinned by a test)
-    tracking_log_dir: ''                # '' = no log. fr3_mating.launch.py overrides it with $FR3_LOG_DIR/YYYY-MM-DD
+    tracking_log_dir: ''                # '' = no log. fr3_cell.launch.py overrides it with $FR3_LOG_DIR/YYYY-MM-DD
     tracking_gain_profile: track        # prefix of the <profile>_* keys below, applied atomically on start
 
     # Camera-centred goal. TRACK holds the CAMERA where ALIGN leaves it:

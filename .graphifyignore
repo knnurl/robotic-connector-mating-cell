@@ -10,9 +10,6 @@ __pycache__/
 *.pyc
 *.egg-info/
 
-# GUI/Tool configs (noise)
-tools/gui/foxglove_layout.json
-
 # Ignore text files to bypass LLM parsing
 *.md
 *.txt

@@ -24,12 +24,16 @@ an older document, see [DOCS.md](DOCS.md).*
 - **Mains power.** Not battery. Two stack crashes on 2026-09-22 were traced to
   the laptop running on battery: the CPU cannot hold its clocks, the 1 ms FCI
   deadline slips, and libfranka aborts `ros2_control_node` with
-  `communication_constraints_violation`. `fr3_preflight.sh` does **not** check
-  this - the governor still reads `performance` on battery.
+  `communication_constraints_violation`. `fr3_preflight` FAILs on battery;
+  the governor check alone would not catch it - it still reads `performance`.
 - **RT throttling off:** `cat /proc/sys/kernel/sched_rt_runtime_us` should be
-  `-1`. Set with `sudo sysctl -w kernel.sched_rt_runtime_us=-1`.
+  `-1` (`fr3_preflight` FAILs otherwise). Set with
+  `sudo sysctl -w kernel.sched_rt_runtime_us=-1`. That lasts until the next
+  reboot; to make it permanent, once:
+  `echo 'kernel.sched_rt_runtime_us = -1' | sudo tee /etc/sysctl.d/99-fr3-rt.conf`.
 - **Desk:** unlock the joints, activate FCI, then **close the Desk browser
-  tab**. Its persistent HTTPS connections share the robot link.
+  tab**. Its persistent HTTPS connections share the robot link
+  (`fr3_preflight` WARNs while one is open).
 - **Payload is in Desk**, not the panel: the active end-effector profile is
   "Franka Hand with D405" at 0.83 kg, CoM `[-5, -5, 32]` mm. The panel's
   payload field therefore gets **0**. Never count it twice.
@@ -38,48 +42,48 @@ an older document, see [DOCS.md](DOCS.md).*
 
 ## 2. Bring-up
 
-Every terminal starts with this, and **`fr3_env.sh` must be last**:
+Two terminals, each with the cell environment (`~/.bashrc` on this PC
+already sources it in every shell):
 
 ```bash
-cd "/home/local/ISDADS/ses634/fabling/Robotic Connector Handling/src"
-source /opt/ros/humble/setup.bash
-source ~/franka_ros2_ws/install/setup.bash
-source tools/fr3/fr3_env.sh          # LAST
+source "/home/local/ISDADS/ses634/fabling/Robotic Connector Handling/src/tools/fr3/fr3_env.sh"
 ```
 
-Sourcing `franka_ros2_ws/install/setup.bash` afterwards rebuilds
-`AMENT_PREFIX_PATH` from its own chain and silently drops this workspace. The
-DDS pin survives, so everything looks fine until the spawner fails with
-"Failed loading controller".
+It pins DDS off the robot NIC and sources ROS 2, `~/franka_ros2_ws` and this
+workspace itself, in that order - so the old "source `fr3_env.sh` LAST" rule
+is gone: the order it protected is now fixed inside the script. It
+prints a `[FAIL]` line if `fr3_mating_controllers` does not resolve to this
+workspace; then build it (`colcon build --symlink-install`) and source again.
 
 ```bash
-# T1 - preflight, then driver + MoveIt
-tools/fr3/fr3_preflight.sh $FR3_ROBOT_IP        # want 9 ok / 0 fail
-ros2 launch franka_fr3_moveit_config moveit.launch.py robot_ip:=$FR3_ROBOT_IP
+# T1 - preflight; the driver + MoveIt start only if it has 0 FAILs
+fr3_preflight && ros2 launch franka_fr3_moveit_config moveit.launch.py robot_ip:=$FR3_ROBOT_IP
 
-# T2 - impedance controller, loaded INACTIVE (exits when done)
-ros2 run controller_manager spawner cartesian_impedance_stroke_controller \
-    --inactive --param-file "$(pwd)/fr3_mating_controllers/config/cartesian_impedance_stroke.yaml"
-
-# T3 - vision + hand-eye TF + tracking node
-ros2 launch tools/fr3/fr3_mating.launch.py robot_ip:=$FR3_ROBOT_IP \
-    vision_source:=realsense start_mating_node:=false
-
-# T4 - the cell panel
-python3 tools/fr3/cell_panel.py
+# T2 - the cell: impedance controller (INACTIVE), hand-eye TF, vision,
+#      tracking node and the cell panel
+fr3_cell
 ```
 
-**Why those two launch arguments:**
+`fr3_cell` is `ros2 launch tools/fr3/fr3_cell.launch.py` from any directory;
+`fr3_cell --show-args` lists its arguments. What it does and does not do:
 
-- `vision_source:=realsense` makes `cam_pub` capture in-process through
-  pyrealsense2, so no image topic ever reaches DDS. The default (`topic`)
-  instead expects a separate `realsense2_camera` driver to be running, and
-  puts the frames on the graph. With a 1 kHz FCI loop next door, prefer
-  in-process - this is "defence 0" in `tools/fr3/README.md`.
-- `start_mating_node:=false` leaves the autonomous phase machine out.
-  Given a marker, `mating_node` aligns the arm **by itself**, which is not
-  what you want while driving the cell from the panel. Drop the argument
-  when you actually want an autonomous mating run (and a working MoveIt).
+- **Spawns `cartesian_impedance_stroke_controller` inactive** and exits.
+  Relaunching T2 while T1 runs is safe: an already-active controller is left
+  running untouched - the spawner then prints "Failed to configure
+  controller" and exits, which is expected. Edits to
+  `cartesian_impedance_stroke.yaml` take effect only after restarting T1,
+  then T2.
+- **Hand-eye TF from `tools/fr3/calib/handeye.yaml`**, the one copy; the log
+  line says whether an override was used instead.
+- **In-process capture** (`vision_source:=realsense`, the default): no image
+  topic ever reaches DDS - "defence 0" in `tools/fr3/README.md`.
+  `vision_source:=topic` expects a separate `realsense2_camera` driver.
+- **The panel** starts with it (`start_panel:=false` to run
+  `python3 tools/fr3/cell_panel.py` yourself). Ctrl-C in T2 lets the panel
+  hand the arm back before it exits: normally a second, up to about a minute
+  if a service is not answering - do not kill it meanwhile.
+- **No `mating_node`.** The autonomous phase machine is parked
+  ([melfa/parked/README.md](melfa/parked/README.md)).
 
 Check it came up:
 
@@ -92,7 +96,8 @@ ros2 topic hz /aruco/pose          # only while the marker is actually seen
 
 If `debug_image` flows but `pose` is silent, the camera is fine and the
 marker is not being detected - look at the panel's camera view, which is
-exactly the question it answers.
+exactly the question it answers. Check `marker_id` too (default `0`, the
+marker now on the cell): cam_pub discards every other id.
 
 ---
 

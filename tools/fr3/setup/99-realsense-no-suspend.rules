@@ -7,7 +7,7 @@
 # cell three times in one session: device 003 -> 005 -> 008.
 #
 # INSTALL:
-#   sudo cp tools/fr3/99-realsense-no-suspend.rules /etc/udev/rules.d/
+#   sudo cp tools/fr3/setup/99-realsense-no-suspend.rules /etc/udev/rules.d/
 #   sudo udevadm control --reload-rules
 #   sudo udevadm trigger --action=add --subsystem-match=usb --attr-match=idVendor=8086
 #

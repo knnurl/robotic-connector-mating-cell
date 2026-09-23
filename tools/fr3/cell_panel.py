@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """FR3 cell control panel - alignment, impedance commissioning, tracking.
 
-One window, three tabs, one robot. Merged 2026-09-22 from cell_panel.py and
-cell_panel.py, which had drifted into two dashboards with thirteen
+One window, three tabs, one robot. Merged 2026-09-22 from align_gui.py and
+impedance_panel.py, which had drifted into two dashboards with thirteen
 duplicated helpers between them and no shared idea of who held the arm.
 
   ALIGN       drive the wrist camera to a target pose above the marker
-              (cartesian backend proven on hardware; servo backend parked)
+              (stepped MoveIt cartesian moves, proven on hardware)
   IMPEDANCE   the commissioning ladder: pre-flight, float, hold, setpoint
   TRACK       continuous marker following on the impedance controller
 
@@ -35,12 +35,12 @@ from tkinter import scrolledtext, ttk
 
 import numpy as np
 import rclpy
-from builtin_interfaces.msg import Duration
+import yaml
 from controller_manager_msgs.srv import ListControllers, SwitchController
 from diagnostic_msgs.msg import DiagnosticStatus
 from franka_msgs.msg import FrankaRobotState
 from franka_msgs.srv import SetForceTorqueCollisionBehavior, SetLoad
-from geometry_msgs.msg import Pose, PoseStamped, TwistStamped
+from geometry_msgs.msg import Pose, PoseStamped
 from moveit_msgs.action import ExecuteTrajectory
 from moveit_msgs.srv import GetCartesianPath
 from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
@@ -56,21 +56,12 @@ from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformListener
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'gui'))
-from mating_panel import (THEME as T, mix, rounded_rect,  # noqa: E402
-                          text_on)
 from state_relay import start_throttle, stop_throttle   # noqa: E402
+from theme import THEME as T, mix, rounded_rect, text_on   # noqa: E402
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / 'roscam'))
 from roscam.plane_normal import (inplane_angle, inplane_correction,  # noqa: E402
                                  wrap_deg)
-
-# One relay for the whole panel; the two originals each started their own.
-ROBOT_STATE_RELAY = '/cell_panel/robot_state'
-
-
-# Shared dark-dashboard palette - single source of truth is the operator
-# panel, so the two GUIs cannot drift apart.
 
 
 # ---- selectable step sizes ----------------------------------------------
@@ -111,52 +102,6 @@ NO_PROGRESS_LIMIT = 4     # abort if the error stops improving
 CEIL_STEP_M = 0.050
 CEIL_ROT_DEG = 5.0
 
-# ---- motion backend ------------------------------------------------------
-# 'cartesian' plans and executes each clamped step through move_group: safe
-# and pre-checked, but every step accelerates from rest and stops again.
-# 'servo' streams a velocity proportional to the error, so the motion is
-# continuous and naturally coarse-then-fine - one move, no stop-start.
-BACKEND_CHOICES = ['cartesian', 'servo']
-BACKEND_DEFAULT = 'cartesian'
-
-# Servo speed profiles. Velocity = gain * error, clamped to the caps. The
-# FR3 itself permits 3000 mm/s, so every profile here is far below the
-# hardware limit; these are chosen for watchability and reaction time.
-SERVO_PROFILES = {
-    'conservative': {'lin': 0.030, 'ang': 15.0, 'gain': 0.8},
-    'moderate':     {'lin': 0.060, 'ang': 25.0, 'gain': 1.2},
-    'brisk':        {'lin': 0.120, 'ang': 40.0, 'gain': 1.5},
-}
-SERVO_PROFILE_DEFAULT = 'moderate'
-SERVO_RATE_HZ = 30.0      # must be well inside incoming_command_timeout
-
-# Controllers. franka_hardware allows exactly ONE command mode at a time:
-# planned moves run on the effort trajectory controller, the servo stream on
-# a joint-position controller. Streaming into the trajectory controller is
-# what stalled the arm and made it buzz (see fr3_servo_controllers.yaml), so
-# a servo run swaps controllers and always swaps back.
-ARM_CONTROLLER = 'fr3_arm_controller'
-SERVO_CONTROLLER = 'fr3_servo_position_controller'
-CTRL_SWITCH_TIMEOUT_S = 5.0
-# Gap between releasing one controller and claiming the next, so the old
-# command mode has actually stopped (see switch_controllers).
-CTRL_SWITCH_SETTLE_S = 0.3
-SERVO_SETTLE_S = 0.6      # zero-twist hold before handing the arm back
-
-# Command shaping for the servo stream (see CommandShaper). These are the
-# values validated against a sim using the noise measured on this cell and
-# 80 ms latency. Sending the raw command instead is what shook the arm into
-# cartesian_reflex on the brisk profile.
-SHAPER_ALPHA = 0.35          # command low-pass, ~2.3 Hz at 30 Hz
-SHAPER_LIN_ACC = 0.25        # m/s^2   max change of the linear command
-SHAPER_ANG_ACC_DEG = 40.0    # deg/s^2 max change of the angular command
-DEAD_TILT_DEG = 0.4          # orientation deadband near the target, so the
-DEAD_IP_DEG = 0.3            # measurement noise cannot dither the wrist
-OSC_WINDOW = 30              # frames (1 s) the oscillation watchdog watches
-OSC_FLIP_LIMIT = 0.25        # abort if >25% of those frames reverse
-OSC_EPS_LIN = 0.001          # m/s   reversals below this are noise, ignored
-OSC_EPS_ANG = float(np.radians(0.3))
-
 # ---- robot-state gate ---------------------------------------------------------
 # Motion only while the robot reports MOVE. Anything else (user stop,
 # hand-guiding, IDLE) pauses the run, which resumes from rest once the robot is
@@ -166,6 +111,7 @@ OSC_EPS_ANG = float(np.radians(0.3))
 # releasing this cell's enabling device changed no robot-state field at all,
 # so software cannot see it over FCI.
 ROBOT_STATE_TOPIC = '/franka_robot_state_broadcaster/robot_state'
+# One relay for the whole panel; the two originals each started their own.
 ROBOT_STATE_RELAY = '/cell_panel/robot_state'
 # Decoding the 1 kHz state in Python costs 86% of a core, raw callbacks 31%
 # (measured) - enough to starve this GUI. A C++ topic_tools throttle child
@@ -174,26 +120,12 @@ ROBOT_STATE_RELAY_HZ = 50
 ROBOT_STATE_STALE_S = 0.3
 GATE_DEFAULT = True
 GATE_RESUME_HOLD_S = 0.5     # held this long, unbroken, before motion resumes
-MODE_MOVE, MODE_REFLEX, MODE_USER_STOPPED = 2, 4, 5
+MODE_IDLE, MODE_MOVE, MODE_REFLEX, MODE_USER_STOPPED = 1, 2, 4, 5
 ROBOT_MODES = {0: 'OTHER', 1: 'IDLE', 2: 'MOVE', 3: 'GUIDING', 4: 'REFLEX',
                5: 'USER_STOPPED', 6: 'ERROR_RECOVERY'}
 GATE_REASONS = {0: 'robot mode OTHER', 1: 'robot IDLE - no control loop',
                 3: 'hand-guiding', 5: 'robot USER_STOPPED (user stop)',
                 6: 'automatic error recovery'}
-
-# ---- servo stall watchdog --------------------------------------------------------
-# Measured 2026-09-15: conservative servo commanded ~10 mm/s and 7 deg/s for
-# 90 s while the arm did not move at all (error flat at 12.7 mm / 8.8 deg).
-# Abort when commanded motion produces no progress for this long.
-SERVO_STALL_S = 4.0
-SERVO_STALL_MM = 0.5         # progress that counts: position ...
-SERVO_STALL_DEG = 0.3        # ... or tilt / in-plane
-
-# What to do once converged. 'hold' stops the stream and leaves the arm
-# idle; 'station-keep' keeps correcting, which also tracks a marker that
-# moves - but leaves the robot live until stopped.
-CONVERGE_CHOICES = ['hold', 'station-keep']
-CONVERGE_DEFAULT = 'hold'
 
 # Whole-arm Z floor. fr3_link0 is the bolted base at z=0 and would trip any
 # sensible floor, so it is excluded; everything else that can swing down is
@@ -212,10 +144,11 @@ FLOOR_MM_DEFAULT = '50'   # whole-arm Z floor, base frame
 IMAGE_MAX_W = 640         # native D405 width, so no downscale at 640x480
 PLOT_WINDOW_S = 30.0      # seconds of convergence history shown
 
-# Saved calibration. Holds the camera->TCP ROTATION, which is a rigid
-# mounting property: unlike R_cam_base it does not change when the robot
-# moves, so it stays valid across sessions and arm poses.
-CALIB_PATH = pathlib.Path(__file__).with_name('handeye_rotation.json')
+# The cell's one hand-eye calibration, which fr3_cell.launch.py also
+# publishes as TF. ALIGN uses only its ROTATION, a rigid mounting property:
+# unlike R_cam_base it does not change when the robot moves, so it stays
+# valid across sessions and arm poses.
+CALIB_PATH = pathlib.Path(__file__).resolve().parent / 'calib' / 'handeye.yaml'
 
 # Per-iteration JSONL trace of auto-converge: what was measured, what was
 # commanded, what the robot actually did. One file per run. With FR3_LOG_DIR
@@ -226,7 +159,6 @@ LOG_DIR = pathlib.Path(__file__).with_name('logs')
 
 IMPEDANCE_CONTROLLER = 'cartesian_impedance_stroke_controller'
 ARM_CONTROLLER = 'fr3_arm_controller'
-ROBOT_STATE_TOPIC = '/franka_robot_state_broadcaster/robot_state'
 
 EQUILIBRIUM_TOPIC = f'/{IMPEDANCE_CONTROLLER}/equilibrium_pose'
 # Continuous tracking (TRACKING_SPEC.md section 5). The node owns the 50 Hz
@@ -259,10 +191,6 @@ TRACK_STATUS_STALE_S = 1.0
 TRACK_LIVE_STATES = ('starting', 'tracking', 'holding', 'stopping')
 STATE_STALE_S = 0.3
 DRIVER_DOWN_S = 2.0       # robot state silent this long: the driver is gone
-
-MODE_IDLE, MODE_MOVE, MODE_REFLEX = 1, 2, 4
-ROBOT_MODES = {0: 'OTHER', 1: 'IDLE', 2: 'MOVE', 3: 'GUIDING', 4: 'REFLEX',
-               5: 'USER_STOPPED', 6: 'ERROR_RECOVERY'}
 
 # ---- pre-flight -------------------------------------------------------------
 # Collision reflex thresholds. Contact thresholds only raise flags in the robot
@@ -365,116 +293,6 @@ def axis_angle_R(axis, ang):
     a = axis / np.linalg.norm(axis)
     K = np.array([[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]])
     return np.eye(3) + np.sin(ang) * K + (1 - np.cos(ang)) * (K @ K)
-
-
-def clamp_norm(v, lim):
-    """Scale v down to norm lim, preserving its direction."""
-    n = float(np.linalg.norm(v))
-    return v * (lim / n) if n > lim and n > 1e-12 else v
-
-
-class CommandShaper:
-    """Makes the servo velocity stream smooth enough for the FR3.
-
-    The raw gain*error command is rough. Measured on this cell, the angular
-    command reversed sign on 13% of frames with single-frame jumps of
-    11.7 deg/s - orientation noise, amplified because the tilt direction is
-    ill-conditioned at small tilt - and brisk added 27.8 mm/s linear jumps
-    that shook the arm into cartesian_reflex. A sim with the measured noise
-    and 80 ms latency reproduces the 11.5 deg/s jumps, and this shaper cuts
-    them 6-16x without slowing convergence.
-
-      filter()       low-pass the command, and zero orientation inside a
-                     deadband near target so noise cannot dither the wrist
-      limit()        acceleration limit: every change is a ramp, including
-                     the first one out of standstill and any resume
-      oscillating()  watchdog: stop before libfranka does if the shaped
-                     command keeps reversing
-    """
-
-    def __init__(self, alpha=SHAPER_ALPHA, lin_acc=SHAPER_LIN_ACC,
-                 ang_acc_deg=SHAPER_ANG_ACC_DEG, dead_tilt_deg=DEAD_TILT_DEG,
-                 dead_ip_deg=DEAD_IP_DEG, window=OSC_WINDOW,
-                 flip_limit=OSC_FLIP_LIMIT):
-        self.alpha = float(alpha)
-        self.lin_acc = float(lin_acc)
-        self.ang_acc = float(np.radians(ang_acc_deg))
-        self.dead_tilt = float(dead_tilt_deg)
-        self.dead_ip = float(dead_ip_deg)
-        self.flip_limit = float(flip_limit)
-        self._flips = collections.deque(maxlen=int(window))
-        self.reset()
-
-    def reset(self):
-        """Back to rest. Call when motion stops, so a restart ramps up."""
-        self._f_lin = None
-        self._f_ang = None
-        self.lin = np.zeros(3)
-        self.ang = np.zeros(3)
-        self._flips.clear()
-
-    def filter(self, lin, ang, tilt_deg, ip_err_deg):
-        a = self.alpha
-        lin = np.asarray(lin, dtype=float)
-        ang = np.asarray(ang, dtype=float)
-        self._f_lin = lin if self._f_lin is None else a * lin + (1 - a) * self._f_lin
-        self._f_ang = ang if self._f_ang is None else a * ang + (1 - a) * self._f_ang
-        out_ang = self._f_ang
-        if tilt_deg < self.dead_tilt and ip_err_deg < self.dead_ip:
-            out_ang = np.zeros(3)
-        return self._f_lin.copy(), np.array(out_ang, dtype=float)
-
-    def limit(self, lin, ang, dt):
-        lin = self.lin + clamp_norm(np.asarray(lin, dtype=float) - self.lin,
-                                    self.lin_acc * dt)
-        ang = self.ang + clamp_norm(np.asarray(ang, dtype=float) - self.ang,
-                                    self.ang_acc * dt)
-        # a reversal only counts when both sides are clearly non-zero, so
-        # a deliberate single crossing or near-zero dithering does not
-        rev = (np.any(lin * self.lin < -OSC_EPS_LIN ** 2)
-               or np.any(ang * self.ang < -OSC_EPS_ANG ** 2))
-        self._flips.append(bool(rev))
-        self.lin, self.ang = lin, ang
-        return lin.copy(), ang.copy()
-
-    def flip_rate(self):
-        return float(np.mean(self._flips)) if self._flips else 0.0
-
-    def oscillating(self):
-        return (len(self._flips) == self._flips.maxlen
-                and self.flip_rate() > self.flip_limit)
-
-
-class StallWatchdog:
-    """Trips when servo keeps commanding motion but the error stops shrinking.
-
-    Progress is any of position / tilt / in-plane error dropping by its
-    threshold. Errors are low-passed first, so per-frame measurement noise
-    (tilt 0.31 deg) cannot pass for progress. Diverging also counts as no
-    progress, which is what it is.
-    """
-
-    def __init__(self, window_s=None, mm=None, deg=None, alpha=0.1):
-        self.window_s = float(SERVO_STALL_S if window_s is None else window_s)
-        mm = SERVO_STALL_MM if mm is None else mm
-        deg = SERVO_STALL_DEG if deg is None else deg
-        self.thr = np.array([mm, deg, deg], dtype=float)
-        self.alpha = float(alpha)
-        self.reset(0.0)
-
-    def reset(self, now):
-        self._f = None
-        self._ref = None
-        self._t = now
-
-    def update(self, now, err_m, tilt_deg, ip_err_deg):
-        """Feed one measurement. True once there was no progress for window_s."""
-        x = np.array([err_m * 1000.0, tilt_deg, ip_err_deg], dtype=float)
-        a = self.alpha
-        self._f = x if self._f is None else a * x + (1 - a) * self._f
-        if self._ref is None or np.any(self._f < self._ref - self.thr):
-            self._ref, self._t = self._f.copy(), now
-        return now - self._t > self.window_s
 
 
 def run_resumable(attempt, edge_count, resume):
@@ -613,7 +431,7 @@ class CellNode(Node):
         self._image_seq = 0
         self._image_sub = None
 
-        # --- MoveIt / cartesian backend (ALIGN) ---
+        # --- MoveIt cartesian moves (ALIGN) ---
         self.tf_buf = Buffer()
         self.tf_listener = TransformListener(self.tf_buf, self)
         self.cart = self.create_client(GetCartesianPath,
@@ -628,21 +446,12 @@ class CellNode(Node):
         self._goal_handle = None
         self.last_cmd = {}
 
-        # --- servo backend (ALIGN, parked) ---
-        self.twist_pub = self.create_publisher(
-            TwistStamped, '/servo_node/delta_twist_cmds', 10)
-        self.servo_start = self.create_client(Trigger,
-                                              '/servo_node/start_servo')
-        self.servo_stop = self.create_client(Trigger, '/servo_node/stop_servo')
-        self.ctrl = 'arm'
-
         # --- impedance + tracking ---
         self._state = None       # (pos, quat, force, mode, rate, stamp)
         self.on_sample = None
         self.eq_pub = self.create_publisher(PoseStamped, EQUILIBRIUM_TOPIC, 1)
         self.switch_cli = self.create_client(
             SwitchController, '/controller_manager/switch_controller')
-        self.switch_ctrl = self.switch_cli      # ALIGN's name for the same client
         self.list_cli = self.create_client(
             ListControllers, '/controller_manager/list_controllers')
         # ATOMIC: plain set_parameters applies each parameter on its own, so a
@@ -675,6 +484,7 @@ class CellNode(Node):
         self.relay_error = None
         try:
             self._relay = start_throttle(ROBOT_STATE_TOPIC, ROBOT_STATE_RELAY,
+                                         hz=ROBOT_STATE_RELAY_HZ,
                                          node_name='cell_panel_relay')
         except Exception as e:                              # noqa: BLE001
             self._relay, self.relay_error = None, str(e)
@@ -724,74 +534,6 @@ class CellNode(Node):
         k = min(z, key=z.get)
         return k, z[k]
 
-    def publish_twist(self, lin, ang, frame):
-        """One velocity command. lin m/s, ang rad/s, both in `frame`."""
-        m = TwistStamped()
-        m.header.stamp = self.get_clock().now().to_msg()
-        m.header.frame_id = frame
-        m.twist.linear.x, m.twist.linear.y, m.twist.linear.z = [float(v) for v in lin]
-        m.twist.angular.x, m.twist.angular.y, m.twist.angular.z = [float(v) for v in ang]
-        self.twist_pub.publish(m)
-
-    def zero_twist(self, n=3):
-        """Explicit stop. Sent repeatedly because it is the deadman."""
-        for _ in range(n):
-            self.publish_twist((0, 0, 0), (0, 0, 0), self.base)
-            time.sleep(0.02)
-
-    def call_servo(self, cli, timeout_s=5.0):
-        if not cli.wait_for_service(timeout_sec=timeout_s):
-            return False, 'servo service unavailable (is fr3_servo.launch.py up?)'
-        fut = cli.call_async(Trigger.Request())
-        if not self._wait(fut, timeout_s):
-            return False, 'servo service timed out'
-        r = fut.result()
-        return (bool(r.success), r.message) if r is not None else (False, 'no response')
-
-    def switch_controllers(self, activate, deactivate, mode):
-        """Swap ros2_control controllers. Returns (ok, message).
-
-        TWO calls, releasing the old controller before claiming the new one -
-        never both in one request. franka_hardware 2.0.2's
-        perform_command_mode_switch handles the modes in a fixed order within
-        a single pass: asked for effort in and position out, it starts torque
-        control and THEN calls stopRobot() for the outgoing position mode, so
-        the next write() has no active control and takes ros2_control_node
-        down with a std::runtime_error. Measured here 2026-09-15, with the
-        arm stationary. Split in two, each pass changes one mode only.
-
-        Between the calls no controller holds the arm, which is the same
-        state as a freshly started stack: the robot holds position.
-        """
-        if not self.switch_ctrl.wait_for_service(timeout_sec=3.0):
-            return False, 'controller_manager not available'
-        if deactivate:
-            ok, msg = self._switch_once([], list(deactivate))
-            if not ok:
-                self.ctrl = None
-                return False, f'could not release {deactivate[0]}: {msg}'
-            time.sleep(CTRL_SWITCH_SETTLE_S)   # let the mode actually stop
-        ok, msg = self._switch_once(list(activate), [])
-        self.ctrl = mode if ok else None
-        return ok, msg
-
-    def _switch_once(self, activate, deactivate):
-        """One switch_controller call. STRICT: a partial switch would leave
-        the arm held by the wrong controller, or by none."""
-        req = SwitchController.Request()
-        req.activate_controllers = activate
-        req.deactivate_controllers = deactivate
-        req.strictness = SwitchController.Request.STRICT
-        req.activate_asap = True
-        req.timeout = Duration(sec=int(CTRL_SWITCH_TIMEOUT_S))
-        fut = self.switch_ctrl.call_async(req)
-        if not self._wait(fut, CTRL_SWITCH_TIMEOUT_S + 5.0):
-            return False, 'switch_controller timed out'
-        res = fut.result()
-        ok = bool(res is not None and res.ok)
-        return ok, ('switched' if ok
-                    else 'controller_manager refused the switch')
-
     def _cb(self, m):
         p = np.array([m.pose.position.x, m.pose.position.y, m.pose.position.z])
         o = m.pose.orientation
@@ -815,7 +557,7 @@ class CellNode(Node):
         missing, stale or not transformable.
 
         cam_pub publishes /aruco/pose in its filter_frame - fr3_link0 on this
-        cell (fr3_mating.launch.py) - while every ALIGN error is a camera
+        cell (fr3_cell.launch.py) - while every ALIGN error is a camera
         frame error. So anything else is re-expressed through the latest TF:
         the filter frame is fixed, the camera is what moved.
         """
@@ -960,18 +702,13 @@ class CellNode(Node):
 
     def halt(self):
         """Stop whatever is moving, now, without ending the run: MoveIt
-        execution halts mid-trajectory and the servo stream goes to zero.
-        Never blocks, so it is safe from the spin thread.
+        execution halts mid-trajectory. Never blocks, so it is safe from the
+        spin thread.
         """
         msg = String()
         msg.data = 'stop'
         for _ in range(3):          # cheap, and the topic is best-effort
             self.exec_event.publish(msg)
-        z = TwistStamped()
-        z.header.frame_id = self.base
-        for _ in range(5):          # no sleep: this is the instant path
-            z.header.stamp = self.get_clock().now().to_msg()
-            self.twist_pub.publish(z)
 
     def interrupt(self):
         """Operator PAUSE: count it like the robot leaving MOVE, THEN halt -
@@ -990,10 +727,6 @@ class CellNode(Node):
         hardware E-stop.
         """
         self.halt()
-        # stop_servo is fired without waiting - an instant stop must never
-        # block on a service round-trip.
-        if self.servo_stop.service_is_ready():
-            self.servo_stop.call_async(Trigger.Request())
         gh = self._goal_handle
         if gh is not None:
             gh.cancel_goal_async()
@@ -1243,8 +976,8 @@ class Pane:
 
 
 class AlignPane(Pane):
-    """Camera <-> marker alignment. Every method below came from cell_panel.py
-    unchanged; only the chrome moved to the shell."""
+    """Camera <-> marker alignment, from align_gui.py; only the chrome moved
+    to the shell."""
 
     NAME = 'ALIGN'
 
@@ -1324,7 +1057,6 @@ class AlignPane(Pane):
         self.draw_plot('tilt', 1, ROT_TOL_DEG)
         self.draw_plot('ip', 2, INPLANE_TOL_DEG)
         self._update_calib_card()
-        self._update_servo_state()
         self._drain_mode_log()
         self._snap = snap
 
@@ -1426,27 +1158,13 @@ class AlignPane(Pane):
         mot = self._card(row, 'MOTION')
         mot.pack(side='left', fill='both', expand=True, padx=(12, 0))
         m = tk.Frame(mot, bg=T['surface'])
-        m.pack(fill='x', pady=(0, 4))
-        self.v_backend = tk.StringVar(value=BACKEND_DEFAULT)
-        self.v_servo = tk.StringVar(value=SERVO_PROFILE_DEFAULT)
-        self.v_converge = tk.StringVar(value=CONVERGE_DEFAULT)
+        m.pack(fill='x', pady=(0, 10))
         self.v_step = tk.StringVar(value=STEP_MM_DEFAULT)
         self.v_rot = tk.StringVar(value=ROT_DEG_DEFAULT)
         self.v_speed = tk.StringVar(value=SPEED_PCT_DEFAULT)
-        self._row(m, 'backend', self.v_backend, BACKEND_CHOICES, 0, 0)
-        self.servo_rows = [
-            self._row(m, 'servo speed', self.v_servo,
-                      list(SERVO_PROFILES), 1, 0),
-            self._row(m, 'on converge', self.v_converge,
-                      CONVERGE_CHOICES, 2, 0)]
-        self.cart_rows = [
-            self._row(m, 'step (mm)', self.v_step, STEP_MM_CHOICES, 3, 0),
-            self._row(m, 'level (deg)', self.v_rot, ROT_DEG_CHOICES, 4, 0),
-            self._row(m, 'speed (%)', self.v_speed, SPEED_PCT_CHOICES, 5, 0)]
-        self.servo_state = tk.Label(mot, text='', font=self.f_caption,
-                                    fg=T['muted'], bg=T['surface'],
-                                    anchor='w', justify='left')
-        self.servo_state.pack(fill='x', padx=10, pady=(0, 10))
+        self._row(m, 'step (mm)', self.v_step, STEP_MM_CHOICES, 0, 0)
+        self._row(m, 'level (deg)', self.v_rot, ROT_DEG_CHOICES, 1, 0)
+        self._row(m, 'speed (%)', self.v_speed, SPEED_PCT_CHOICES, 2, 0)
 
     def _build_calib(self, parent):
         card = self._card(parent, 'CALIBRATION  |  camera -> TCP rotation')
@@ -1454,7 +1172,7 @@ class AlignPane(Pane):
         g = tk.Frame(card, bg=T['surface'])
         g.pack(fill='x', padx=10, pady=(0, 4))
         self.calib_labels = {}
-        for r, key in enumerate(('source', 'residual', 'validated',
+        for r, key in enumerate(('source', 'frames', 'residual', 'validated',
                                  'status')):
             tk.Label(g, text=key, font=self.f_caption, fg=T['muted'],
                      bg=T['surface'], anchor='w', width=9).grid(
@@ -1543,16 +1261,7 @@ class AlignPane(Pane):
         t = self.v_inplane.get()
         self.ipb.config(text='In-plane (off)' if t == 'off'
                         else f'In-plane -> {t} deg')
-        be = self.v_backend.get()
-        self.ab.config(text=(f'AUTO-CONVERGE   |   {be}   |   '
-                             f'-> {self.v_target.get()} mm'))
-        # dim the settings that do not drive AUTO-CONVERGE on this backend;
-        # they stay editable because the manual step buttons use them
-        servo = be == 'servo'
-        for rows, on in ((self.servo_rows, servo),
-                         (self.cart_rows, not servo)):
-            for lbl, _cb in rows:
-                lbl.config(fg=T['ink'] if on else T['muted'])
+        self.ab.config(text=f'AUTO-CONVERGE   |   -> {self.v_target.get()} mm')
 
     def stop(self):
         """Graceful: end the loop, let the in-flight segment finish."""
@@ -1565,8 +1274,8 @@ class AlignPane(Pane):
         self.trace({'rec': 'stop_graceful'})
 
     def stop_now(self):
-        """Instant: halt the trajectory (or servo stream) where it is - and
-        a live tracker, which that halt does not reach."""
+        """Instant: halt the trajectory where it is - and a live tracker,
+        which that halt does not reach."""
         self.abort = True
         self.stopped = True
         self.n.stop_now()
@@ -1588,7 +1297,7 @@ class AlignPane(Pane):
 
         fatal ends the run; otherwise it pauses. REFLEX is fatal whatever the
         toggle says: resuming by itself right after an error recovery would
-        be a surprise, and servo would otherwise stream into a faulted arm.
+        be a surprise.
         """
         rm = self.n.robot_mode()
         fresh = rm is not None and rm[1] <= ROBOT_STATE_STALE_S
@@ -1726,7 +1435,7 @@ class AlignPane(Pane):
             self.calib_meta, self.calib_state = {}, 'missing'
             return
         try:
-            self.calib_meta = json.loads(CALIB_PATH.read_text())
+            self.calib_meta = yaml.safe_load(CALIB_PATH.read_text()) or {}
         except Exception:                                   # noqa: BLE001
             self.calib_meta, self.calib_state = {}, 'error'
 
@@ -1764,7 +1473,8 @@ class AlignPane(Pane):
                 self.say(f'no saved calibration at {CALIB_PATH.name}')
             return
         try:
-            R_cam_tcp = np.array(self.calib_meta['R_cam_tcp'], dtype=float)
+            # quat_xyzw is TCP -> optical, i.e. R_tcp_cam
+            R_cam_tcp = q2R(*self.calib_meta['quat_xyzw']).T
             _, R_base_tcp = self.n.tcp_pose()
         except Exception as e:                              # noqa: BLE001
             self.calib_state = ('waiting' if 'does not exist' in str(e)
@@ -1775,8 +1485,8 @@ class AlignPane(Pane):
         # R_cam_base = R_cam_tcp @ R_tcp_base, rebased to where the arm is
         self.R = R_cam_tcp @ R_base_tcp.T
         self.calib_state = 'loaded'
-        src = self.calib_meta.get('source', CALIB_PATH.name)
-        self.say(f'calibration loaded ({src}), re-based to the current pose')
+        self.say(f'calibration loaded ({CALIB_PATH.name}), re-based to the '
+                 'current pose')
 
     def auto_floor(self):
         """Predict the end pose from the CURRENT measurement, floor below it.
@@ -1812,8 +1522,7 @@ class AlignPane(Pane):
                     'STOP NOW ends the run')
         if self.busy:
             return ('ALIGNING', T['series'],
-                    f'{self.v_backend.get()} backend running  -  '
-                    'STOP NOW halts it')
+                    'cartesian steps running  -  STOP NOW halts them')
         if self.stopped:
             return ('STOPPED', T['critical'],
                     'halted by operator  -  starting a new run clears this')
@@ -1852,14 +1561,6 @@ class AlignPane(Pane):
                       else T['warning'])
         moveit = (self.n.cart.service_is_ready()
                   and self.n.exec_ac.server_is_ready())
-        ready = self.n.servo_start.service_is_ready()
-        if self.n.ctrl is None:
-            servo = ('CTRL STUCK', T['critical'])
-        elif self.n.ctrl == 'servo':
-            servo = ('streaming', T['good'])
-        else:
-            servo = ('ready' if ready else 'off',
-                     T['good'] if ready else T['muted'])
         blk = self.robot_block()
         if self.user_paused:
             gate = ('paused', T['warning'])
@@ -1872,7 +1573,6 @@ class AlignPane(Pane):
         return [('FRANKA',) + franka,
                 ('MOVEIT', 'ready' if moveit else 'down',
                  T['good'] if moveit else T['critical']),
-                ('SERVO',) + servo,
                 ('GATE',) + gate]
 
     def draw_plot(self, key, idx, tol):
@@ -1919,20 +1619,21 @@ class AlignPane(Pane):
 
     def _update_calib_card(self):
         md = self.calib_meta
-        when = (md.get('calibrated_utc') or md.get('saved_utc') or '?')[:10]
         self.calib_labels['source'].config(
-            text=(f'{md.get("source", "unknown")}   {md.get("method", "?")}, '
-                  f'{md.get("poses", "?")} poses   {when}'))
+            text=(f'{CALIB_PATH.name}   {md.get("method", "?")}, '
+                  f'{md.get("poses", "?")} poses   '
+                  f'{md.get("calibrated", "?")}'))
+        self.calib_labels['frames'].config(
+            text=(f'{md.get("parent_frame", "?")} -> '
+                  f'{md.get("child_frame", "?")}'))
         if 'residual_mm' in md:
             self.calib_labels['residual'].config(
                 text=(f'{md["residual_mm"]:.2f} mm / '
                       f'{md.get("residual_deg", float("nan")):.2f} deg'))
         if 'validated_scatter_mm' in md:
-            guess = md.get('guess_scatter_mm')
             self.calib_labels['validated'].config(
                 text=(f'{md["validated_scatter_mm"]:.2f} mm static-marker '
-                      'scatter' + (f'  (guess was {guess:.0f} mm)'
-                                   if guess else '')))
+                      'scatter'))
         text, col = {
             'loaded': ('loaded, re-based to the current pose', T['good']),
             'waiting': ('waiting for TF  -  is MoveIt running?', T['warning']),
@@ -1941,29 +1642,14 @@ class AlignPane(Pane):
         }[self.calib_state]
         self.calib_labels['status'].config(text=text, fg=col)
 
-    def _update_servo_state(self):
-        ready = self.n.servo_start.service_is_ready()
-        if self.v_backend.get() == 'servo':
-            self.servo_state.config(
-                text=('servo node: ready - the arm swaps to '
-                      f'{SERVO_CONTROLLER} for a run' if ready else
-                      'servo node NOT running\n'
-                      'start tools/fr3/fr3_servo.launch.py'),
-                fg=T['good'] if ready else T['critical'])
-        else:
-            self.servo_state.config(
-                text=f'servo node: {"ready" if ready else "not running"} '
-                     '(unused on cartesian)',
-                fg=T['muted'])
-
     # ------------------------------------------------------------ actions
 
     def _torque_block(self, ask=False):
         """Why ALIGN must not move the arm now, or None.
 
-        ALIGN plans on fr3_arm_controller or swaps in the servo controller;
-        while the impedance controller holds the arm - above all while the
-        tracking node streams its equilibrium - either would fight it. ask
+        ALIGN plans on fr3_arm_controller; while the impedance controller
+        holds the arm - above all while the tracking node streams its
+        equilibrium - a planned move would fight it. ask
         also asks the controller manager (it blocks, so worker thread only):
         a restarted panel's memory says nothing, and silence is no answer.
         """
@@ -2167,221 +1853,6 @@ class AlignPane(Pane):
             self.R = Rc.T @ self.R
         return ok
 
-    def servo_converge(self):
-        """Continuous 6-DOF alignment by streaming velocity to moveit_servo.
-
-        One motion, coarse to fine: velocity = gain * error, clamped. All
-        six DOF move together, so levelling no longer perturbs translation
-        as a separate phase - they converge simultaneously.
-
-        Safety here is live rather than pre-planned, because nothing is
-        planned ahead:
-          * whole-arm Z floor, every cycle, not just the TCP
-          * marker loss or staleness -> immediate zero twist
-          * velocity caps on both linear and angular
-          * silence is the deadman: servo halts itself if the stream stops,
-            and the position controller then simply holds where it is
-          * the arm is handed to SERVO_CONTROLLER for the run, and handed
-            back on every exit path
-          * command shaping + oscillation watchdog (CommandShaper)
-          * PAUSE / robot-state gate: halt, then resume from rest; a REFLEX
-            ends the run
-          * stall watchdog: abort if the arm stops following (StallWatchdog)
-        """
-        prof = SERVO_PROFILES[self.v_servo.get()]
-        tol, tgt_ip = self.pos_tol_m(), self.inplane_target()
-        floor = self.z_floor()
-
-        # Refuse rather than trip instantly: if a link is ALREADY under the
-        # floor the run could never start, and a silent abort would look
-        # like a servo fault.
-        low = self.n.lowest_link(FLOOR_LINKS)
-        if low is not None and floor is not None and low[1] < floor:
-            self.say(f'REFUSING: {low[0]} is already {low[1]*1000:.1f} mm, '
-                     f'below the {floor*1000:.1f} mm floor')
-            self.set_status('refused: link below floor', T['critical'])
-            return 'refused_below_floor'
-
-        ok, msg = self.n.switch_controllers([SERVO_CONTROLLER],
-                                            [ARM_CONTROLLER], 'servo')
-        if not ok:
-            self.say(f'REFUSING: could not hand the arm to {SERVO_CONTROLLER}'
-                     f' ({msg}) - is fr3_servo.launch.py running?')
-            self.set_status('servo unavailable: controller switch',
-                            T['critical'])
-            return 'controller_switch_failed'
-        self.say(f'arm -> {SERVO_CONTROLLER} (joint position interface)')
-
-        ok, msg = self.n.call_servo(self.n.servo_start)
-        if not ok:
-            self.say(f'start_servo failed: {msg}')
-            self.n.switch_controllers([ARM_CONTROLLER], [SERVO_CONTROLLER],
-                                      'arm')
-            self.set_status('servo unavailable', T['critical'])
-            return 'servo_start_failed'
-        self.say(f'servo START ({msg}) - profile {self.v_servo.get()}: '
-                 f'{prof["lin"]*1000:.0f} mm/s, {prof["ang"]:.0f} deg/s, '
-                 f'gain {prof["gain"]}')
-
-        period, settled, t_start = 1.0 / SERVO_RATE_HZ, 0, time.time()
-        shaper, announced = CommandShaper(), False
-        stall = StallWatchdog()
-        stall.reset(time.monotonic())
-        outcome = 'servo_timeout'
-        try:
-            while time.time() - t_start < 300.0:
-                if self.abort:
-                    outcome = 'stopped'
-                    break
-                if self.robot_block() is not None:
-                    self.n.zero_twist()
-                    shaper.reset()          # resume ramps up from rest
-                    settled, t_pause = 0, time.time()
-                    if not self.wait_gate():
-                        outcome = self.gate_fault or 'stopped'
-                        break
-                    t_start += time.time() - t_pause    # pause is not run time
-                    stall.reset(time.monotonic())
-                    continue
-                m = self.n.marker()
-                if m is None:                       # deadman
-                    self.n.zero_twist()
-                    self.say('ABORT: marker lost / stale')
-                    outcome = 'marker_lost'
-                    break
-                low = self.n.lowest_link(FLOOR_LINKS)
-                if floor is not None and low is not None and low[1] < floor:
-                    self.n.zero_twist()
-                    self.say(f'ABORT: Z FLOOR - {low[0]} at '
-                             f'{low[1]*1000:.1f} mm < {floor*1000:.1f} mm')
-                    outcome = 'z_floor'
-                    break
-
-                lin_c, ang_c, err, tilt, ip = self._servo_error(m, tgt_ip)
-                converged = (err <= tol and tilt <= ROT_TOL_DEG
-                             and (tgt_ip is None
-                                  or abs(wrap_deg(ip - tgt_ip))
-                                  <= INPLANE_TOL_DEG))
-                if converged:
-                    settled += 1
-                    if settled >= int(SERVO_RATE_HZ * 0.3):
-                        self.n.zero_twist()
-                        shaper.reset()      # a later correction ramps from rest
-                        stall.reset(time.monotonic())
-                        if not announced:
-                            self.say(f'=== CONVERGED: {err*1000:.2f} mm, '
-                                     f'{tilt:.2f} deg'
-                                     f'{"" if tgt_ip is None else f", in-plane {ip:+.2f} deg"}'
-                                     f' in {time.time()-t_start:.1f} s ===')
-                            if self.v_converge.get() == 'station-keep':
-                                self.say('station-keeping: still LIVE, press '
-                                         'STOP to release')
-                            announced = True
-                        if self.v_converge.get() == 'station-keep':
-                            settled = 0
-                            time.sleep(period)
-                            continue
-                        outcome = 'converged'
-                        break
-                else:
-                    settled = 0
-                    # hysteresis: re-announce only after a real departure
-                    if err > 2 * tol or tilt > 2 * ROT_TOL_DEG:
-                        announced = False
-
-                ipe = 0.0 if tgt_ip is None else abs(wrap_deg(ip - tgt_ip))
-                # near tolerance the error legitimately creeps, so only watch
-                # for a stall while clearly far from the target
-                if not (err > 2 * tol or tilt > 2 * ROT_TOL_DEG
-                        or ipe > 2 * INPLANE_TOL_DEG):
-                    stall.reset(time.monotonic())
-                elif stall.update(time.monotonic(), err, tilt, ipe):
-                    self.n.zero_twist()
-                    self.say(f'ABORT: arm not following servo - no progress '
-                             f'in {SERVO_STALL_S:g} s at |e| {err*1000:.1f} mm'
-                             f', tilt {tilt:.1f} deg')
-                    self.set_status('aborted: servo stalled', T['serious'])
-                    outcome = 'servo_stalled'
-                    break
-                lin_c, ang_c = shaper.filter(lin_c, ang_c, tilt, ipe)
-                # camera-frame command -> base frame for servo
-                lin = self._clamp(self.R.T @ lin_c, prof['lin'])
-                ang = self._clamp(self.R.T @ ang_c, np.radians(prof['ang']))
-                lin, ang = shaper.limit(lin, ang, period)
-                if shaper.oscillating():
-                    self.n.zero_twist()
-                    self.say(f'ABORT: command oscillating '
-                             f'({shaper.flip_rate():.0%} of frames reversing) '
-                             '- stopped before libfranka reflexes; try a '
-                             'slower servo speed')
-                    self.set_status('aborted: oscillation', T['serious'])
-                    outcome = 'oscillation'
-                    break
-                if self.robot_block() is not None:
-                    continue                # top of the loop pauses
-                self.n.publish_twist(lin, ang, self.n.base)
-                self.trace({'rec': 'servo', 'err_mm': err * 1000,
-                            'tilt_deg': tilt, 'inplane_deg': ip,
-                            'flip_rate': shaper.flip_rate(),
-                            'lin_mms': (lin * 1000).tolist(),
-                            'ang_dps': np.degrees(ang).tolist(),
-                            'lowest_link': low[0] if low else None,
-                            'lowest_z_mm': low[1] * 1000 if low else None})
-                time.sleep(period)
-        finally:
-            self.n.zero_twist(5)
-            time.sleep(SERVO_SETTLE_S)
-            sok, smsg = self.n.call_servo(self.n.servo_stop)
-            self.say(f'servo STOP ({smsg if sok else "failed: " + smsg})')
-            bok, bmsg = self.n.switch_controllers([ARM_CONTROLLER],
-                                                  [SERVO_CONTROLLER], 'arm')
-            if bok:
-                self.say(f'arm -> {ARM_CONTROLLER} (planned moves again)')
-            else:
-                self.say(f'*** {ARM_CONTROLLER} NOT RESTORED ({bmsg}) - '
-                         'cartesian moves will fail until it is back ***')
-                self.set_status('controller NOT restored', T['critical'])
-        return outcome
-
-    _clamp = staticmethod(clamp_norm)
-
-    def _servo_error(self, m, tgt_ip):
-        """6-DOF error as (linear, angular) velocity commands in CAMERA frame.
-
-        Signs are taken from the three PROVEN discrete steps, which do not
-        share a convention - getting this wrong drives the arm away from
-        the target, so each is derived explicitly:
-
-          translate: d = R.T @ (p - target)   -> camera moves +err
-          level:     Rc = axis_angle(axis, a).T  -> camera rotates -a about
-                     axis, where axis = cross(marker_normal, target_normal)
-          inplane:   Rc = axis_angle(+Z, d)   -> camera rotates +d about Z,
-                     where d = wrap(current - target)
-
-        So tilt is negated and in-plane is not. test_servo_signs_match_
-        discrete pins this against the discrete implementations.
-        """
-        gain = SERVO_PROFILES[self.v_servo.get()]['gain']
-        err_vec = m[0] - np.array([0, 0, self.target_m()])
-        err = float(np.linalg.norm(err_vec))
-
-        mz = m[1][:, 2]
-        tilt = float(np.degrees(np.arccos(
-            np.clip(abs(mz @ np.array([0, 0, 1.0])), -1, 1))))
-        tgt_n = np.array([0, 0, -1.0]) if mz[2] < 0 else np.array([0, 0, 1.0])
-        axis = np.cross(mz, tgt_n)
-        na = float(np.linalg.norm(axis))
-        # minus: level() applies the TRANSPOSE of the aligning rotation
-        ang_vec = -(axis / na) * np.radians(tilt) if na > 1e-8 else np.zeros(3)
-
-        ip = inplane_angle(m[1])
-        if tgt_ip is not None and ip is not None:
-            # plus: inplane() applies the rotation directly, not transposed
-            ang_vec = ang_vec + np.array([0.0, 0.0, 1.0]) * np.radians(
-                wrap_deg(ip - tgt_ip))
-        return (gain * err_vec, gain * ang_vec, err, tilt,
-                (ip if ip is not None else 0.0))
-
     def auto_converge(self):
         """Translate/level until the camera is at the target standoff and
         parallel. Aborts on STOP, marker loss, Z-floor block, plan failure,
@@ -2415,19 +1886,13 @@ class AlignPane(Pane):
             'z_floor_mm': self.z_floor() * 1000,
             'R_cam_base': self.R.tolist(),
             'cap': cap,
-            'backend': self.v_backend.get(),
-            'servo_profile': self.v_servo.get(),
-            'on_converge': self.v_converge.get(),
             'inplane_target': self.v_inplane.get(),
             'gate': self.gate_on,
-            'controller': (SERVO_CONTROLLER if self.v_backend.get() == 'servo'
-                           else ARM_CONTROLLER),
+            'controller': ARM_CONTROLLER,
         })
         outcome = 'exception'
         try:
-            outcome = (self.servo_converge()
-                       if self.v_backend.get() == 'servo'
-                       else self._converge_loop(tol, cap))
+            outcome = self._converge_loop(tol, cap)
         finally:
             self.close_trace(outcome)
             self.say(f'trace written: {self.tracepath}')
@@ -2451,8 +1916,8 @@ class AlignPane(Pane):
                 self.say('ABORT: marker lost / stale')
                 self.set_status('aborted: marker lost', T['critical'])
                 return 'marker_lost'
-            # whole-arm floor, same as the servo backend - an elbow can dip
-            # below the floor while the TCP goal pre-check still passes
+            # whole-arm floor - an elbow can dip below the floor while the
+            # TCP goal pre-check still passes
             floor = self.z_floor()
             low = self.n.lowest_link(FLOOR_LINKS)
             if floor is not None and low is not None and low[1] < floor:
@@ -2529,8 +1994,8 @@ class AlignPane(Pane):
 
 
 class LadderPane(Pane):
-    """Impedance commissioning ladder and continuous tracking. Every method
-    below came from cell_panel.py unchanged; only the chrome moved."""
+    """Impedance commissioning ladder and continuous tracking, from
+    impedance_panel.py; only the chrome moved."""
 
     NAME = 'IMPEDANCE'
 
@@ -2581,20 +2046,6 @@ class LadderPane(Pane):
         self.sub = tk.Label(card, text='', font=self.f_small, fg=T['muted'],
                             bg=T['surface'], anchor='w', justify='left')
         self.sub.pack(fill='x', padx=10, pady=(0, 10))
-
-    def toggle_camera(self):
-        on = self.n.camera(bool(self.v_cam.get()))
-        self._image_shown = None
-        if not on:
-            self.image_label.config(
-                image='', height=3,
-                text='camera off - the 1 kHz loop comes first')
-            self.photo = None
-        else:
-            self.image_label.config(
-                image='', height=3,
-                text=f'waiting for {IMAGE_TOPIC} ...')
-        self.trace({'rec': 'camera', 'on': on})
 
     def _build_ladder(self, parent):
         card = self._card(parent, 'LADDER  |  fr3_mating_controllers README')
@@ -3035,7 +2486,7 @@ class LadderPane(Pane):
             return False
         if states.get(IMPEDANCE_CONTROLLER) is None:
             self.say(f'REFUSING: {IMPEDANCE_CONTROLLER} is not loaded - '
-                     'spawn it inactive first (see the module docstring)')
+                     'fr3_cell.launch.py spawns it inactive; is it running?')
             self.set_status('refused: controller not loaded', T['critical'])
             return False
         # float_mode BEFORE activation: on_activate reads it, and activating
@@ -3649,7 +3100,7 @@ class CellPanel:
         lbl = tk.Label(parent, text=label, font=self.f_caption, fg=T['ink2'],
                        bg=T['surface'], anchor='e')
         lbl.grid(row=r, column=c * 2, padx=(10, 4), pady=3, sticky='e')
-        # size to the longest choice so 'cartesian' / 'conservative' fit
+        # size to the longest choice so it fits
         width = max(6, max(len(str(v)) for v in vals) + 1)
         cb = self._combo(parent, var, vals, width=width)
         cb.grid(row=r, column=c * 2 + 1, padx=(0, 10), pady=3, sticky='w')
@@ -3694,8 +3145,7 @@ class CellPanel:
         self.image_label = tk.Label(
             card, bg=T['page'], fg=T['muted'], font=self.f_small, height=3,
             text='no frames yet - is the vision stack running?\n'
-                 'ros2 launch tools/fr3/fr3_mating.launch.py '
-                 'robot_ip:=$FR3_ROBOT_IP')
+                 'terminal 2: fr3_cell  (tools/fr3/fr3_cell.launch.py)')
         self.image_label.pack(fill='x', padx=10, pady=(0, 10))
         self.n.camera(True)          # match the checkbox we just drew
 
@@ -3833,6 +3283,10 @@ class CellPanel:
             signal.signal(sig, self._on_signal)
 
     def _on_signal(self, _signum, _frame):
+        # Launch follows the terminal's Ctrl-C with SIGTERM; once on_close
+        # has destroyed the root there is nothing left to close.
+        if self._closing:
+            return
         self.root.after(0, self.on_close)
 
     def on_close(self):
@@ -3852,6 +3306,7 @@ class CellPanel:
             return
         self.busy = False
         self.close_trace()
+        self._closing = True
         self.root.destroy()
 
 

@@ -1,14 +1,14 @@
-"""Connector-mating stack for a Franka FR3 - the CELL side only.
+"""FR3 connector-mating cell, terminal 2: everything except the driver.
 
-Hand-eye static TF, ArUco vision (in-process D405 capture, filtered in
-fr3_link0) and the tracking node, all with tools/fr3/fr3_params.yaml. The
-ROBOT side (FCI driver + move_group) is launched separately; the bring-up
-order is GUIDE.md section 2, the only maintained copy.
+    fr3_cell [arg:=value ...]      # fr3_env.sh; = ros2 launch <this file>
 
-The zero-argument launch is the panel-driven one: the tracking node comes up
-idle and publishes nothing until an operator presses TRACK on
-tools/fr3/cell_panel.py. The autonomous phase machine (mating_node) moves the
-arm by itself, so it is opt-in: start_mating_node:=true.
+T1 runs the FCI driver + MoveIt; this spawns the impedance controller
+INACTIVE into T1's controller manager, then starts the hand-eye static TF
+(tools/fr3/calib/handeye.yaml), cam_pub (in-process D405 capture, filtered in
+fr3_link0), tracking_node (idle until TRACK) and tools/fr3/cell_panel.py, all
+with tools/fr3/fr3_params.yaml. Nothing here moves the arm by itself: every
+motion is a panel button. The bring-up order is GUIDE.md section 2, the only
+maintained copy.
 
 vision_source:=topic instead expects a separate realsense2_camera driver
 (tools/fr3/realsense_low_bw.yaml) and gives cam_pub colour only - no depth,
@@ -20,50 +20,48 @@ Tracking traces go to $FR3_LOG_DIR/YYYY-MM-DD/ when fr3_env.sh has set it.
 import datetime
 import os
 
+import yaml
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, LogInfo, TimerAction
+from launch.actions import (DeclareLaunchArgument, ExecuteProcess, LogInfo,
+                            OpaqueFunction, TimerAction)
 from launch.conditions import IfCondition
-from launch.substitutions import Command, FindExecutable, LaunchConfiguration
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
-from launch_ros.substitutions import FindPackageShare
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+HANDEYE_FILE = os.path.join(THIS_DIR, 'calib', 'handeye.yaml')
+# The SOURCE copy, like fr3_params.yaml: no rebuild between an edit and the
+# next spawn.
+IMPEDANCE_PARAMS = os.path.normpath(os.path.join(
+    THIS_DIR, '..', '..', 'fr3_mating_controllers', 'config',
+    'cartesian_impedance_stroke.yaml'))
 
 
 def generate_launch_description():
-    robot_ip = LaunchConfiguration('robot_ip')
-    use_fake_hardware = LaunchConfiguration('use_fake_hardware')
     params_file = LaunchConfiguration('params_file')
     filter_frame = LaunchConfiguration('filter_frame')
     vision_source = LaunchConfiguration('vision_source')
-    start_mating_node = LaunchConfiguration('start_mating_node')
     marker_id = LaunchConfiguration('marker_id')
     capture_fps = LaunchConfiguration('capture_fps')
 
+    # Read on every launch: the file is the one copy of the calibration and
+    # its record (method, residual, validation) - see its header.
+    with open(HANDEYE_FILE) as f:
+        handeye = yaml.safe_load(f)
+
     args = [
-        DeclareLaunchArgument('robot_ip', default_value='172.16.0.3',
-                              description='FR3 FCI IP (only used to render the URDF)'),
-        DeclareLaunchArgument('use_fake_hardware', default_value='false'),
         DeclareLaunchArgument('params_file',
                               default_value=os.path.join(THIS_DIR, 'fr3_params.yaml')),
         DeclareLaunchArgument('filter_frame', default_value='fr3_link0',
                               description="KF frame for cam_pub ('' = optical/legacy)"),
-        # mating_node is the autonomous phase machine: given a marker it
-        # aligns the arm by itself. That is deliberate for a mating run and
-        # wrong for panel-driven work, where every motion is behind a button.
-        # It also needs a working MoveIt, which this machine does not have.
-        # The default is the documented cell marker (SETUP_AND_CALIBRATION
-        # 2.1: DICT_6X6_250 id 11, 21 mm). Override it when the connector
-        # carries a different one - cam_pub decodes every marker it sees and
-        # then DISCARDS any whose id does not match, so a mismatch looks
-        # exactly like "no marker": debug_image flows, /aruco/pose is silent.
-        DeclareLaunchArgument('marker_id', default_value='11',
+        # The default is the marker now on the cell, DICT_6X6_250 id 0.
+        # Override it when the connector carries a different one - cam_pub
+        # decodes every marker it sees and then DISCARDS any whose id does not
+        # match, so a mismatch looks exactly like "no marker": debug_image
+        # flows, /aruco/pose is silent.
+        DeclareLaunchArgument('marker_id', default_value='0',
                               description='ArUco id to track (DICT_6X6_250)'),
-        DeclareLaunchArgument('start_mating_node', default_value='false',
-                              description='start the autonomous phase '
-                                          'machine (needs MoveIt; it moves '
-                                          'the arm on its own)'),
         DeclareLaunchArgument('vision_source', default_value='realsense',
                               description='realsense = in-process capture with depth, no '
                                           'image topics (default); topic = a separate camera '
@@ -71,84 +69,79 @@ def generate_launch_description():
         DeclareLaunchArgument('capture_fps', default_value='15',
                               description='D405 capture rate in realsense mode; '
                                           '/aruco/pose is published at this rate'),
-        # Hand-eye TCP->optical transform. MEASURED 2026-09-15 with
-        # roscam.handeye_calib: 21 poses, Tsai selected (all four solvers
-        # agreed to 0.05 mm / 0.01 deg), residual 3.17 mm / 1.57 deg.
-        #
-        # The previous defaults were a dry-run guess and the ROTATION was
-        # wrong by 89.94 deg: it assumed identity, but the camera is mounted
-        # rotated ~90 deg about the optical axis, so camera X/Y were
-        # effectively swapped for anything that trusted this transform. The
-        # translation guess was close (13 mm out); the rotation was not.
-        #
-        # Re-run handeye_calib if the bracket is reprinted or reseated - see
-        # hardware/camera_mount/. Cross-checks: the camera optical axis comes
-        # out 0.37 deg off TCP Z, consistent with a mount designed to look
-        # straight down the tool axis, and |translation| = 78 mm is plausible
-        # for that bracket's envelope.
+        DeclareLaunchArgument('start_panel', default_value='true',
+                              description='run tools/fr3/cell_panel.py as part '
+                                          'of this launch'),
+        # Hand-eye TCP->optical. Defaults come from calib/handeye.yaml; pass
+        # these only to try a candidate calibration without editing it.
         DeclareLaunchArgument('handeye_xyz',
-                              default_value='0.061126 -0.011144 -0.046550'),
+                              default_value=' '.join(str(v) for v in handeye['xyz']),
+                              description='TCP->optical x y z [m]; default read '
+                                          'from calib/handeye.yaml'),
         DeclareLaunchArgument('handeye_quat',
-                              default_value=('0.000855 0.003126 '
-                                             '0.706706 0.707500'),
-                              description='qx qy qz qw'),
+                              default_value=' '.join(str(v) for v in handeye['quat_xyzw']),
+                              description='TCP->optical qx qy qz qw; default read '
+                                          'from calib/handeye.yaml'),
     ]
 
-    # Robot model for the controller's MoveGroupInterface (same xacro the
-    # upstream moveit.launch.py renders; ros2_control content is inert here).
-    franka_xacro = [FindPackageShare('franka_description'), '/robots/fr3/']
-    robot_description = {'robot_description': ParameterValue(Command([
-        FindExecutable(name='xacro'), ' ', *franka_xacro, 'fr3.urdf.xacro',
-        ' hand:=true ros2_control:=true',
-        ' robot_ip:=', robot_ip,
-        ' use_fake_hardware:=', use_fake_hardware,
-    ]), value_type=str)}
-    robot_description_semantic = {'robot_description_semantic': ParameterValue(Command([
-        FindExecutable(name='xacro'), ' ', *franka_xacro, 'fr3.srdf.xacro',
-        ' hand:=true',
-    ]), value_type=str)}
-    kinematics = {'robot_description_kinematics': {'fr3_arm': {
-        'kinematics_solver': 'kdl_kinematics_plugin/KDLKinematicsPlugin',
-        'kinematics_solver_search_resolution': 0.005,
-        'kinematics_solver_timeout': 0.05,
-    }}}
-
-    handeye_reminder = LogInfo(msg=(
-        'fr3_mating: hand-eye TF is the launch-arg value. If you have not '
-        'run handeye_calib yet, roll/pitch alignment WILL be off by degrees.'))
-
-    return LaunchDescription(args + [handeye_reminder,
-                                     _static_tf(),
+    return LaunchDescription(args + [_impedance_spawner(),
+                                     _static_tf(handeye),
                                      _vision(filter_frame, vision_source,
                                              marker_id, capture_fps),
                                      TimerAction(period=3.0, actions=[
-                                         _controller(
-                                             robot_description,
-                                             robot_description_semantic,
-                                             kinematics, params_file,
-                                             condition=IfCondition(
-                                                 start_mating_node)),
-                                         _tracking(params_file)])])
+                                         _tracking(params_file),
+                                         _panel()])])
 
 
-def _static_tf():
+def _impedance_spawner():
+    # Loads and configures the controller INACTIVE, then exits; while T1 is
+    # not up yet it waits, retrying every 10 s. The operator may relaunch T2
+    # while T1 keeps running, so what the Humble spawner (controller_manager
+    # 2.53) does with a controller that is ALREADY loaded matters:
+    #   * it skips the load, so the param file is NOT re-applied - an edit to
+    #     it needs T1, then T2, restarted (or a live set from the panel);
+    #   * it still asks for configure. The controller manager cleans up and
+    #     re-configures an INACTIVE controller from the parameters it already
+    #     holds (it stays inactive), and REFUSES an ACTIVE one ("can not be
+    #     configured from 'active' state"), leaving it running untouched; the
+    #     spawner then logs "Failed to configure controller" and exits 1.
+    #   * --inactive means it never calls switch_controller, and without
+    #     --unload-on-kill Ctrl-C never deactivates or unloads anything.
+    # Its exit, 0 or 1, ends only the spawner: no action here has
+    # on_exit=Shutdown, so it cannot take the launch down.
+    return Node(
+        package='controller_manager',
+        executable='spawner',
+        arguments=['cartesian_impedance_stroke_controller', '--inactive',
+                   '--param-file', IMPEDANCE_PARAMS],
+        output='screen',
+    )
+
+
+def _static_tf(handeye):
     # static_transform_publisher needs individual tokens; split the two
     # space-separated launch args into positional arguments at launch time.
-    from launch.actions import OpaqueFunction
-
     def make(context):
         xyz = LaunchConfiguration('handeye_xyz').perform(context).split()
         quat = LaunchConfiguration('handeye_quat').perform(context).split()
-        return [Node(
-            package='tf2_ros',
-            executable='static_transform_publisher',
-            name='handeye_tcp_to_optical',
-            arguments=['--x', xyz[0], '--y', xyz[1], '--z', xyz[2],
-                       '--qx', quat[0], '--qy', quat[1], '--qz', quat[2],
-                       '--qw', quat[3],
-                       '--frame-id', 'fr3_hand_tcp',
-                       '--child-frame-id', 'camera_color_optical_frame'],
-        )]
+        if ([float(v) for v in xyz] == handeye['xyz']
+                and [float(v) for v in quat] == handeye['quat_xyzw']):
+            source = (f"calib/handeye.yaml ({handeye['method']}, "
+                      f"{handeye['calibrated']}, residual "
+                      f"{handeye['residual_mm']} mm / {handeye['residual_deg']} deg)")
+        else:
+            source = 'the handeye_xyz/handeye_quat OVERRIDE, not calib/handeye.yaml'
+        return [LogInfo(msg=f'fr3_cell: hand-eye TF from {source}'),
+                Node(
+                    package='tf2_ros',
+                    executable='static_transform_publisher',
+                    name='handeye_tcp_to_optical',
+                    arguments=['--x', xyz[0], '--y', xyz[1], '--z', xyz[2],
+                               '--qx', quat[0], '--qy', quat[1], '--qz', quat[2],
+                               '--qw', quat[3],
+                               '--frame-id', handeye['parent_frame'],
+                               '--child-frame-id', handeye['child_frame']],
+                )]
 
     return OpaqueFunction(function=make)
 
@@ -195,15 +188,22 @@ def _tracking(params_file):
     )
 
 
-def _controller(robot_description, robot_description_semantic, kinematics,
-                params_file, condition=None):
-    return Node(
-        condition=condition,
-        package='mating_controller',
-        executable='mating_node',
+def _panel():
+    # A child of this launch, so one Ctrl-C ends T2. The terminal's SIGINT
+    # reaches the panel directly (launch does not re-send it) and the panel
+    # hands the arm back before it exits; SIGTERM makes it try again.
+    # Launch's default escalation - SIGTERM at 5 s, SIGKILL 5 s later - is
+    # shorter than that bounded handoff (a tracking stop, 20 s timeout, then
+    # a two-step controller switch, 10 s per step: ~45 s worst case, see
+    # release_if_active), and a SIGKILL mid-handoff leaves the impedance
+    # controller active. Hence 30 s + 30 s here. -u: stdout is a pipe here,
+    # and the exit handoff's "released" / "could NOT release" lines must
+    # reach T2 as they happen, not in a buffer a kill would lose.
+    return ExecuteProcess(
+        condition=IfCondition(LaunchConfiguration('start_panel')),
+        name='cell_panel',
+        cmd=['python3', '-u', os.path.join(THIS_DIR, 'cell_panel.py')],
         output='screen',
-        parameters=[robot_description,
-                    robot_description_semantic,
-                    kinematics,
-                    params_file],
+        sigterm_timeout='30',
+        sigkill_timeout='30',
     )

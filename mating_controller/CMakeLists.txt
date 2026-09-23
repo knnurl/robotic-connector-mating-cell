@@ -30,11 +30,17 @@ set(INSTALL_TARGETS "")
 # (missing tl::expected and random_numbers imported targets), and QUIET does
 # not suppress those - a find_package here takes the WHOLE package down with
 # it, including the pure headers and their gtests, which need neither MoveIt
-# nor a robot. Build the testable core on such a machine with:
+# nor a robot.
 #
-#   colcon build --packages-select mating_controller --cmake-args -DBUILD_MATING_NODE=OFF
+# OFF by default since 2026-09-23: the autonomous path is parked (the FR3 is
+# driven from tools/fr3/cell_panel.py + tracking_node), and its MELFA launch
+# files and params now live in melfa/parked/ - see the README there. The
+# phase machine's gtests still build and run. On a machine with a working
+# MoveIt:
 #
-option(BUILD_MATING_NODE "Build the mating_node MoveIt node (needs a working MoveIt install)" ON)
+#   colcon build --packages-select mating_controller --cmake-args -DBUILD_MATING_NODE=ON
+#
+option(BUILD_MATING_NODE "Build the mating_node MoveIt node (needs a working MoveIt install)" OFF)
 if(BUILD_MATING_NODE)
   find_package(moveit_ros_planning_interface REQUIRED)
   add_executable(mating_node src/mating_node.cpp)
@@ -46,7 +52,7 @@ if(BUILD_MATING_NODE)
     rclcpp moveit_ros_planning_interface geometry_msgs tf2 tf2_ros tf2_geometry_msgs std_srvs diagnostic_msgs controller_manager_msgs)
   list(APPEND INSTALL_TARGETS mating_node)
 else()
-  message(WARNING "BUILD_MATING_NODE=OFF - skipping mating_node; the phase machine, pose maths and tracking law still build and test")
+  message(STATUS "BUILD_MATING_NODE=OFF - skipping mating_node (parked); the phase machine, pose maths and tracking law still build and test")
 endif()
 
 # franka_msgs only exists where the FR3 is commissioned; the tracking node
@@ -76,10 +82,6 @@ endif()
 
 install(DIRECTORY include/
   DESTINATION include
-)
-
-install(DIRECTORY launch config
-  DESTINATION share/${PROJECT_NAME}
 )
 
 if(BUILD_TESTING)
