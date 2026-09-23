@@ -101,7 +101,7 @@ struct Params
     double max_lead_m{0.060};
     double max_lead_rad{0.26};
     std::string over_lead_policy{"hold"};
-    double floor_below_start_m{0.030};
+    double z_floor_m{0.10};             // absolute, base frame
     double state_timeout_s{0.1};
     double profile_timeout_s{2.0};
     double settle_s{1.0};
@@ -144,6 +144,7 @@ public:
         cfg_.max_lead_m = params_.max_lead_m;
         cfg_.max_lead_rad = params_.max_lead_rad;
         cfg_.over_lead_policy = params_.over_lead_policy;
+        cfg_.z_floor_m = params_.z_floor_m;
         // A lead that could exceed 15 N must be a startup refusal, not a
         // surprise with the arm moving.
         const std::string why = tracking_law::validate_config(
@@ -372,7 +373,7 @@ private:
         get("tracking_max_lead_m", p.max_lead_m);
         get("tracking_max_lead_rad", p.max_lead_rad);
         get("tracking_over_lead_policy", p.over_lead_policy);
-        get("tracking_floor_below_start_m", p.floor_below_start_m);
+        get("tracking_z_floor_m", p.z_floor_m);
         get("tracking_state_timeout_s", p.state_timeout_s);
         get("tracking_profile_timeout_s", p.profile_timeout_s);
         get("tracking_settle_s", p.settle_s);
@@ -819,7 +820,6 @@ private:
             return reason;
         }
 
-        cfg_.z_floor_m = measured->getOrigin().z() - params_.floor_below_start_m;
         lead_ = {};
         held_ = false;
         t_tcp_ee_ = *offset;

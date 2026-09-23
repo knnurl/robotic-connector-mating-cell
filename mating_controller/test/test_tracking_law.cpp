@@ -182,7 +182,7 @@ Outcome run_loop(const Loop &loop)
     off.setRPY(0.05, -0.04, 0.06);
     arm.ee = tf2::Transform(off * aligned.getRotation(),
                             aligned.getOrigin() + tf2::Vector3(0.020, -0.015, 0.015));
-    cfg.z_floor_m = arm.ee.getOrigin().z() - 0.030;   // seeded as ~/start_tracking does
+    cfg.z_floor_m = arm.ee.getOrigin().z() - 0.030;   // close under the arm, so the loop runs near it
 
     tracking_law::Lead lead;
     tf2::Transform published = arm.ee;

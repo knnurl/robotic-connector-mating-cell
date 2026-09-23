@@ -431,7 +431,7 @@ def test_float_press_while_already_active_switches_mode_only(panel_mod):
     assert node.calls[0][1] == {'float_mode': True} and p.floating
 
 
-def test_hold_on_sets_a_floor_under_the_current_pose(panel_mod):
+def test_hold_on_sets_the_cells_absolute_floor(panel_mod):
     node = FakeNode(loaded='active')
     p = _panel(panel_mod, node, active=True, floating=True)
     p.z_floor = None
@@ -439,7 +439,7 @@ def test_hold_on_sets_a_floor_under_the_current_pose(panel_mod):
     assert [c[0] for c in node.calls] == ['params']
     assert node.calls[0][1] == {'float_mode': False}
     assert p.floating is False and p.setpoint is None
-    assert p.z_floor == pytest.approx(POS[2] - panel_mod.FLOOR_BELOW_HOLD_MM / 1000)
+    assert p.z_floor == pytest.approx(panel_mod.FLOOR_Z_MM / 1000)
 
 
 # ---- setpoints ----------------------------------------------------------------
@@ -717,18 +717,18 @@ def test_pressing_hold_again_changes_nothing(panel_mod):
     assert said(p, 'already holding') and not said(p, 're-seeded')
 
 
-def test_float_then_hold_never_lowers_the_floor(panel_mod):
+def test_the_floor_does_not_follow_where_hold_starts(panel_mod):
+    """Absolute in the base frame: floating the arm down or up by hand
+    before HOLD neither walks the floor down nor raises it."""
     node = FakeNode(loaded='active')
     p = _panel(panel_mod, node, active=True, floating=True)
-    floor = p.z_floor
     node.pos = POS - [0, 0, 0.05]            # floated 50 mm down by hand
     p.hold_on()
-    assert p.z_floor == floor
+    assert p.z_floor == pytest.approx(panel_mod.FLOOR_Z_MM / 1000)
     p.floating = True
-    node.pos = POS + [0, 0, 0.10]            # floated up: the floor may rise
+    node.pos = POS + [0, 0, 0.10]            # floated up
     p.hold_on()
-    assert p.z_floor == pytest.approx(
-        node.pos[2] - panel_mod.FLOOR_BELOW_HOLD_MM / 1000)
+    assert p.z_floor == pytest.approx(panel_mod.FLOOR_Z_MM / 1000)
 
 
 def test_stepping_up_from_below_the_floor_is_allowed(panel_mod):
@@ -1076,11 +1076,13 @@ def test_tracking_deadbands_match_the_track_stiffness(panel_mod):
 
 def test_tracking_lead_cap_and_floor_match_the_panel(panel_mod):
     """A 50 Hz stream must not be looser than the hand-stepped path: same
-    equilibrium-lead cap, same floor under where the run started."""
+    equilibrium-lead cap, and ONE Z floor for the cell - ALIGN's default,
+    the ladder's and the tracking node's - absolute in the base frame."""
     prm = _shipped()
     assert prm['tracking_max_lead_m'] * 1000 <= panel_mod.MAX_LEAD_MM
-    assert (prm['tracking_floor_below_start_m'] * 1000
-            == pytest.approx(panel_mod.FLOOR_BELOW_HOLD_MM))
+    assert prm['tracking_z_floor_m'] * 1000 == pytest.approx(panel_mod.FLOOR_Z_MM)
+    assert float(panel_mod.FLOOR_MM_DEFAULT) == pytest.approx(panel_mod.FLOOR_Z_MM)
+    assert panel_mod.FLOOR_Z_MM == pytest.approx(100.0)
 
 
 def test_the_panel_calls_the_services_the_node_actually_offers(panel_mod):
@@ -1547,7 +1549,7 @@ def test_an_adopted_tracker_leaves_the_panel_holding_after_stop(panel_mod):
     assert ('trigger', 'start') not in node.calls and said(p, 'no Z floor')
     p.hold_on()
     assert not [c for c in node.calls if c[0] in ('params', 'switch')]
-    assert p.z_floor == pytest.approx(POS[2] - panel_mod.FLOOR_BELOW_HOLD_MM / 1000)
+    assert p.z_floor == pytest.approx(panel_mod.FLOOR_Z_MM / 1000)
     p.start_tracking()
     assert node.calls[-1] == ('trigger', 'start')
 

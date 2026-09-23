@@ -307,6 +307,16 @@ def main():
         check('resumes when detections return',
               wait_for(lambda: op.state()[0] == 'tracking', 3), str(op.state()))
 
+        with cell.lock:                   # a goal under the absolute 100 mm floor
+            cell.marker[:3, 3] -= [0.0, 0.0, 0.30]
+        check('a goal below the 100 mm cell floor holds',
+              wait_for(lambda: op.state()[0] == 'holding'
+                       and 'below the floor 100 mm' in op.state()[1], 3), str(op.state()))
+        with cell.lock:
+            cell.marker[:3, 3] += [0.0, 0.0, 0.30]
+        check('resumes above the floor', wait_for(lambda: op.state()[0] == 'tracking', 4),
+              str(op.state()))
+
         r = call(op.stop)
         check('STOP succeeds', bool(r and r.success), r.message if r else 'no reply')
         check('operator gains restored', ctl.k_pos() == OPERATOR_GAINS, str(ctl.k_pos()))

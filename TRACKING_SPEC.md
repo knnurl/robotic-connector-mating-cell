@@ -270,12 +270,14 @@ parameters in the params yaml, not constants in code.
 | Collision reflex | 40 N / 40 Nm | set by PRE-FLIGHT |
 | Human in the loop | every motion behind a button | operator panel |
 | Equilibrium lead from the arm | <= 60 mm | **[AMENDED]** tracking node `publish_veto` |
-| Equilibrium Z floor | 30 mm below the start pose | **[AMENDED]** tracking node `publish_veto` |
+| Equilibrium Z floor | 100 mm above the base, absolute in `fr3_link0` (`tracking_z_floor_m`) | **[AMENDED]** tracking node `publish_veto` |
 
 > **[AMENDED]** The last two rows are bounds the tracking node adds. Both are
 > copies of limits `cell_panel.py` (IMPEDANCE & TRACK tab) already enforces on this same topic
-> (`MAX_LEAD_MM`, `FLOOR_BELOW_HOLD_MM`); a 50 Hz stream must not be allowed
-> to bypass what a hand-pressed button obeys.
+> (`MAX_LEAD_MM`, `FLOOR_Z_MM`); a 50 Hz stream must not be allowed
+> to bypass what a hand-pressed button obeys. 2026-09-23: the floor was
+> "30 mm below the start pose"; it is now one absolute floor for the whole
+> cell, because a relative one refused every goal below where TRACK began.
 >
 > The "human in the loop" row is **not yet satisfied for tracking.** The node
 > is gated - it publishes nothing until `~/start_tracking` - but the START /

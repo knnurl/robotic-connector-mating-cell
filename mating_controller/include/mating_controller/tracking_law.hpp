@@ -36,7 +36,7 @@ struct Config
     double deadband_rad{0.007};      // rad, kFrictionBreakawayNm / k_rot 90
     double max_lead_m{0.060};        // m, mirrors cell_panel MAX_LEAD_MM
     double max_lead_rad{0.26};       // rad, the angular twin of max_lead_m
-    double z_floor_m{0.0};           // m, seeded on ~/start_tracking
+    double z_floor_m{0.0};           // m, absolute in the base frame (tracking_z_floor_m)
     // The value validated at startup. It is live-settable, so the node keeps
     // the current one itself and hands it to decide() every tick.
     std::string over_lead_policy{"hold"};
@@ -250,8 +250,8 @@ inline tf2::Transform clamp_lead(const tf2::Transform &eq, const tf2::Transform 
 }
 
 // Empty if the equilibrium may be published, otherwise why it may not. These
-// hold whatever the over-lead policy says: a non-finite pose, and the floor
-// under where the run started (cell_panel's FLOOR_BELOW_HOLD_MM).
+// hold whatever the over-lead policy says: a non-finite pose, and the cell's
+// absolute Z floor in the base frame (cell_panel's FLOOR_Z_MM).
 inline std::string publish_veto(const tf2::Transform &eq, const Config &cfg)
 {
     if (!finite_pose(eq)) {

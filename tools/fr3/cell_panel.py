@@ -138,7 +138,12 @@ FLOOR_LINKS = ['fr3_link1', 'fr3_link2', 'fr3_link3', 'fr3_link4',
 MIN_FRACTION = 0.95       # reject incomplete Cartesian paths
 POSE_STALE_S = 0.5        # marker measurement must be fresher than this
 FLOOR_MARGIN_M = 0.020    # extra clearance under the predicted end pose
-FLOOR_MM_DEFAULT = '50'   # whole-arm Z floor, base frame
+# The cell's ONE Z floor, absolute in the base frame (fr3_link0): ALIGN's
+# whole-arm check (its default below, editable), the ladder's setpoints and
+# the tracking node's equilibrium (fr3_params.yaml tracking_z_floor_m,
+# pinned equal by a test).
+FLOOR_Z_MM = 100.0
+FLOOR_MM_DEFAULT = f'{FLOOR_Z_MM:g}'
 
 # ---- dashboard -----------------------------------------------------------
 IMAGE_MAX_W = 640         # native D405 width, so no downscale at 640x480
@@ -223,7 +228,6 @@ SETPOINT_MM_CHOICES = ['5', '10', '20', '50']
 SETPOINT_MM_DEFAULT = '10'
 AXIS_CHOICES = ['base Z (up)', 'base X', 'base Y', 'tool Z (stroke)']
 MAX_LEAD_MM = 60.0
-FLOOR_BELOW_HOLD_MM = 30.0
 
 # ---- gains -------------------------------------------------------------------
 # Live-tunable within the SAME limits the controller enforces (GainLimits in
@@ -2533,10 +2537,9 @@ class LadderPane(Pane):
             st = self.n.state()
             if self.z_floor is None and st is not None:
                 # holding without a floor: a tracker this panel adopted
-                self.z_floor = float(st[0][2]) - FLOOR_BELOW_HOLD_MM / 1000.0
+                self.z_floor = FLOOR_Z_MM / 1000.0
                 self.say(f'already holding - Z floor set '
-                         f'{self.z_floor*1000:.0f} mm, '
-                         f'{FLOOR_BELOW_HOLD_MM:.0f} mm under the arm')
+                         f'{self.z_floor*1000:.0f} mm above the base')
                 self.trace({'rec': 'hold_on', 'z_floor': self.z_floor})
                 return
             self.say('already holding - nothing to change. To re-seed the '
@@ -2552,13 +2555,9 @@ class LadderPane(Pane):
                 return
             self.floating = False
         self.setpoint = None
-        st = self.n.state()
-        if st is not None:
-            here = float(st[0][2]) - FLOOR_BELOW_HOLD_MM / 1000.0
-            # One floor per activation (RELEASE clears it), never lowered: a
-            # FLOAT -> HOLD cycle may raise it, but cannot walk it down.
-            self.z_floor = here if self.z_floor is None else max(self.z_floor,
-                                                                 here)
+        if self.n.state() is not None:
+            # Absolute, so no FLOAT -> HOLD cycle can walk it down.
+            self.z_floor = FLOOR_Z_MM / 1000.0
         floor = ('--' if self.z_floor is None else
                  f'{self.z_floor*1000:.0f} mm')
         self.say('HOLD: the controller re-seeded its equilibrium where the '
@@ -2603,9 +2602,8 @@ class LadderPane(Pane):
         if anchor[2] < self.z_floor and d[2] < 0.0:
             self.say(f'REFUSING: that puts the equilibrium at z '
                      f'{anchor[2]*1000:.0f} mm, below the floor '
-                     f'{self.z_floor*1000:.0f} mm ({FLOOR_BELOW_HOLD_MM:.0f} mm '
-                     'under where HOLD started) - the camera bracket hangs '
-                     'below the flange')
+                     f'{self.z_floor*1000:.0f} mm above the base - the camera '
+                     'bracket hangs below the flange')
             self.set_status('refused: below Z floor', T['serious'])
             return
         lead = float(np.linalg.norm(anchor - pos))
