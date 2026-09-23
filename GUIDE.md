@@ -141,34 +141,40 @@ applies half a set.
 
 ---
 
-## 5. Continuous tracking — blockers fixed, still unproven
+## 5. Continuous tracking
 
-The panel has **3b. TRACK** and **STOP TRACKING**, and a **camera pane**
-(off by default). All five blockers the 2026-09-22 reviews raised are now
-fixed:
+**Run it:** HOLD → **ALIGN** (100 mm target) → **3b. TRACK**. TRACK holds the
+camera where ALIGN leaves it, so it starts at zero error; without ALIGN the goal
+can be far away and the node just holds. **STOP TRACKING** sits in the window
+header on every tab; ALIGN's STOP NOW also stops the tracker.
 
-| Was | Now |
+The banner shows the node's own status:
+
+| Banner | Meaning |
 |---|---|
-| RELEASE left an orphaned tracker streaming at 50 Hz | RELEASE stops tracking before the switch, **and** the node self-halts when the impedance controller leaves ACTIVE - it no longer depends on the panel remembering |
-| STOP raced the 50 Hz tick, so the last message could be the lead | One mutex serialises `halt_tracking()` against the tick's read-modify-publish |
-| STOP queued behind an in-flight START (~11 s) | STOP has its own callback group |
-| Ctrl-C could not restore the gains | Restored from a **pre**-shutdown callback, while the executor still spins; if it still fails the node logs FATAL and names the profile left in force |
-| Panel timeout 6 s < the node's ~11 s start | 15 s, and a timeout now says "the node may be tracking; press STOP TRACKING" rather than claiming failure |
+| `TRACKING` | following; error, lead and policy in the subtitle |
+| `HOLDING - <reason>` | still armed, arm holding still; follows again **by itself** once the reason clears |
+| `STOPPED - <reason>` | tracking ended and your gains are restored; TRACK starts it again |
 
-**It has still never run on the arm, and the fixes have not been reviewed.**
-Outstanding from the same reviews, not blockers but know them before you
-press TRACK:
+It **holds** by itself when the goal is past the lead cap (60 mm / 15 deg,
+with the over-lead dropdown on `hold`), below the Z floor (100 mm above the
+base), or when vision is not fresh (no raw detection within 0.25 s). It
+**stops** by itself when a joint **buzzes** (more than 0.5 Nm rms above 20 Hz),
+when the impedance controller leaves ACTIVE, or past the cap with the dropdown
+on `stop`.
 
-- tracking stalls permanently and silently if the goal is ever more than
-  60 mm from the arm - the veto that stops it is the same thing that would
-  let it recover
-- no angular equivalent of that 60 mm lead cap
-- the 50 Hz callback group does a synchronous disk write every tick
-- worst-case commanded force is **30 N**, not the 15 N `TRACKING_SPEC.md`
-  section 6 implies - that table bounds the integrator, not the whole wrench
+The track profile is k 1500 N/m, k_rot 90 Nm/rad, **ζ 0.5**, slew 0.10 m/s.
+ζ was 1.0 until 2026-09-23, when it drove a 40 Hz wrist buzz (1 kHz data in
+[TRACKING_SPEC.md](TRACKING_SPEC.md) O1); 0.5 is **not yet proven on the arm**,
+so keep the recorder running on the first runs:
 
-Design is in [TRACKING_SPEC.md](TRACKING_SPEC.md); the fix list and what is
-left are in [TODO.md](TODO.md).
+```bash
+ros2 run mating_controller state_recorder     # 1 kHz CSV into runs/<day>/
+python3 tools/fr3/analyse_trace.py <tracking_*.jsonl>   # includes the buzz level
+```
+
+Design is in [TRACKING_SPEC.md](TRACKING_SPEC.md); what is left is in
+[TODO.md](TODO.md).
 
 ### The camera pane
 

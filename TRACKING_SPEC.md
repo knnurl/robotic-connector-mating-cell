@@ -336,6 +336,16 @@ than the 4.3 mm worst case computed above. If V1 beats it, that is why.
   multiplying velocity noise, so **try `damping_ratio` 0.5 and walk k_rot up
   again**. There is headroom - overshoot was zero. Diagnosing it properly
   needs 1 kHz data, not the 50 Hz relay.
+  **[ANSWERED 2026-09-23, 1 kHz]** The buzz is real and it is the damping.
+  During TRACK at k_rot 90 / zeta 1.0 a 40 Hz mode grew (x2 every 0.2 s)
+  once the wrist started moving: 99% of the motion was EE rotation (J7 and
+  J5 moved most), J1/J4 carried 4-5 Nm rms of reaction torque, and at 40 Hz
+  the damping torque (D_rot * omega ~ 7 Nm) was ~50x the spring's. Its
+  amplitude sat at the torque-rate limit (1 Nm/ms / (2 pi 40 Hz) = 4 Nm); the
+  same gains at HOLD with position kicks stayed quiet, because a still wrist
+  sits in stiction. Now: `track_damping_ratio` 0.5, and tracking_node stops
+  itself above 0.5 Nm rms of >20 Hz joint torque (normal work peaked at
+  0.15 Nm over 24 min of recording). Walking k_rot up again is still open.
 - **O2 - what `Ki` is stable?** The outer loop closes around a spring with a
   deadband; too fast and it hunts. Start low (lead reaches `lead_max` in
   ~2 s) and raise it at V1.
