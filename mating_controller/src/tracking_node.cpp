@@ -105,6 +105,13 @@ struct Params
     std::string over_lead_policy{"hold"};
     double z_floor_m{0.10};             // absolute, base frame
     double buzz_stop_nm{0.5};           // Nm rms above 20 Hz on any joint
+    bool goal_glide{true};              // spread each camera-frame goal step over its frame
+    std::vector<double> box_x_m{0.20, 0.80};    // workspace box, base frame; START re-reads
+    std::vector<double> box_y_m{-0.45, 0.45};
+    double box_z_max_m{0.80};
+    std::vector<double> joint_lower;    // FR3 limits, franka_description joint_limits.yaml
+    std::vector<double> joint_upper;
+    double joint_margin_rad{0.14};      // a pull toward a stop inside this holds
     double state_timeout_s{0.1};
     double profile_timeout_s{2.0};
     double settle_s{1.0};
@@ -149,6 +156,9 @@ public:
         cfg_.over_lead_policy = params_.over_lead_policy;
         cfg_.z_floor_m = params_.z_floor_m;
         cfg_.buzz_stop_nm = params_.buzz_stop_nm;
+        std::copy_n(params_.joint_lower.begin(), 7, cfg_.joint_lower.begin());
+        std::copy_n(params_.joint_upper.begin(), 7, cfg_.joint_upper.begin());
+        cfg_.joint_margin_rad = params_.joint_margin_rad;
         // A lead that could exceed 15 N must be a startup refusal, not a
         // surprise with the arm moving.
         const std::string why = tracking_law::validate_config(
@@ -198,6 +208,12 @@ public:
                 std::lock_guard<std::mutex> lock(state_mutex_);
                 tf2::fromMsg(msg->o_t_ee.pose, latest_ee_);
                 has_state_ = true;
+                const auto &js = msg->measured_joint_state;
+                has_joints_ = js.position.size() >= 7 && js.velocity.size() >= 7;
+                if (has_joints_) {
+                    std::copy_n(js.position.begin(), 7, latest_q_.begin());
+                    std::copy_n(js.velocity.begin(), 7, latest_dq_.begin());
+                }
                 // Every 1 kHz sample, tracking or not: the buzz watchdog.
                 const auto &effort = msg->measured_joint_state.effort;
                 if (effort.size() >= tracking_law::BuzzMeter::kJoints) {
@@ -386,6 +402,25 @@ private:
         get("tracking_over_lead_policy", p.over_lead_policy);
         get("tracking_z_floor_m", p.z_floor_m);
         get("tracking_buzz_stop_nm", p.buzz_stop_nm);
+        get("tracking_goal_glide", p.goal_glide);
+        get("tracking_box_x_m", p.box_x_m);
+        get("tracking_box_y_m", p.box_y_m);
+        get("tracking_box_z_max_m", p.box_z_max_m);
+        get("tracking_joint_lower", p.joint_lower);
+        get("tracking_joint_upper", p.joint_upper);
+        get("tracking_joint_margin_rad", p.joint_margin_rad);
+        if (p.joint_lower.size() != 7 || p.joint_upper.size() != 7) {
+            throw std::runtime_error("tracking_joint_lower/upper need 7 entries each");
+        }
+        for (size_t j = 0; j < 7; ++j) {
+            if (!(p.joint_lower[j] < p.joint_upper[j])) {
+                throw std::runtime_error("tracking_joint_lower must be below tracking_joint_upper");
+            }
+        }
+        if (!std::isfinite(p.joint_margin_rad) || p.joint_margin_rad < 0.0 ||
+            p.joint_margin_rad > 0.5) {
+            throw std::runtime_error("tracking_joint_margin_rad must be in [0, 0.5]");
+        }
         get("tracking_state_timeout_s", p.state_timeout_s);
         get("tracking_profile_timeout_s", p.profile_timeout_s);
         get("tracking_settle_s", p.settle_s);
@@ -565,6 +600,19 @@ private:
         return latest_ee_;
     }
 
+    // Joint positions and velocities from the same sample as the pose, or
+    // nothing - the joint-limit guard then holds rather than guess.
+    std::optional<std::pair<std::array<double, 7>, std::array<double, 7>>> fresh_joints()
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        const double age = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - latest_state_arrival_).count();
+        if (!has_joints_ || age > params_.state_timeout_s) {
+            return std::nullopt;
+        }
+        return std::make_pair(latest_q_, latest_dq_);
+    }
+
     // ── frames ──────────────────────────────────────────────────────────
 
     // The fixed tool offset T_tcp_ee, measured rather than assumed: TF and
@@ -740,6 +788,18 @@ private:
         if (!std::isfinite(standoff_m) || standoff_m <= 0.0) {
             return "tracking_standoff_m must be finite and positive";
         }
+        // The drawer's workspace box, written with the goal: held at, never
+        // left, under every over-lead policy.
+        std::vector<double> box_x = params_.box_x_m, box_y = params_.box_y_m;
+        double box_z_max = params_.box_z_max_m;
+        get_parameter("tracking_box_x_m", box_x);
+        get_parameter("tracking_box_y_m", box_y);
+        get_parameter("tracking_box_z_max_m", box_z_max);
+        if (box_x.size() != 2 || box_y.size() != 2 || !(box_x[0] < box_x[1]) ||
+            !(box_y[0] < box_y[1]) || !(box_z_max > cfg_.z_floor_m)) {
+            return "tracking_box_x_m/y_m need [min, max] and tracking_box_z_max_m must sit "
+                   "above the Z floor";
+        }
         if (!inplane_hold && !std::isfinite(inplane_deg)) {
             return "tracking_inplane_deg must be finite";
         }
@@ -843,6 +903,12 @@ private:
         }
 
         lead_ = {};
+        glide_.clear();
+        cfg_.box_x_min = box_x[0];
+        cfg_.box_x_max = box_x[1];
+        cfg_.box_y_min = box_y[0];
+        cfg_.box_y_max = box_y[1];
+        cfg_.box_z_max = box_z_max;
         held_ = false;
         t_tcp_ee_ = *offset;
         t_tcp_cam_ = t_tcp_cam;
@@ -864,13 +930,14 @@ private:
         const tf2::Vector3 &t = offset->getOrigin();
         RCLCPP_INFO(get_logger(),
                     "TRACKING on profile '%s': camera %.0f mm off the marker at "
-                    "%.1f deg in-plane%s, over-lead policy %s, slew %.3f m/s, Z floor "
-                    "%.0f mm, tool offset %.1f mm at %.2f deg (%s -> the controller's "
-                    "EE frame).",
+                    "%.1f deg in-plane%s, over-lead policy %s, slew %.3f m/s, goal glide "
+                    "%s, Z floor %.0f mm, tool offset %.1f mm at %.2f deg (%s -> the "
+                    "controller's EE frame).",
                     params_.gain_profile.c_str(), standoff_m * 1000.0,
                     inplane_rad * 180.0 / M_PI, inplane_hold ? " (held as found)" : "",
                     tracking_law::over_lead_name(policy_.load()),
-                    profile_.at(3).as_double(), cfg_.z_floor_m * 1000.0,
+                    profile_.at(3).as_double(), params_.goal_glide ? "on" : "off",
+                    cfg_.z_floor_m * 1000.0,
                     t.length() * 1000.0,
                     tracking_law::rotation_vector(offset->getRotation()).length() *
                         180.0 / M_PI,
@@ -998,10 +1065,17 @@ private:
         if (!t_base_marker) {
             return hold(measured, stamp_s, "no transform");
         }
-        const tf2::Transform goal_ee = tracking_law::goal_in_ee(
+        const tf2::Transform frame_goal_ee = tracking_law::goal_in_ee(
             tracking_law::camera_centred_goal(*t_base_marker, standoff_m_, inplane_rad_,
                                               t_tcp_cam_),
             t_tcp_ee_);
+        const double now_s = std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        const tf2::Transform goal_ee =
+            params_.goal_glide
+                ? glide_.step(frame_goal_ee, stamp_s, now_s, *measured, params_.period_s,
+                              params_.raw_timeout_s)
+                : frame_goal_ee;
 
         tf2::Vector3 pos_err;
         tf2::Quaternion rot_err;
@@ -1013,8 +1087,19 @@ private:
 
         const tf2::Transform eq = tracking_law::equilibrium_from(goal_ee, lead_);
         const tracking_law::OverLead policy = policy_;
-        const tracking_law::Verdict verdict =
-            tracking_law::decide(eq, *measured, cfg_, policy);
+        tracking_law::Verdict verdict = tracking_law::decide(eq, *measured, cfg_, policy);
+        if (verdict.act == tracking_law::Verdict::Act::kPublish) {
+            // Workspace limits hold, never stop: the joint stops too.
+            const auto joints = fresh_joints();
+            const std::string why =
+                joints ? tracking_law::joint_limit_veto(joints->first, joints->second,
+                                                        verdict.eq, *measured, cfg_,
+                                                        max_gain(0), max_gain(1))
+                       : std::string("no joint state to check the joint limits against");
+            if (!why.empty()) {
+                verdict = {tracking_law::Verdict::Act::kHold, verdict.eq, why};
+            }
+        }
         const double pos_err_mm = pos_err.length() * 1000.0;
         const double rot_err_deg = rot_angle * 180.0 / M_PI;
         std::string state = "tracking";
@@ -1061,6 +1146,7 @@ private:
               const std::string &reason)
     {
         hold_once(measured);
+        glide_.release();                 // resume from the arm, not a stale goal
         log_record(stamp_s, nullptr, measured ? &*measured : nullptr, NAN, NAN, false,
                    reason, policy_);
         report_tick("holding", reason, NAN, NAN);
@@ -1293,6 +1379,9 @@ private:
     double buzz_nm_{0.0};
     int buzz_joint_{0};
     bool has_state_{false};
+    std::array<double, 7> latest_q_{};
+    std::array<double, 7> latest_dq_{};
+    bool has_joints_{false};
     std::chrono::steady_clock::time_point latest_state_arrival_;
 
     // The node comes up NOT tracking and publishes nothing until an operator
@@ -1312,6 +1401,7 @@ private:
     // Timer thread only, except for the zeroing under tracking_ = false.
     // The session values are written by START before tracking_ goes true.
     tracking_law::Lead lead_;
+    tracking_law::GoalGlide glide_;
     tf2::Transform t_tcp_ee_{tf2::Transform::getIdentity()};
     tf2::Transform t_tcp_cam_{tf2::Transform::getIdentity()};
     double standoff_m_{0.10};

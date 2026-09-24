@@ -149,9 +149,31 @@
     tracking_raw_timeout_s: 0.25        # s; ~3 frames at 15 fps
     # Buzz watchdog: tracking stops (gains restored) when any joint's measured
     # torque above 20 Hz exceeds this rms. 2026-09-23 at 1 kHz: normal work
-    # peaked at 0.15 Nm over 24 min; the 40 Hz wrist buzz read 4-5 Nm, and at
-    # 0.5 Nm this would have stopped it 10 s before the operator did.
-    tracking_buzz_stop_nm: 0.5
+    # peaked at 0.15 Nm over 24 min; the 40 Hz wrist buzz read 4-5 Nm (5.9 peak).
+    # 2.5, was 0.5 then 1.0 (2026-09-24, operator's call): fast TRACK
+    # (125-250 mm/s) reads 0.2-1.0 Nm without buzzing - the arm stop-starts on
+    # each 15 fps goal step and lunges on catch-ups - and tripped 0.5 in 6 of 7
+    # runs and 1.0 in 2 of 3. Replaying the 09-23 recording, 2.5 catches the
+    # real buzz 0.71 s after 0.5 did (it grew 0.3 -> 3 Nm in 0.85 s and peaked
+    # at 5.9), still ~10 s before the operator stopped it.
+    tracking_buzz_stop_nm: 2.5
+    # Each camera frame (~15 Hz) moves the goal; the 50 Hz loop glides between
+    # frames instead of stepping, so a fast slew no longer stop-starts the arm
+    # on every frame. Adds up to one frame of delay; false = the old steps.
+    tracking_goal_glide: true
+    # Workspace limits HOLD tracking, under every over-lead policy, and never
+    # stop it. The box is cell_panel's drawer box (it writes these before every
+    # START; these are its defaults, pinned by a test); tracking_z_floor_m is
+    # its bottom. The joint guard holds while a joint within the margin of its
+    # end stop is pulled (or drifts) further in, and lets go as soon as the
+    # marker pulls it back out: 2026-09-24, TRACK drove J2 past its stop twice
+    # and the FR3's position-dependent velocity limit ended both runs.
+    tracking_box_x_m: [0.20, 0.80]
+    tracking_box_y_m: [-0.45, 0.45]
+    tracking_box_z_max_m: 0.80
+    tracking_joint_lower: [-2.7437, -1.7837, -2.9007, -3.0421, -2.8065, 0.5445, -3.0159]
+    tracking_joint_upper: [2.7437, 1.7837, 2.9007, -0.1518, 2.8065, 4.5169, 3.0159]
+    tracking_joint_margin_rad: 0.14     # ~8 deg; the FR3 still allows ~0.4-1 rad/s toward a stop there
 
     # Gain profile (TRACKING_SPEC.md section 4 C1). Sent as ONE atomic
     # set_parameters request; the controller's GainLimits still reject the

@@ -6,11 +6,13 @@
 // (see test/test_tracking_law.cpp).
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <optional>
 #include <string>
 
+#include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Transform.h>
 #include <tf2/LinearMath/Vector3.h>
@@ -42,6 +44,16 @@ struct Config
     // the current one itself and hands it to decide() every tick.
     std::string over_lead_policy{"hold"};
     double buzz_stop_nm{0.5};        // Nm rms above 20 Hz on any joint ends tracking (BuzzMeter)
+    // The workspace box, absolute in the base frame (cell_panel's drawer,
+    // written before every START); z_floor_m is its bottom. Wide open until set.
+    double box_x_min{-1e9}, box_x_max{1e9};
+    double box_y_min{-1e9}, box_y_max{1e9};
+    double box_z_max{1e9};
+    // FR3 joint limits (franka_description joint_limits.yaml) and the margin
+    // inside them in which a pull toward the stop holds.
+    std::array<double, 7> joint_lower{-2.7437, -1.7837, -2.9007, -3.0421, -2.8065, 0.5445, -3.0159};
+    std::array<double, 7> joint_upper{2.7437, 1.7837, 2.9007, -0.1518, 2.8065, 4.5169, 3.0159};
+    double joint_margin_rad{0.14};
 };
 
 // What to do while the equilibrium would lead the arm by more than
@@ -289,6 +301,65 @@ inline tf2::Transform equilibrium_from(const tf2::Transform &goal_ee, const Lead
                           goal_ee.getOrigin() + lead.pos);
 }
 
+// The goal changes once per camera frame (~15 Hz) but is used every 20 ms
+// tick. Published as steps, a fast slew covered each step and then stopped
+// until the next frame: a 15 Hz stop-start that read 0.3-1.0 Nm on the buzz
+// meter with no buzz (2026-09-24). GoalGlide spreads each step over the time
+// between the frames that bound it, so the goal moves at the marker's own
+// speed. It only ever moves between goals already seen, never past the newest
+// (TRACKING_SPEC Decision 5), and costs up to one frame of delay.
+class GoalGlide
+{
+public:
+    // START: no frame seen yet.
+    void clear()
+    {
+        primed_ = false;
+        stamp_ = NAN;
+    }
+
+    // After a hold: the next glide starts from where the arm is.
+    void release() { primed_ = false; }
+
+    // The goal for a tick at now_s, given the newest detection's goal and its
+    // image stamp. A new stamp starts a glide from wherever the last one had
+    // got to (from the arm when released), lasting the frame interval clamped
+    // to [min_s, max_s]; with no previous frame it lasts max_s.
+    tf2::Transform step(const tf2::Transform &goal, double stamp_s, double now_s,
+                        const tf2::Transform &arm, double min_s, double max_s)
+    {
+        if (!primed_ || stamp_s != stamp_) {
+            double dur = stamp_s - stamp_;
+            if (!std::isfinite(dur) || dur > max_s) {
+                dur = max_s;
+            }
+            from_ = primed_ ? at(now_s) : arm;
+            t0_ = now_s;
+            dur_ = std::max(dur, min_s);
+            stamp_ = stamp_s;
+            primed_ = true;
+        }
+        to_ = goal;
+        return at(now_s);
+    }
+
+private:
+    tf2::Transform at(double now_s) const
+    {
+        const double s = dur_ > 0.0 ? std::clamp((now_s - t0_) / dur_, 0.0, 1.0) : 1.0;
+        const tf2::Vector3 turn =
+            rotation_vector(to_.getRotation() * from_.getRotation().inverse());
+        return tf2::Transform(quaternion_from(turn * s) * from_.getRotation(),
+                              from_.getOrigin() + (to_.getOrigin() - from_.getOrigin()) * s);
+    }
+
+    tf2::Transform from_, to_;
+    double stamp_{NAN};
+    double t0_{0.0};
+    double dur_{0.0};
+    bool primed_{false};
+};
+
 // Empty if the equilibrium sits within max_lead_m and max_lead_rad of the
 // arm, otherwise how far out it is. The position cap is cell_panel's
 // MAX_LEAD_MM; a 50 Hz stream must not be looser than the stepped path.
@@ -336,6 +407,89 @@ inline std::string publish_veto(const tf2::Transform &eq, const Config &cfg)
         return "the equilibrium would sit at z " + mm(eq.getOrigin().z()) +
                " mm, below the floor " + mm(cfg.z_floor_m) +
                " mm - the camera bracket hangs below the flange";
+    }
+    const tf2::Vector3 &p = eq.getOrigin();
+    auto outside = [](const char *axis, double v, double lo, double hi) {
+        return "the equilibrium would leave the workspace box: " + std::string(axis) + " " +
+               mm(v) + " mm outside [" + mm(lo) + ", " + mm(hi) +
+               "] - move the marker back inside";
+    };
+    if (p.x() < cfg.box_x_min || p.x() > cfg.box_x_max) {
+        return outside("x", p.x(), cfg.box_x_min, cfg.box_x_max);
+    }
+    if (p.y() < cfg.box_y_min || p.y() > cfg.box_y_max) {
+        return outside("y", p.y(), cfg.box_y_min, cfg.box_y_max);
+    }
+    if (p.z() > cfg.box_z_max) {
+        return "the equilibrium would sit at z " + mm(p.z()) + " mm, above the box top " +
+               mm(cfg.box_z_max) + " mm - move the marker back inside";
+    }
+    return {};
+}
+
+// FR3 kinematics (Craig's modified DH, Franka's published parameters): the
+// origin and rotation axis of each joint in the base frame at q.
+struct JointFrames
+{
+    std::array<tf2::Vector3, 7> origin;
+    std::array<tf2::Vector3, 7> axis;
+    tf2::Transform flange;
+};
+
+inline JointFrames joint_frames(const std::array<double, 7> &q)
+{
+    static constexpr std::array<double, 7> a{0.0, 0.0, 0.0, 0.0825, -0.0825, 0.0, 0.088};
+    static constexpr std::array<double, 7> d{0.333, 0.0, 0.316, 0.0, 0.384, 0.0, 0.0};
+    static constexpr std::array<double, 7> alpha{0.0,     -M_PI_2, M_PI_2, M_PI_2,
+                                                 -M_PI_2, M_PI_2,  M_PI_2};
+    JointFrames f;
+    tf2::Transform t = tf2::Transform::getIdentity();
+    for (size_t i = 0; i < 7; ++i) {
+        const double ca = std::cos(alpha[i]), sa = std::sin(alpha[i]);
+        const double ct = std::cos(q[i]), st = std::sin(q[i]);
+        t = t * tf2::Transform(tf2::Matrix3x3(ct, -st, 0.0, st * ca, ct * ca, -sa, st * sa,
+                                              ct * sa, ca),
+                               tf2::Vector3(a[i], -d[i] * sa, d[i] * ca));
+        f.origin[i] = t.getOrigin();
+        f.axis[i] = t.getBasis().getColumn(2);
+    }
+    f.flange = t * tf2::Transform(tf2::Quaternion::getIdentity(), tf2::Vector3(0.0, 0.0, 0.107));
+    return f;
+}
+
+// Empty unless a joint within joint_margin_rad of a limit would go further in.
+// It would when the move to eq pulls it there - the pull is J^T [k_pos dp;
+// k_rot dr], the joint torque a spring from the arm to eq applies - or when
+// it is already moving there faster than 0.05 rad/s. Holding only then lets
+// the operator back out by moving the marker; holding on proximity alone would
+// never let go, because a held arm stays where it is. 2026-09-24: TRACK drove
+// J2 past its stop twice, and the FR3's position-dependent velocity limit
+// (zero at the stop) ended both runs with a joint_velocity_violation.
+inline std::string joint_limit_veto(const std::array<double, 7> &q,
+                                    const std::array<double, 7> &dq, const tf2::Transform &eq,
+                                    const tf2::Transform &measured_ee, const Config &cfg,
+                                    double k_pos, double k_rot)
+{
+    const JointFrames f = joint_frames(q);
+    const tf2::Vector3 p = measured_ee.getOrigin();
+    const tf2::Vector3 force = (eq.getOrigin() - p) * k_pos;
+    const tf2::Vector3 moment =
+        rotation_vector(eq.getRotation() * measured_ee.getRotation().inverse()) * k_rot;
+    constexpr double kPullEps = 0.05;   // Nm: below this the goal is not pulling
+    constexpr double kDriftEps = 0.05;  // rad/s: the drift speeds seen were 0.06-0.16
+    for (size_t j = 0; j < 7; ++j) {
+        const double pull = f.axis[j].dot((p - f.origin[j]).cross(force) + moment);
+        const double to_lower = q[j] - cfg.joint_lower[j];
+        const double to_upper = cfg.joint_upper[j] - q[j];
+        const bool deeper_low = pull < -kPullEps || dq[j] < -kDriftEps;
+        const bool deeper_high = pull > kPullEps || dq[j] > kDriftEps;
+        if ((to_lower < cfg.joint_margin_rad && deeper_low) ||
+            (to_upper < cfg.joint_margin_rad && deeper_high)) {
+            const bool low = to_lower < to_upper;
+            return "J" + std::to_string(j + 1) + " is " + deg(low ? to_lower : to_upper) +
+                   " deg from its " + (low ? "lower" : "upper") +
+                   " end stop - move the marker back toward the centre";
+        }
     }
     return {};
 }

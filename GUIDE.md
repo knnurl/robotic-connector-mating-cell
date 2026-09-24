@@ -72,7 +72,9 @@ fr3_cell
   running untouched - the spawner then prints "Failed to configure
   controller" and exits, which is expected. Edits to
   `cartesian_impedance_stroke.yaml` take effect only after restarting T1,
-  then T2.
+  then T2. **Restarting only T1** (after a reflex) is fine: the panel sees the
+  controller manager come back without the impedance controller and, 15 s
+  later, runs the same spawner itself (log: "loaded again, inactive").
 - **Hand-eye TF from `tools/fr3/calib/handeye.yaml`**, the one copy; the log
   line says whether an override was used instead.
 - **In-process capture** (`vision_source:=realsense`, the default): no image
@@ -159,8 +161,10 @@ The banner shows the node's own status:
 
 It **holds** by itself when the goal is past the lead cap (60 mm / 15 deg,
 with the over-lead dropdown on `hold`), below the Z floor (100 mm above the
-base), or when vision is not fresh (no raw detection within 0.25 s). It
-**stops** by itself when a joint **buzzes** (more than 0.5 Nm rms above 20 Hz),
+base), outside the drawer's workspace box, when it would pull a joint within
+8 deg of its end stop further in, or when vision is not fresh (no raw
+detection within 0.25 s). Workspace limits always hold, never stop. It
+**stops** by itself when a joint **buzzes** (more than 2.5 Nm rms above 20 Hz),
 when the impedance controller leaves ACTIVE, or past the cap with the dropdown
 on `stop`.
 

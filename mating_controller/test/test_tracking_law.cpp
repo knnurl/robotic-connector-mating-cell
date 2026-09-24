@@ -856,6 +856,194 @@ TEST(ValidateConfig, RejectsABadBuzzStop)
     EXPECT_NE(check(cfg), "");
 }
 
+// ── GoalGlide ───────────────────────────────────────────────────────────
+
+TEST(GoalGlide, TheFirstFrameGlidesFromTheArm)
+{
+    tracking_law::GoalGlide g;
+    g.clear();
+    const auto arm = make_pose(0.40, 0.0, 0.30, 0.0, 0.0, 0.0);
+    const auto goal = make_pose(0.43, 0.0, 0.30, 0.0, 0.0, 0.0);
+    EXPECT_NEAR(g.step(goal, 10.0, 100.0, arm, 0.02, 0.25).getOrigin().x(), 0.40, 1e-9);
+    EXPECT_NEAR(g.step(goal, 10.0, 100.125, arm, 0.02, 0.25).getOrigin().x(), 0.415, 1e-9);
+    EXPECT_NEAR(g.step(goal, 10.0, 100.25, arm, 0.02, 0.25).getOrigin().x(), 0.43, 1e-9);
+    EXPECT_NEAR(g.step(goal, 10.0, 101.0, arm, 0.02, 0.25).getOrigin().x(), 0.43, 1e-9);
+}
+
+// The 2026-09-24 case: 6 mm per 15 Hz frame, 50 Hz ticks. As steps the goal
+// jumped 6 mm and then sat for two ticks; glided, it moves every tick, by a
+// fraction of a step, and never past the newest frame.
+TEST(GoalGlide, AFifteenHertzStaircaseBecomesSteadyMotion)
+{
+    tracking_law::GoalGlide g;
+    g.clear();
+    const auto arm = make_pose(0.0, 0.0, 0.3, 0.0, 0.0, 0.0);
+    double prev = 0.0;
+    for (int n = 0; n < 60; ++n) {
+        const double t = 0.02 * n;
+        const int k = static_cast<int>(std::floor((t - 0.03) * 15.0));   // 30 ms latency
+        if (k < 0) {
+            continue;
+        }
+        const double newest = 0.006 * k;
+        const double x = g.step(make_pose(newest, 0.0, 0.3, 0.0, 0.0, 0.0), k / 15.0, t, arm,
+                                0.02, 0.25).getOrigin().x();
+        EXPECT_LE(x, newest + 1e-12) << "tick " << n;
+        if (k >= 2) {
+            EXPECT_GT(x - prev, 0.0) << "stood still at tick " << n;
+            EXPECT_LT(x - prev, 0.35 * 0.006) << "stepped at tick " << n;
+        }
+        prev = x;
+    }
+}
+
+TEST(GoalGlide, ReleaseRestartsFromTheArm)
+{
+    tracking_law::GoalGlide g;
+    g.clear();
+    const auto arm = make_pose(0.40, 0.0, 0.30, 0.0, 0.0, 0.0);
+    g.step(make_pose(0.40, 0.0, 0.30, 0.0, 0.0, 0.0), 1.0, 10.0, arm, 0.02, 0.25);
+    g.step(make_pose(0.40, 0.0, 0.30, 0.0, 0.0, 0.0), 1.0, 11.0, arm, 0.02, 0.25);
+    g.release();                                      // marker lost, arm held here
+    const auto held_arm = make_pose(0.41, 0.0, 0.30, 0.0, 0.0, 0.0);
+    const auto back = make_pose(0.45, 0.0, 0.30, 0.0, 0.0, 0.0);
+    // Back 0.46 s after the last frame: the glide lasts max_s, from the arm.
+    EXPECT_NEAR(g.step(back, 1.46, 12.0, held_arm, 0.02, 0.25).getOrigin().x(), 0.41, 1e-9);
+    EXPECT_NEAR(g.step(back, 1.46, 12.125, held_arm, 0.02, 0.25).getOrigin().x(), 0.43, 1e-9);
+    EXPECT_NEAR(g.step(back, 1.46, 12.25, held_arm, 0.02, 0.25).getOrigin().x(), 0.45, 1e-9);
+}
+
+TEST(GoalGlide, AFrameIntervalShorterThanATickLastsOneTick)
+{
+    tracking_law::GoalGlide g;
+    g.clear();
+    const auto arm = make_pose(0.0, 0.0, 0.3, 0.0, 0.0, 0.0);
+    g.step(arm, 1.0, 5.0, arm, 0.02, 0.25);
+    g.step(arm, 1.0, 5.3, arm, 0.02, 0.25);
+    const auto next = make_pose(0.01, 0.0, 0.3, 0.0, 0.0, 0.0);
+    EXPECT_NEAR(g.step(next, 1.001, 5.30, arm, 0.02, 0.25).getOrigin().x(), 0.0, 1e-9);
+    EXPECT_NEAR(g.step(next, 1.001, 5.32, arm, 0.02, 0.25).getOrigin().x(), 0.01, 1e-9);
+}
+
+TEST(GoalGlide, RotationTurnsTheShortWayInProportion)
+{
+    tracking_law::GoalGlide g;
+    g.clear();
+    const auto arm = make_pose(0.4, 0.0, 0.3, 0.0, 0.0, 170.0 * M_PI / 180.0);
+    const auto goal = make_pose(0.4, 0.0, 0.3, 0.0, 0.0, -170.0 * M_PI / 180.0);
+    auto turned = [&](double now_s) {
+        const auto q = g.step(goal, 2.0, now_s, arm, 0.02, 0.25).getRotation();
+        return tracking_law::rotation_vector(q * arm.getRotation().inverse()).length();
+    };
+    EXPECT_NEAR(turned(7.0), 0.0, 1e-9);                     // first frame: glides max_s
+    EXPECT_NEAR(turned(7.125), 10.0 * M_PI / 180.0, 1e-9);   // halfway: 10 deg
+    EXPECT_NEAR(turned(7.25), 20.0 * M_PI / 180.0, 1e-9);    // the short 20 deg, not 340
+}
+
+// ── Workspace box and joint-limit guard ─────────────────────────────────
+
+TEST(PublishVeto, TheWorkspaceBoxHoldsUnderEveryPolicy)
+{
+    auto cfg = shipped();
+    cfg.box_x_min = 0.20;
+    cfg.box_x_max = 0.80;
+    const auto arm = make_pose(0.79, 0.0, 0.40, M_PI, 0.0, 0.0);
+    const auto out = make_pose(0.81, 0.0, 0.40, M_PI, 0.0, 0.0);
+    for (auto policy : {tracking_law::OverLead::kHold, tracking_law::OverLead::kStop,
+                        tracking_law::OverLead::kClamp}) {
+        const auto v = tracking_law::decide(out, arm, cfg, policy);
+        EXPECT_EQ(v.act, tracking_law::Verdict::Act::kHold);
+        EXPECT_NE(v.reason.find("workspace box"), std::string::npos) << v.reason;
+    }
+    EXPECT_EQ(tracking_law::decide(arm, arm, cfg, tracking_law::OverLead::kHold).act,
+              tracking_law::Verdict::Act::kPublish);
+    cfg.box_z_max = 0.35;
+    EXPECT_NE(tracking_law::publish_veto(arm, cfg).find("box top"), std::string::npos);
+}
+
+namespace
+{
+// 2026-09-24 19:22, the last robot state before the joint_velocity_violation:
+// J2 at -104.6 deg, past its -102.2 deg stop.
+const std::array<double, 7> kJ2AtItsStop{-1.071478, -1.826375, 1.795262, -2.044879,
+                                         0.725542,  2.179633,  1.222139};
+
+tf2::Transform tcp(const std::array<double, 7> &q)
+{
+    return tracking_law::joint_frames(q).flange *
+           tf2::Transform(tf2::Quaternion::getIdentity(), tf2::Vector3(0.0, 0.0, 0.1034));
+}
+
+std::array<double, 7> nudged(std::array<double, 7> q, size_t joint, double by)
+{
+    q[joint] += by;
+    return q;
+}
+}  // namespace
+
+TEST(JointFrames, TheZeroPoseFlangeIsWhereFrankaSaysItIs)
+{
+    const auto f = tracking_law::joint_frames({0, 0, 0, 0, 0, 0, 0}).flange.getOrigin();
+    EXPECT_NEAR(f.x(), 0.088, 1e-9);
+    EXPECT_NEAR(f.y(), 0.0, 1e-9);
+    EXPECT_NEAR(f.z(), 0.926, 1e-9);
+}
+
+TEST(JointFrames, ReproduceTheLoggedToolPosition)
+{
+    const auto p = tcp(kJ2AtItsStop).getOrigin();       // o_t_ee logged at the same instant
+    EXPECT_NEAR(p.x(), 0.495007, 5e-4);
+    EXPECT_NEAR(p.y(), 0.258706, 5e-4);
+    EXPECT_NEAR(p.z(), 0.117797, 5e-4);
+}
+
+// For a move of one joint alone the spring's pull on that joint has the
+// move's sign (its J^T K J diagonal entry is positive), so "the goal is where
+// the arm would be with J2 further in" is a principled pull into the stop.
+TEST(JointLimitVeto, HoldsWhileTheGoalPullsAJointIntoItsStop)
+{
+    const auto cfg = shipped();
+    const std::array<double, 7> still{};
+    const auto why = tracking_law::joint_limit_veto(
+        kJ2AtItsStop, still, tcp(nudged(kJ2AtItsStop, 1, -0.05)), tcp(kJ2AtItsStop), cfg,
+        1500.0, 90.0);
+    EXPECT_NE(why.find("J2"), std::string::npos) << why;
+    EXPECT_NE(why.find("lower end stop"), std::string::npos) << why;
+}
+
+TEST(JointLimitVeto, LetsGoAsSoonAsTheGoalPullsItBackOut)
+{
+    const auto cfg = shipped();
+    const std::array<double, 7> still{};
+    EXPECT_EQ(tracking_law::joint_limit_veto(kJ2AtItsStop, still,
+                                             tcp(nudged(kJ2AtItsStop, 1, +0.05)),
+                                             tcp(kJ2AtItsStop), cfg, 1500.0, 90.0),
+              "");
+}
+
+TEST(JointLimitVeto, IgnoresJointsWellInsideTheirRange)
+{
+    const auto cfg = shipped();
+    const std::array<double, 7> still{};
+    const auto mid = nudged(kJ2AtItsStop, 1, 1.0);       // J2 at -47 deg
+    EXPECT_EQ(tracking_law::joint_limit_veto(mid, still, tcp(nudged(mid, 1, -0.05)), tcp(mid),
+                                             cfg, 1500.0, 90.0),
+              "");
+}
+
+TEST(JointLimitVeto, HoldsADriftIntoTheStopEvenWithNoPull)
+{
+    const auto cfg = shipped();
+    const auto here = tcp(kJ2AtItsStop);
+    std::array<double, 7> dq{};
+    dq[1] = -0.10;                                        // the drift seen at 18:52
+    EXPECT_NE(tracking_law::joint_limit_veto(kJ2AtItsStop, dq, here, here, cfg, 1500.0, 90.0),
+              "");
+    dq[1] = -0.01;                                        // sensor noise
+    EXPECT_EQ(tracking_law::joint_limit_veto(kJ2AtItsStop, dq, here, here, cfg, 1500.0, 90.0),
+              "");
+}
+
 int main(int argc, char **argv)
 {
     ::testing::InitGoogleTest(&argc, argv);
