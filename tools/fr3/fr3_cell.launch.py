@@ -5,10 +5,14 @@
 T1 runs the FCI driver + MoveIt; this spawns the impedance controller
 INACTIVE into T1's controller manager, then starts the hand-eye static TF
 (tools/fr3/calib/handeye.yaml), cam_pub (in-process D405 capture, filtered in
-fr3_link0), tracking_node (idle until TRACK) and tools/fr3/cell_panel.py, all
-with tools/fr3/fr3_params.yaml. Nothing here moves the arm by itself: every
-motion is a panel button. The bring-up order is GUIDE.md section 2, the only
-maintained copy.
+fr3_link0), tracking_node (idle until TRACK) and the cell panel
+(tools/fr3/cell/cell.py), all with tools/fr3/fr3_params.yaml. Nothing here
+moves the arm by itself: every motion is a panel button. The bring-up order
+is GUIDE.md section 2, the only maintained copy.
+
+mock:=true starts none of that: tools/fr3/cell/mock_cell.py fakes the whole
+cell and the panel runs against it, both re-execing onto the isolated DDS
+domain 88 (tools/fr3/cell/isolate.py), so no robot is needed or reachable.
 
 vision_source:=topic instead expects a separate realsense2_camera driver
 (tools/fr3/realsense_low_bw.yaml) and gives cam_pub colour only - no depth,
@@ -24,7 +28,7 @@ import yaml
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, ExecuteProcess, LogInfo,
                             OpaqueFunction, TimerAction)
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -44,6 +48,7 @@ def generate_launch_description():
     vision_source = LaunchConfiguration('vision_source')
     marker_id = LaunchConfiguration('marker_id')
     capture_fps = LaunchConfiguration('capture_fps')
+    mock = LaunchConfiguration('mock')
 
     # Read on every launch: the file is the one copy of the calibration and
     # its record (method, residual, validation) - see its header.
@@ -70,8 +75,11 @@ def generate_launch_description():
                               description='D405 capture rate in realsense mode; '
                                           '/aruco/pose is published at this rate'),
         DeclareLaunchArgument('start_panel', default_value='true',
-                              description='run tools/fr3/cell_panel.py as part '
-                                          'of this launch'),
+                              description='run the cell panel (tools/fr3/cell/cell.py) '
+                                          'as part of this launch'),
+        DeclareLaunchArgument('mock', default_value='false',
+                              description='true = no robot: the mock cell and the panel '
+                                          'on the isolated DDS domain 88'),
         # Hand-eye TCP->optical. Defaults come from calib/handeye.yaml; pass
         # these only to try a candidate calibration without editing it.
         DeclareLaunchArgument('handeye_xyz',
@@ -84,16 +92,20 @@ def generate_launch_description():
                                           'from calib/handeye.yaml'),
     ]
 
-    return LaunchDescription(args + [_impedance_spawner(),
-                                     _static_tf(handeye),
+    real = UnlessCondition(mock)
+    return LaunchDescription(args + [_impedance_spawner(real),
+                                     _static_tf(handeye, real),
                                      _vision(filter_frame, vision_source,
-                                             marker_id, capture_fps),
-                                     TimerAction(period=3.0, actions=[
+                                             marker_id, capture_fps, real),
+                                     TimerAction(period=3.0, condition=real, actions=[
                                          _tracking(params_file),
-                                         _panel()])])
+                                         _panel([])]),
+                                     _mock_cell(IfCondition(mock)),
+                                     TimerAction(period=2.0, condition=IfCondition(mock),
+                                                 actions=[_panel(['--mock'])])])
 
 
-def _impedance_spawner():
+def _impedance_spawner(condition):
     # Loads and configures the controller INACTIVE, then exits; while T1 is
     # not up yet it waits, retrying every 10 s. The operator may relaunch T2
     # while T1 keeps running, so what the Humble spawner (controller_manager
@@ -115,10 +127,11 @@ def _impedance_spawner():
         arguments=['cartesian_impedance_stroke_controller', '--inactive',
                    '--param-file', IMPEDANCE_PARAMS],
         output='screen',
+        condition=condition,
     )
 
 
-def _static_tf(handeye):
+def _static_tf(handeye, condition):
     # static_transform_publisher needs individual tokens; split the two
     # space-separated launch args into positional arguments at launch time.
     def make(context):
@@ -143,11 +156,12 @@ def _static_tf(handeye):
                                '--child-frame-id', handeye['child_frame']],
                 )]
 
-    return OpaqueFunction(function=make)
+    return OpaqueFunction(function=make, condition=condition)
 
 
-def _vision(filter_frame, vision_source, marker_id, capture_fps):
+def _vision(filter_frame, vision_source, marker_id, capture_fps, condition):
     return Node(
+        condition=condition,
         package='roscam',
         executable='cam_pub',
         output='screen',
@@ -188,7 +202,12 @@ def _tracking(params_file):
     )
 
 
-def _panel():
+def _mock_cell(condition):
+    return ExecuteProcess(cmd=['python3', '-u', os.path.join(THIS_DIR, 'cell', 'mock_cell.py')],
+                          name='mock_cell', output='screen', condition=condition)
+
+
+def _panel(extra):
     # A child of this launch, so one Ctrl-C ends T2. The terminal's SIGINT
     # reaches the panel directly (launch does not re-send it) and the panel
     # hands the arm back before it exits; SIGTERM makes it try again.
@@ -202,7 +221,7 @@ def _panel():
     return ExecuteProcess(
         condition=IfCondition(LaunchConfiguration('start_panel')),
         name='cell_panel',
-        cmd=['python3', '-u', os.path.join(THIS_DIR, 'cell_panel.py')],
+        cmd=['python3', '-u', os.path.join(THIS_DIR, 'cell', 'cell.py')] + extra,
         output='screen',
         sigterm_timeout='30',
         sigkill_timeout='30',

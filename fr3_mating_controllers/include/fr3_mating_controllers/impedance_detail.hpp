@@ -23,8 +23,8 @@ namespace detail
 // The force ceiling bounds HOW HARD the arm can push, not whether the loop is
 // stable: damping_ratio 0 is an undamped spring and a negative value injects
 // energy, so an out-of-range value is rejected outright, never clamped.
-// tools/fr3/cell_panel.py GAIN_LIMITS mirrors these; a test in
-// tools/fr3/test_cell_panel.py fails if the two drift apart.
+// tools/fr3/cell/core.py GAIN_LIMITS mirrors these; a test in
+// tools/fr3/cell/test_cell_pins.py fails if the two drift apart.
 struct GainLimits
 {
     static constexpr double kPosMax = 3000.0;       // N/m
@@ -41,7 +41,7 @@ inline constexpr std::array<double, 7> kTauSpecNm{87.0, 87.0, 87.0, 87.0, 12.0, 
 // whether they are set at configure time or live (validate_slew is the live
 // path). A ceiling of 0 or NaN would silently disable the task law, and a
 // torque rate above 1 Nm per cycle exceeds what FCI tolerates.
-// tools/fr3/test_cell_panel.py checks the shipped yaml against these
+// tools/fr3/cell/test_cell_pins.py checks the shipped yaml against these
 // numbers, so an edit there cannot quietly make configure fail on the day.
 struct ConfigLimits
 {

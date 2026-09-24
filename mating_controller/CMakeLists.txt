@@ -33,7 +33,7 @@ set(INSTALL_TARGETS "")
 # nor a robot.
 #
 # OFF by default since 2026-09-23: the autonomous path is parked (the FR3 is
-# driven from tools/fr3/cell_panel.py + tracking_node), and its MELFA launch
+# driven from the cell panel (tools/fr3/cell/) + tracking_node), and its MELFA launch
 # files and params now live in melfa/parked/ - see the README there. The
 # phase machine's gtests still build and run. On a machine with a working
 # MoveIt:

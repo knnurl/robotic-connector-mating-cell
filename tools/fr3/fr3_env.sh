@@ -10,7 +10,7 @@
 # (GUIDE.md section 2), which work from any directory:
 #
 #     fr3_preflight [robot_ip]     read-only checks; exit code = FAIL count
-#     fr3_cell [arg:=value ...]    T2: tools/fr3/fr3_cell.launch.py
+#     fr3_cell [arg:=value ...]    T2: tools/fr3/fr3_cell.launch.py (mock:=true = no robot)
 #
 # Why this file exists: the FCI loop exchanges UDP packets with the robot
 # every 1 ms. If DDS is not pinned away from the robot NIC, ROS traffic

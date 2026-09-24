@@ -19,7 +19,7 @@ namespace tracking_law
 {
 
 // Worst extra force the bounded integrator may add is k * lead_max.
-// TRACKING_SPEC.md section 6. tools/fr3/test_cell_panel.py scrapes these
+// TRACKING_SPEC.md section 6. tools/fr3/cell/test_cell_pins.py scrapes these
 // three constants by name, so keep them bare decimal literals.
 inline constexpr double kLeadForceMaxN = 15.0;
 inline constexpr double kFrictionBreakawayN = 6.5;    // N,  spec section 2, worst case

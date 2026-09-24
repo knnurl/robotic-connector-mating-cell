@@ -56,7 +56,7 @@ thresholds as the guarded MoveIt stroke), and hands the arm back to the
 trajectory controller afterwards, whatever happened.
 
 `~/equilibrium_pose` now has **three** possible publishers: `mating_node`'s
-stroke ramp, `cell_panel.py` (IMPEDANCE & TRACK tab)'s hand-stepped setpoints, and
+stroke ramp, the cell panel's (`tools/fr3/cell/`) hand-stepped setpoints, and
 `mating_controller`'s `tracking_node` (below). `TargetHandoff` simply
 overwrites under a mutex — there is **no arbitration**, so the last publisher
 wins. That is harmless today, because `insert_backend` is `moveit` and
@@ -102,7 +102,7 @@ colcon test --packages-select fr3_mating_controllers && colcon test-result --ver
 ```
 
 The gtests cover the pure safety logic — gain limits and the setpoint handoff —
-without a robot. The panel side is covered by `tools/fr3/test_cell_panel.py`.
+without a robot. The panel side is covered by `tools/fr3/cell/test_cell_pins.py`.
 
 ## Bring-up
 
@@ -120,7 +120,7 @@ ros2 launch franka_fr3_moveit_config moveit.launch.py robot_ip:=$FR3_ROBOT_IP
 ros2 run controller_manager spawner cartesian_impedance_stroke_controller \
     --inactive --param-file "$(pwd)/fr3_mating_controllers/config/cartesian_impedance_stroke.yaml"
 # the commissioning rig:
-python3 tools/fr3/cell_panel.py
+python3 tools/fr3/cell/cell.py
 ```
 
 `mating_node` activates/deactivates it around the stroke via
@@ -130,7 +130,7 @@ effort interface, so a combined swap changes no franka command mode.
 
 ## Commissioning ladder (do not skip steps)
 
-Run it with `tools/fr3/cell_panel.py`: one button per rung, the order
+Run it with the cell panel (`tools/fr3/cell/`): one button per rung, the order
 enforced. **Any libfranka reflex kills `ros2_control_node` on this cell**
 (franka_hardware does not catch the exception). The robot stops — it is not
 freed — and the stack must be relaunched and PRE-FLIGHT run again.

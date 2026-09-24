@@ -7,7 +7,7 @@
 # (--inactive: the mating controller activates it only for the INSERT
 # stroke and hands back to the trajectory controller afterwards.)
 #
-# Commission it with tools/fr3/cell_panel.py, which walks the README
+# Commission it with the cell panel (tools/fr3/cell/), which walks the README
 # ladder. Every value below is range-checked: out-of-range values make
 # configure fail, and a live change with any value out of range is rejected
 # (all-or-nothing when sent atomically, as the panel does).

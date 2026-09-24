@@ -1,0 +1,26 @@
+# Saved TCP poses (fr3_link0 -> fr3_hand_tcp), written by TEACH in the
+# settings drawer. null = not taught yet; the button stays disabled until it
+# is. Moves run through ALIGN's straight-line path with its Z-floor and
+# workspace checks.
+home:
+  xyz:
+  - 0.40576
+  - -0.16413
+  - 0.30515
+  quat_xyzw:
+  - 0.995389
+  - 0.094876
+  - -0.012509
+  - -0.006606
+  taught: '2026-09-24T12:09:58'
+pre_align:
+  xyz:
+  - 0.41539
+  - -0.16778
+  - 0.30625
+  quat_xyzw:
+  - 0.999976
+  - 0.005528
+  - -0.002969
+  - -0.002997
+  taught: '2026-09-24T12:28:59'

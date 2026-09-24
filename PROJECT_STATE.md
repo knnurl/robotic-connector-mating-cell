@@ -133,7 +133,7 @@ commissioning rungs 0-3 (pre-flight, float, hold, setpoint) passed on
    ros2 launch franka_fr3_moveit_config moveit.launch.py robot_ip:=$FR3_ROBOT_IP
    ros2 run controller_manager spawner cartesian_impedance_stroke_controller \
        --inactive --param-file "$(pwd)/fr3_mating_controllers/config/cartesian_impedance_stroke.yaml"
-   python3 tools/fr3/cell_panel.py
+   python3 tools/fr3/cell/cell.py
    ```
 3. ~~**Write the tracking spec**~~ done 2026-09-22
    ([TRACKING_SPEC.md](TRACKING_SPEC.md)), and amended after implementation.
@@ -195,8 +195,7 @@ commissioning rungs 0-3 (pre-flight, float, hold, setpoint) passed on
 
 | Path | What |
 |---|---|
-| `tools/fr3/cell_panel.py` | Camera-alignment dashboard (cartesian backend; servo parked) |
-| `tools/fr3/cell_panel.py` | Impedance commissioning ladder, rungs 0–4 |
+| `tools/fr3/cell/` | The operator panel: camera alignment, the impedance ladder and TRACK on one page (PySide6; the Tk `cell_panel.py` retired 2026-09-24) |
 | `fr3_mating_controllers/` | The torque controller; safety logic in `impedance_detail.hpp`, gtests in `test/` |
 | `tools/fr3/fr3_env.sh` | Per-terminal environment: DDS isolation, robot IP, this workspace |
 | `mating_controller/` | The FR3 nodes: `mating_node` (phase machine), `tracking_node` (continuous tracking), pure logic in `include/` with gtests in `test/` |

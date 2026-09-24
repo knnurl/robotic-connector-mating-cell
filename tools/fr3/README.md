@@ -9,9 +9,8 @@ safe parameters, and the network/RT hardening the FR3 specifically needs.
 |---|---|
 | `fr3_env.sh` | Source in every terminal: ROS 2 + `~/franka_ros2_ws` + this workspace, DDS pin, `FR3_ROBOT_IP`, `FR3_LOG_DIR`; defines `fr3_preflight` and `fr3_cell` |
 | `fr3_preflight.sh` | Read-only checks: RT kernel / power / latency / Desk / DDS isolation / bandwidth / this workspace / camera. Exit code = FAIL count |
-| `fr3_cell.launch.py` | Terminal 2: impedance controller spawned inactive + hand-eye TF + `cam_pub` (KF in `fr3_link0`) + `tracking_node` (idle until TRACK) + the panel |
-| `cell_panel.py` | The operator panel: ALIGN, the IMPEDANCE ladder, TRACK. Every motion is a button press |
-| `theme.py` | The panel's colour palette |
+| `fr3_cell.launch.py` | Terminal 2: impedance controller spawned inactive + hand-eye TF + `cam_pub` (KF in `fr3_link0`) + `tracking_node` (idle until TRACK) + the panel; `mock:=true` = the panel against a fake cell |
+| `cell/` | The operator panel (PySide6): ALIGN, the ladder, TRACK on one page, plus its mock cell and tests - see [cell/README.md](cell/README.md). Every motion is a button press |
 | `state_relay.py` | C++ `topic_tools throttle` child that relays the 1 kHz robot state to the panel at 50 Hz |
 | `analyse_trace.py` | Summarises panel (`cell_*`) and tracking (`tracking_*`) traces; with no argument, the newest under `$FR3_LOG_DIR` |
 | `sim/tracking_smoke.py` | No-robot smoke test: the real `tracking_node` in a fake cell on isolated DDS domain 87 (run by `tools/run_tests.sh`) |
@@ -20,7 +19,7 @@ safe parameters, and the network/RT hardening the FR3 specifically needs.
 | `realsense_low_bw.yaml` | D405 config: colour-only, 640×480@15, **no pointcloud**. This 15 is also the `/aruco/pose` rate in topic mode — see "Continuous marker tracking" |
 | `calib/` | `handeye.yaml`, the one hand-eye calibration (read by `fr3_cell.launch.py` and the panel), and the samples it was solved from |
 | `setup/` | One-time PC setup: `99-realsense-no-suspend.rules` (stops the D405 USB-autosuspending; install steps in its header) |
-| `test_*.py`, `conftest.py` | pytest suite: `python3 -m pytest tools/fr3` |
+| `test_*.py`, `cell/test_*.py` | pytest suite: `python3 -m pytest tools/fr3` |
 
 ## Why ROS 2 (franka_ros2), not raw libfranka
 

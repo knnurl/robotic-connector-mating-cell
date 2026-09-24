@@ -79,7 +79,8 @@ fr3_cell
   topic ever reaches DDS - "defence 0" in `tools/fr3/README.md`.
   `vision_source:=topic` expects a separate `realsense2_camera` driver.
 - **The panel** starts with it (`start_panel:=false` to run
-  `python3 tools/fr3/cell_panel.py` yourself). Ctrl-C in T2 lets the panel
+  `python3 tools/fr3/cell/cell.py` yourself; `fr3_cell mock:=true` runs it
+  against a fake cell, no robot - see `tools/fr3/cell/README.md`). Ctrl-C in T2 lets the panel
   hand the arm back before it exits: normally a second, up to about a minute
   if a service is not answering - do not kill it meanwhile.
 - **No `mating_node`.** The autonomous phase machine is parked
