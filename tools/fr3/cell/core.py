@@ -115,6 +115,9 @@ LOG_DIR = FR3 / 'logs'
 
 
 IMPEDANCE_CONTROLLER = 'cartesian_impedance_stroke_controller'
+# The SOURCE copy fr3_cell.launch.py spawns it with (pinned by a test).
+IMPEDANCE_PARAMS = (FR3.parents[1] / 'fr3_mating_controllers' / 'config'
+                    / 'cartesian_impedance_stroke.yaml')
 ARM_CONTROLLER = 'fr3_arm_controller'
 
 EQUILIBRIUM_TOPIC = f'/{IMPEDANCE_CONTROLLER}/equilibrium_pose'

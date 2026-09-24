@@ -43,6 +43,7 @@ TEXT = {
     'auto_converge': 'AUTO-CONVERGE', 'preflight': 'PRE-FLIGHT',
     'float': 'FLOAT', 'hold': 'HOLD', 'setpoint_minus': 'SETPOINT  −',
     'setpoint_plus': 'SETPOINT  +', 'hold_here': 'hold HERE', 'track': 'TRACK',
+    'track_fast': 'FAST',
     'release': 'RELEASE  →  arm controller', 'apply_gains': 'APPLY GAINS',
     'recover': 'RECOVER', 'stop_now': 'STOP NOW', 'pause': 'PAUSE',
     'stop_after': 'stop after\ncurrent move',
@@ -469,6 +470,9 @@ class MainWindow(QMainWindow):
                     self.close()
                 else:
                     self.closing = False
+        elif kind == 'gains_applied':
+            if self.settings_path is not None:
+                self._save_timer.start()
         elif kind == 'floor_mm':
             self.floor_edit.setText(f'{e[1]:.1f}')
             self._floor_changed()
@@ -748,6 +752,7 @@ class MainWindow(QMainWindow):
         self.tspeed_val = lab('', 'mono')
         self.tspeed_val.setMinimumWidth(52)
         r.addWidget(self.tspeed_val)
+        r.addWidget(self._btn('track_fast'))
         self.tspeed_txt = lab('', 'caption', wrap=True)
         r.addWidget(self.tspeed_txt, 3)
         self.tspeed_confirm = QPushButton('')
@@ -899,6 +904,15 @@ class MainWindow(QMainWindow):
                                        ('pose jump alarm  mm', self.jump))):
             g.addWidget(lab(name, 'caption'), r, 0)
             g.addWidget(w, r, 1)
+        # An interlock relaxed, so never kept: off at every launch.
+        self.blind_cb = QCheckBox('TRACK may start without the marker')
+        self.blind_cb.setFocusPolicy(Qt.NoFocus)
+        self.blind_cb.setToolTip('Skips every marker check at START (visible, entry, lead cap). '
+                                 'The node holds until it sees the marker, then approaches it at '
+                                 'TRACK SPEED - or holds past its 60 mm lead cap under over lead '
+                                 "'hold'. Off at every launch.")
+        self.blind_cb.toggled.connect(lambda on: self.b.set_param('track_blind', bool(on)))
+        g.addWidget(self.blind_cb, 5, 0, 1, 2)
 
         g = self._group(v, 'GAINS  (numeric - pending until APPLY)')
         self.gain_edits = {}
@@ -1042,6 +1056,9 @@ class MainWindow(QMainWindow):
         """A live button: start its command (the backend marks it pending)."""
         if name == 'track' and self._last is not None and logic.tracking(self._last, self.st):
             self.b.command('end_track')
+            return
+        if name == 'track_fast':
+            self.b.command(name, not (self._last is not None and self._last.track_fast))
             return
         if name.startswith('goto:'):
             pose = name.split(':', 1)[1]
@@ -1233,7 +1250,8 @@ class MainWindow(QMainWindow):
                 'step_mm': self.step.currentText(), 'rot_deg': self.rot.currentText(),
                 'track_entry_mm': self.entry_mm.value(), 'track_entry_deg': self.entry_deg.value(),
                 'marker_loss': self.loss.currentText(), 'marker_loss_ms': self.loss_ms.value(),
-                'pose_jump_mm': self.jump.value(), 'camera': self.cam_cb.isChecked()}
+                'pose_jump_mm': self.jump.value(), 'camera': self.cam_cb.isChecked(),
+                **({'gains': dict(g)} if (g := self.b.session_gains()) else {})}
 
     def _restore_settings(self):
         """Put the drawer back as it was left. Every value goes through the
@@ -1307,6 +1325,18 @@ class MainWindow(QMainWindow):
                                f' z max {after["box_z_max_mm"]:g} mm')
         except (TypeError, ValueError, IndexError):
             skipped.append('workspace box')
+        g = vals.get('gains')
+        if isinstance(g, dict):
+            try:
+                g = {k: float(g[k]) for k in logic.GAIN_KEYS}
+                if logic.gain_problem(g, C.GAIN_LIMITS):
+                    raise ValueError
+                self.b.set_session_gains(g)
+                self._set_pending(g)
+                changed.append('gains {k_xy:g}/{k_z:g}/{k_rp:g}/{k_yaw:g}/zeta {zeta:g} '
+                               '(written at the next FLOAT/HOLD)'.format(**g))
+            except (KeyError, TypeError, ValueError):
+                skipped.append('gains')
         if 'camera' in vals and bool(vals['camera']) != self.cam_cb.isChecked():
             self.cam_cb.setChecked(bool(vals['camera']))
             changed.append('camera view ' + ('on' if vals['camera'] else 'OFF'))
@@ -1434,7 +1464,13 @@ class MainWindow(QMainWindow):
                         if self.inplane.currentText() != 'off' else 'In-plane  (off)')
             elif name == 'auto_converge':
                 text = f'AUTO-CONVERGE   →   {self.target.currentText()} mm standoff'
+            elif name == 'track_fast':
+                fast = logic.speed_torque(self.st.track_fast_pct, self.st)
+                text = (('▲ FAST ON  ' if s.track_fast else 'FAST  ')
+                        + f'{fast["setpoint_slew_mps"]*1000:.0f} mm/s')
             state = 'blocked' if not e.ok else 'next' if name == nxt else 'idle'
+            if name == 'track_fast' and e.ok and s.track_fast:
+                state = 'warn'                # raised speed: amber, shape and word
             btn.show_state(state, e.why, text)
 
     def _render_speed(self, s, en, m):
@@ -1478,7 +1514,10 @@ class MainWindow(QMainWindow):
                 f'{math.degrees(t["setpoint_slew_rps"]):.1f} deg/s')
         slew = self.b.applied_slew()
         if trk and slew is not None:
+            if s.track_fast:
+                t = logic.speed_torque(self.st.track_fast_pct, self.st)
             text += (f'   ·   in force {slew[0]*1000:.0f} mm/s'
+                     + (' FAST' if s.track_fast else '')
                      + ('' if abs(slew[0] - t['setpoint_slew_mps']) < 1e-6 else '  (pending)'))
         elif not trk:
             text += '   ·   applied when TRACK starts'

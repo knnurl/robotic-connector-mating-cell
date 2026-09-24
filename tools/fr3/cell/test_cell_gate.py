@@ -334,3 +334,89 @@ def test_align_never_moves_under_impedance_or_tracking(ctrl, tracking, moves):
     g.controller = types.MethodType(actions.Cell.controller, g)
     ok, msg = actions.Cell.start_align(g, 'translate')
     assert bool(ran) is moves and ok is moves, msg
+
+
+# ---------------------------------------------------------------- driver restart
+
+def _reload_rig(monkeypatch, reload_impedance=True):
+    clock = [100.0]
+    monkeypatch.setattr(actions.time, 'monotonic', lambda: clock[0])
+    started = []
+
+    class FakeSpawner:
+        def __init__(self, args, **_kw):
+            started.append(args)
+            self.returncode = None
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setattr(actions.subprocess, 'Popen', FakeSpawner)
+    said = []
+    cell = types.SimpleNamespace(reload_impedance=reload_impedance, _imp_missing_since=None,
+                                 _spawner=None, say=said.append, trace=lambda r: None,
+                                 n=types.SimpleNamespace(refresh_now=lambda: None))
+
+    def watch(controllers):
+        actions.Cell._watch_impedance(cell, types.SimpleNamespace(controllers=controllers))
+    return clock, started, said, cell, watch
+
+
+def test_a_restarted_driver_gets_the_impedance_controller_back(monkeypatch):
+    """2026-09-24: T1 restarted, and FLOAT/HOLD stayed blocked until fr3_cell
+    was restarted too - its spawner had run once, at launch."""
+    clock, started, said, cell, watch = _reload_rig(monkeypatch)
+    arm_only = {core.ARM_CONTROLLER: 'active'}
+    watch(arm_only)
+    clock[0] += actions.IMP_RELOAD_GRACE_S - 1
+    watch(arm_only)
+    assert started == []                        # the launch's own spawner gets its grace
+    clock[0] += 2
+    watch(arm_only)
+    assert len(started) == 1
+    assert '--inactive' in started[0] and str(core.IMPEDANCE_PARAMS) in started[0]
+    clock[0] += 60
+    watch(arm_only)
+    assert len(started) == 1                    # one spawner at a time
+    cell._spawner.returncode = 0
+    watch({**arm_only, core.IMPEDANCE_CONTROLLER: 'inactive'})
+    assert 'loaded again' in said[-1] and cell._spawner is None
+
+
+def test_a_failed_reload_retries_after_a_full_grace(monkeypatch):
+    clock, started, said, cell, watch = _reload_rig(monkeypatch)
+    arm_only = {core.ARM_CONTROLLER: 'active'}
+    watch(arm_only)
+    clock[0] += actions.IMP_RELOAD_GRACE_S + 1
+    watch(arm_only)
+    cell._spawner.returncode = 1
+    watch(arm_only)
+    assert 'FAILED' in said[-1] and len(started) == 1
+    clock[0] += actions.IMP_RELOAD_GRACE_S + 1
+    watch(arm_only)
+    assert len(started) == 2
+
+
+def test_no_reload_in_the_mock_or_while_the_driver_is_down(monkeypatch):
+    clock, started, _, _, watch = _reload_rig(monkeypatch, reload_impedance=False)
+    watch({core.ARM_CONTROLLER: 'active'})
+    clock[0] += 100
+    watch({core.ARM_CONTROLLER: 'active'})
+    clock, started2, _, _, watch2 = _reload_rig(monkeypatch)
+    watch2(None)                                # no controller manager at all
+    clock[0] += 100
+    watch2(None)
+    assert started == [] and started2 == []
+
+
+def test_a_box_excursion_while_tracking_warns_and_never_stops(monkeypatch):
+    """The node holds at the box now; the GUI-side stop is gone (TODO C6)."""
+    said, threads = [], []
+    cell = types.SimpleNamespace(st=actions.logic.Settings(), _box_fired=False, say=said.append,
+                                 trace=lambda r: None,
+                                 _thread=lambda *a: threads.append(a))
+    monkeypatch.setattr(actions.logic, 'tracking', lambda s, st: True)
+    actions.Cell._watch_box(cell, types.SimpleNamespace(tcp=(0.95, 0.0, 0.4)))
+    assert threads == [] and 'holds at the box' in said[-1]
+    actions.Cell._watch_box(cell, types.SimpleNamespace(tcp=(0.95, 0.0, 0.4)))
+    assert len(said) == 1                                  # once per excursion

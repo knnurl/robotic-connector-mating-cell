@@ -6,10 +6,13 @@ to ~/.config/fr3_cell/ on every change and restored at the next start.
 One file per cell: settings.yaml for the real one, settings_mock.yaml for the
 mock, so a mock experiment never leaks into a real session.
 
+Also kept: the last gains APPLIED (not unapplied edits). A relaunch reloads
+the controller's yaml gains, so the panel writes these back at the next
+FLOAT/HOLD activation, where the equilibrium seeds at the arm.
+
 Deliberately NOT kept (they start at their safe defaults on every launch):
-the two speed sliders (panel spec: never restore the previous session's speed),
-the robot-state gate (a safety interlock, ON at every launch as always), and
-the gains (the controller itself holds what was applied).
+the two speed sliders (panel spec: never restore the previous session's speed)
+and the robot-state gate (a safety interlock, ON at every launch as always).
 """
 
 import os
@@ -19,7 +22,7 @@ import yaml
 
 KEYS = ('standoff_mm', 'pos_tol_mm', 'inplane', 'floor_mm', 'box_x_mm', 'box_y_mm',
         'box_z_max_mm', 'step_mm', 'rot_deg', 'track_entry_mm', 'track_entry_deg',
-        'marker_loss', 'marker_loss_ms', 'pose_jump_mm', 'camera')
+        'marker_loss', 'marker_loss_ms', 'pose_jump_mm', 'camera', 'gains')
 HEADER = ('# FR3 Cell Control - the settings drawer as last left, restored at start.\n'
           '# Written by the GUI on every change. Delete this file to go back to the\n'
           '# defaults in tools/fr3/cell/config/settings.yaml.\n')

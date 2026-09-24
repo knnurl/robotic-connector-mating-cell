@@ -187,3 +187,23 @@ def test_failure_surfaces_in_the_banner(make):
     w, _b = make('idle', failure=('translate', 'BLOCKED by the workspace box'))
     assert 'TRANSLATE FAILED' in w.banner_title.text()
     assert w.banner_btn.isVisible() and w.banner_btn.name == 'dismiss'
+
+
+def test_fast_switch_toggles_and_shows_its_speed(make):
+    w, b = make('tracking')
+    fast = w.buttons['track_fast']
+    assert fast.text() == 'FAST  100 mm/s' and fast.state == 'idle'
+    fast.click()
+    assert ('track_fast', True) in b.cmds          # the labelled click is the confirm
+    w, b = make('tracking', track_fast=True)
+    fast = w.buttons['track_fast']
+    assert fast.text().startswith('▲ FAST ON') and fast.state == 'warn'
+    fast.click()
+    assert ('track_fast', False) in b.cmds
+
+
+def test_fast_blocked_before_track_says_why(make):
+    w, b = make('tracking', tracking=False, track={'state': 'idle'})
+    w.buttons['track_fast'].click()
+    assert not any(c[0] == 'track_fast' for c in b.cmds)
+    assert 'only while tracking' in w.log_box.toPlainText()

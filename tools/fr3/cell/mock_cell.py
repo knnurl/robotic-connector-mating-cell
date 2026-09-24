@@ -595,6 +595,9 @@ class Tracker(Node):
         self.declare_parameter('tracking_inplane_deg', 90.0)
         self.declare_parameter('tracking_inplane_hold', False)
         self.declare_parameter('tracking_over_lead_policy', 'hold')
+        self.declare_parameter('tracking_box_x_m', [0.20, 0.80])
+        self.declare_parameter('tracking_box_y_m', [-0.45, 0.45])
+        self.declare_parameter('tracking_box_z_max_m', 0.80)
         self.add_on_set_parameters_callback(self._check)
         self.state, self.reason, self.level = 'idle', '', 0
         self.snapshot = None

@@ -4,6 +4,7 @@ deliberately do not."""
 import dataclasses
 import os
 import pathlib
+import types
 
 import pytest
 import yaml
@@ -131,3 +132,55 @@ def test_frozen_scenes_never_touch_the_operators_file(app, monkeypatch, tmp_path
     w.close()
     assert dataclasses.asdict(ST) == dataclasses.asdict(L.load_settings(
         HERE / 'config' / 'settings.yaml'))
+
+
+def test_applied_gains_are_restored_and_written_at_activation(app, tmp_path):
+    """A relaunch reloads the yaml gains; the last APPLIED set comes back and
+    goes out with float_mode, before the switch (zero spring force)."""
+    import actions
+    import core
+    g = {'k_xy': 300.0, 'k_z': 1200.0, 'k_rp': 20.0, 'k_yaw': 30.0, 'zeta': 0.9}
+    p = tmp_path / 'settings.yaml'
+    persist.save(p, {'gains': g})
+    b = Live(p)
+    got = {}
+    b.set_session_gains = lambda v: got.update(v)
+    w = _window(b)
+    assert got == g and 'gains 300/1200/20/30' in w.log_box.toPlainText()
+    w.may_close = True
+    w.close()
+
+    calls = []
+    node = types.SimpleNamespace(
+        state=lambda: (None, None, None, core.MODE_MOVE, 1.0, 0.0),
+        controllers=lambda: {core.ARM_CONTROLLER: 'active', core.IMPEDANCE_CONTROLLER: 'inactive'},
+        set_params=lambda v: calls.append(('params', dict(v))) or (True, 'ok'),
+        switch=lambda a, d: calls.append(('switch', a, d)) or (True, 'switched'),
+        refresh_now=lambda: None)
+    cell = types.SimpleNamespace(n=node, st=ST, preflight='done', session_gains=g,
+                                 params=actions.Params(), setpoint=None, floating=None,
+                                 say=lambda m: None, trace=lambda r: None,
+                                 note_torque_attempt=lambda: None,
+                                 write_speed=lambda pct: (True, 'ok'))
+    cell.blocked = types.MethodType(actions.Cell.blocked, cell)
+    ok, _ = actions.Cell._activate(cell, False)
+    assert ok
+    assert calls[0][0] == 'params' and calls[0][1]['k_pos_tool'] == [300.0, 300.0, 1200.0]
+    assert calls[0][1]['damping_ratio'] == 0.9 and calls[0][1]['float_mode'] is False
+    assert calls[1][0] == 'switch'                  # gains land BEFORE activation
+
+
+def test_applied_gains_are_saved(app, tmp_path):
+    """The other half: APPLY GAINS ('gains_applied') lands in the file."""
+    g = {'k_xy': 800.0, 'k_z': 1200.0, 'k_rp': 50.0, 'k_yaw': 50.0, 'zeta': 0.9}
+    p = tmp_path / 'settings.yaml'
+    b = Live(p)
+    b.session_gains = lambda: g
+    w = _window(b)
+    w._on_event(('gains_applied', g))
+    assert w._save_timer.isActive()
+    w._save_settings()                       # what the 0.4 s timer does
+    assert persist.load(p)[0]['gains'] == g
+    w.may_close = True
+    w.close()
+

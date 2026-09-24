@@ -25,7 +25,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import yaml
@@ -36,6 +36,7 @@ import core
 HERE = pathlib.Path(__file__).resolve().parent
 POSES_PATH = HERE / 'config' / 'poses.yaml'
 TORQUE_ATTEMPT_S = 30.0      # the banner remembers a refused torque press this long
+IMP_RELOAD_GRACE_S = 15.0    # impedance controller missing this long after a driver restart: reload it
 LADDER_FLOOR_M = core.FLOOR_Z_MM / 1000.0
 
 
@@ -51,6 +52,8 @@ class Params:
     floor_m: float = core.FLOOR_Z_MM / 1000.0                     # ALIGN floor; None = unset
     speed_pct: float = 20.0
     track_speed_pct: float = 10.0
+    track_fast: bool = False          # FAST: live only while tracking, off at every START/end
+    track_blind: bool = False         # drawer: TRACK may start without the marker; off at launch
     setpoint_mm: float = float(core.SETPOINT_MM_DEFAULT)
     axis: str = core.AXIS_CHOICES[0]
     over_lead: str = core.OVER_LEAD_DEFAULT
@@ -148,10 +151,14 @@ class Cell:
         self._track_seen = None
         self.torque_attempted_at = float('-inf')
         self.pending_gains = None    # the view's numeric fields
+        self.session_gains = None    # last applied (or restored): written at activation
         self._loss_fired = False
         self._box_fired = False
         self._imp_active = False
         self._driver_gap = False
+        self.reload_impedance = False    # cell.py: True on the real cell, never the mock
+        self._imp_missing_since = None
+        self._spawner = None
         # align side
         self.R = None
         self.calib_meta = {}
@@ -325,6 +332,8 @@ class Cell:
         s.poses = {k: v is not None for k, v in load_poses_cached().items()}
         s.recording = self.recorder.elapsed()
         s.over_lead_policy = p.over_lead
+        s.track_fast = p.track_fast
+        s.track_blind = p.track_blind
         if state is not None:
             lead = logic.lead_mm(s, st)
             self.fhist.append((now, logic.force_n(s), lead or 0.0))
@@ -347,6 +356,7 @@ class Cell:
         self._drain_mode_log()
         self._follow_track_status()
         self._watch_driver(s)
+        self._watch_impedance(s)
         self._watch_marker_loss(s)
         self._watch_box(s)
 
@@ -370,6 +380,37 @@ class Cell:
         elif not gap:
             self._driver_gap = False
 
+    def _watch_impedance(self, s):
+        """fr3_cell's spawner loads the impedance controller once, at launch,
+        so a restarted driver (T1) comes up without it. Load it again the
+        same way - inactive, nothing moves - instead of needing fr3_cell
+        restarted. The grace lets the launch's own spawner, which retries
+        every 10 s, get there first."""
+        if self._spawner is not None and self._spawner.poll() is not None:
+            code, self._spawner = self._spawner.returncode, None
+            self.say(f'{core.IMPEDANCE_CONTROLLER}: '
+                     + ('loaded again, inactive - FLOAT/HOLD available' if code == 0 else
+                        f'spawner FAILED (exit {code}) - retrying in {IMP_RELOAD_GRACE_S:g} s'))
+            self.trace({'rec': 'reload_impedance_done', 'exit': code})
+            self.n.refresh_now()
+        if (not self.reload_impedance or s.controllers is None
+                or core.IMPEDANCE_CONTROLLER in s.controllers):
+            self._imp_missing_since = None
+            return
+        now = time.monotonic()
+        if self._imp_missing_since is None:
+            self._imp_missing_since = now
+        if self._spawner is not None or now - self._imp_missing_since < IMP_RELOAD_GRACE_S:
+            return
+        self._imp_missing_since = now                 # a retry waits a full grace again
+        self.say(f'{core.IMPEDANCE_CONTROLLER} is not loaded (a restarted driver?) - '
+                 'loading it, inactive')
+        self.trace({'rec': 'reload_impedance'})
+        self._spawner = subprocess.Popen(
+            ['ros2', 'run', 'controller_manager', 'spawner', core.IMPEDANCE_CONTROLLER,
+             '--inactive', '--param-file', str(core.IMPEDANCE_PARAMS)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     def _watch_marker_loss(self, s):
         live = logic.tracking(s, self.st)
         if not live:
@@ -390,17 +431,20 @@ class Cell:
         self._thread('stop_tracking', self.stop_tracking)
 
     def _watch_box(self, s):
-        """While tracking, the node only knows the Z floor (TODO C6)."""
+        """tracking_node holds at the box itself (handed over at START).
+        This only reports a TCP that got outside anyway - an overshoot, or a
+        box edited mid-run, which the node takes at the next START."""
         if not logic.tracking(s, self.st) or s.tcp is None:
             self._box_fired = False
             return
         why = logic.in_box(s.tcp, self.st)
         if why and not self._box_fired:
             self._box_fired = True
-            self.say(f'WORKSPACE: TCP {why} while tracking - stopping tracking '
-                     '(GUI-side box, TODO C6)')
-            self.trace({'rec': 'box_stop', 'why': why})
-            self._thread('stop_tracking', self.stop_tracking)
+            self.say(f'WORKSPACE: TCP {why} while tracking - tracking_node holds at the box '
+                     '(a box edit applies at the next START)')
+            self.trace({'rec': 'box_warn', 'why': why})
+        elif not why:
+            self._box_fired = False
 
     # ------------------------------------------------------------ stops
 
@@ -1036,10 +1080,26 @@ class Cell:
         if states is None:
             return False, 'the controller manager is not answering'
         if states.get(core.IMPEDANCE_CONTROLLER) is None:
-            return False, f'{core.IMPEDANCE_CONTROLLER} is not loaded - is fr3_cell running?'
-        ok, msg = self.n.set_params({'float_mode': bool(float_mode)})
+            return False, (f'{core.IMPEDANCE_CONTROLLER} is not loaded - after a driver '
+                           f'restart the panel loads it within ~{IMP_RELOAD_GRACE_S + 5:g} s')
+        values = {'float_mode': bool(float_mode)}
+        g = self.session_gains
+        restore = (states.get(core.IMPEDANCE_CONTROLLER) != 'active' and g is not None
+                   and logic.gain_problem(g, core.GAIN_LIMITS) is None)
+        if restore:
+            # A relaunch reloads the yaml gains; put the operator's back in
+            # the same atomic set, before activation seeds the equilibrium
+            # where the arm is (zero spring force, so the change is free).
+            values.update({'k_pos_tool': [g['k_xy'], g['k_xy'], g['k_z']],
+                           'k_rot_tool': [g['k_rp'], g['k_rp'], g['k_yaw']],
+                           'damping_ratio': g['zeta']})
+        ok, msg = self.n.set_params(values)
         if not ok:
-            return False, f'could not set float_mode: {msg}'
+            return False, f'could not set float_mode{" and gains" if restore else ""}: {msg}'
+        if restore:
+            self.say(f'gains restored for this activation: k_pos [{g["k_xy"]:.0f} '
+                     f'{g["k_xy"]:.0f} {g["k_z"]:.0f}] N/m, k_rot [{g["k_rp"]:.0f} '
+                     f'{g["k_rp"]:.0f} {g["k_yaw"]:.0f}] Nm/rad, zeta {g["zeta"]:.2f}')
         self.floating = bool(float_mode)
         if states.get(core.IMPEDANCE_CONTROLLER) == 'active':
             return True, 'already active'
@@ -1154,6 +1214,7 @@ class Cell:
 
     def _set_tracking(self, on):
         self.tracking = on
+        self.params = replace(self.params, track_fast=False)
         self.setpoint = None
         self._tracking_at = time.monotonic()
 
@@ -1185,17 +1246,30 @@ class Cell:
             return False, why
         if self.controller() != 'impedance' or self.floating_now() is not False:
             return False, 'TRACK needs the controller holding - HOLD first'
-        m = self.n.marker()
-        if m is None:
-            return False, 'marker not visible'
-        e = logic.marker_errors(m[0], m[1], p.target_m, p.inplane_target, p.tol_m, self.st)
-        if e['err_mm'] > self.st.track_entry_mm or e['tilt_deg'] > self.st.track_entry_deg:
-            return False, (f'marker error {e["err_mm"]:.0f} mm / {e["tilt_deg"]:.1f} deg is '
-                           f'above the TRACK entry ({self.st.track_entry_mm:g} mm / '
-                           f'{self.st.track_entry_deg:g} deg)')
+        e = {'err_mm': None, 'tilt_deg': None}
+        if not p.track_blind:             # blind: the node holds until it sees the marker
+            m = self.n.marker()
+            if m is None:
+                return False, 'marker not visible'
+            e = logic.marker_errors(m[0], m[1], p.target_m, p.inplane_target, p.tol_m,
+                                    self.st)
+            if p.over_lead != 'clamp' and e['err_mm'] > self.st.track_max_lead_mm:
+                return False, (f'marker error {e["err_mm"]:.0f} mm is beyond the tracking '
+                               f'node\'s {self.st.track_max_lead_mm:g} mm lead cap - with over '
+                               f'lead \'{p.over_lead}\' it would not move: ALIGN closer, or set '
+                               'over lead to clamp')
+            if (e['err_mm'] > self.st.track_entry_mm
+                    or e['tilt_deg'] > self.st.track_entry_deg):
+                return False, (f'marker error {e["err_mm"]:.0f} mm / {e["tilt_deg"]:.1f} deg '
+                               f'is above the TRACK entry ({self.st.track_entry_mm:g} mm / '
+                               f'{self.st.track_entry_deg:g} deg)')
         goal = {'tracking_standoff_m': p.target_m,
                 'tracking_inplane_hold': p.inplane_target is None,
-                'tracking_over_lead_policy': p.over_lead}
+                'tracking_over_lead_policy': p.over_lead,
+                # the drawer box: the node holds at it (read at START only)
+                'tracking_box_x_m': list(self.st.box_x),
+                'tracking_box_y_m': list(self.st.box_y),
+                'tracking_box_z_max_m': float(self.st.box_z_max)}
         if p.inplane_target is not None:
             goal['tracking_inplane_deg'] = float(p.inplane_target)
         ok, msg = self.n.set_tracking_params(goal)
@@ -1203,7 +1277,7 @@ class Cell:
                     'entry_err_mm': e['err_mm'], 'entry_tilt_deg': e['tilt_deg'],
                     'entry_limit_mm': self.st.track_entry_mm,
                     'entry_limit_deg': self.st.track_entry_deg,
-                    'track_speed_pct': p.track_speed_pct})
+                    'track_speed_pct': p.track_speed_pct, 'track_blind': p.track_blind})
         if not ok:
             return False, f'could not hand the goal to {core.TRACKING_NODE} ({msg})'
         self.open_trace()
@@ -1280,6 +1354,9 @@ class Cell:
                                      'k_rot_tool': [g['k_rp'], g['k_rp'], g['k_yaw']],
                                      'damping_ratio': g['zeta']})
         self.n.refresh_now()
+        if ok:
+            self.session_gains = dict(g)
+            self.emit('gains_applied', dict(g))
         self.say(f'gains {"applied" if ok else "REFUSED"}: k_pos [{g["k_xy"]:.0f} '
                  f'{g["k_xy"]:.0f} {g["k_z"]:.0f}] N/m, k_rot [{g["k_rp"]:.0f} '
                  f'{g["k_rp"]:.0f} {g["k_yaw"]:.0f}] Nm/rad, zeta {g["zeta"]:.2f}'
@@ -1296,6 +1373,22 @@ class Cell:
                  f'{math.degrees(vals["setpoint_slew_rps"]):.1f} deg/s'
                  + ('' if ok else f': REFUSED ({msg})'))
         self.trace({'rec': 'speed', 'pct': pct, 'ok': ok, **vals})
+        return ok, msg
+
+    def track_pct(self):
+        p = self.params
+        return self.st.track_fast_pct if p.track_fast else p.track_speed_pct
+
+    def set_track_fast(self, on):
+        """FAST: track_fast_pct while tracking; off goes back to TRACK SPEED.
+        The click is the confirm - a labelled switch, not a slider drag."""
+        if not self.tracking:
+            self.params = replace(self.params, track_fast=False)
+            return False, 'FAST works only while tracking'
+        self.params = replace(self.params, track_fast=on)
+        ok, msg = self.write_speed(self.track_pct())
+        if not ok:
+            self.params = replace(self.params, track_fast=False)
         return ok, msg
 
     def recover(self):

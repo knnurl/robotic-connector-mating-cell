@@ -11,6 +11,8 @@ headers, so they must stay bare decimal literals there.
 """
 
 import ast
+import importlib.util
+import os
 import pathlib
 import re
 import types
@@ -95,13 +97,14 @@ def test_settings_copied_from_core_match():
     assert ST.controller_max_force_n == core.CONTROLLER_MAX_FORCE_N
 
 
-def test_commission_preset_is_the_shipped_controller_default():
+def test_controller_launches_no_stiffer_than_commission():
+    """The yaml gains hold the arm from launch until the panel writes a
+    preset or the saved gains; they must not be stiffer than commission."""
     doc = yaml.safe_load((HERE / 'config' / 'gain_presets.yaml').read_text())
     com = next(p for p in doc['presets'] if p['name'] == 'commission')
     ctrl = _controller_yaml()
-    assert [com['k_xy'], com['k_xy'], com['k_z']] == ctrl['k_pos_tool']
-    assert [com['k_rp'], com['k_rp'], com['k_yaw']] == ctrl['k_rot_tool']
-    assert com['zeta'] == ctrl['damping_ratio']
+    assert all(c <= p for c, p in zip(ctrl['k_pos_tool'], [com['k_xy'], com['k_xy'], com['k_z']]))
+    assert all(c <= p for c, p in zip(ctrl['k_rot_tool'], [com['k_rp'], com['k_rp'], com['k_yaw']]))
 
 
 # ---------------------------------------------------------------- controller
@@ -349,3 +352,36 @@ def test_window_and_decisions_never_touch_ros():
                  'actions.py', 'core.py', 'persist.py'):
         # module level only: core.shutdown_ros imports rclpy when it runs
         assert not _imports(name, top_level=True) & {'rclpy', 'ros_node'}, name
+
+
+def test_track_lead_cap_setting_is_the_nodes():
+    assert ST.track_max_lead_mm == pytest.approx(_shipped()['tracking_max_lead_m'] * 1000)
+
+
+def test_the_panel_reloads_the_impedance_controller_like_the_launch_file():
+    """After a driver restart the panel re-runs fr3_cell.launch.py's spawner;
+    both must load the same (source) parameter file."""
+    spec = importlib.util.spec_from_file_location('fr3_cell_launch',
+                                                  core.FR3 / 'fr3_cell.launch.py')
+    launch = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launch)
+    assert core.IMPEDANCE_PARAMS.is_file()
+    assert os.path.normpath(str(core.IMPEDANCE_PARAMS)) == launch.IMPEDANCE_PARAMS
+
+
+def test_the_nodes_workspace_box_defaults_are_the_panels():
+    shipped = _shipped()
+    assert shipped['tracking_box_x_m'] == pytest.approx(list(ST.box_x))
+    assert shipped['tracking_box_y_m'] == pytest.approx(list(ST.box_y))
+    assert shipped['tracking_box_z_max_m'] == pytest.approx(ST.box_z_max)
+
+
+def test_the_joint_guard_uses_franka_descriptions_limits():
+    import ros_node
+    limits = ros_node.limits_from_franka_description()
+    if limits is None:
+        pytest.skip('franka_description not found')
+    shipped = _shipped()
+    assert shipped['tracking_joint_lower'] == pytest.approx([lo for lo, _ in limits])
+    assert shipped['tracking_joint_upper'] == pytest.approx([hi for _, hi in limits])
+    assert 0.05 < shipped['tracking_joint_margin_rad'] <= 0.25

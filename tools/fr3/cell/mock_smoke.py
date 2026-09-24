@@ -194,11 +194,32 @@ def main():
         wait_for(lambda s: s.marker is not None, 3)
         ok, msg = run('track', cell.start_tracking)
         wait_for(lambda s: s.track.get('state') == 'tracking', 5)
+        fast = L.speed_torque(st.track_fast_pct, st)['setpoint_slew_mps']
+        ok, msg = run('track_fast', cell.set_track_fast, True)
+        check('FAST writes track_fast_pct while tracking',
+              ok and wait_for(lambda s: abs(node.applied_params()['setpoint_slew_mps']
+                                            - fast) < 1e-9, 3), msg)
         cell.stop_now()
         check('STOP NOW ends tracking',
               wait_for(lambda s: s.track.get('state') == 'idle' and not cell.tracking, 25),
               str(snap[0].track.get('state')))
+        check('FAST is off once tracking ends', not cell.params.track_fast)
         check('STOP NOW leaves the arm held on impedance', L.mode(tick()) == 'TORQUE')
+
+        # ---- 'TRACK may start without the marker'
+        say('marker_lost')
+        check('without the switch, no marker blocks TRACK',
+              wait_for(lambda s: not L.enable(s, st)['track'].ok, 5), en('track').why)
+        cell.params = actions.Params(track_blind=True)
+        check('with it, TRACK is available with no marker in sight',
+              wait_for(lambda s: L.enable(s, st)['track'].ok, 3), en('track').why)
+        ok, msg = run('track', cell.start_tracking)
+        check('blind START hands over the box and starts', ok, msg)
+        cell.stop_now()
+        wait_for(lambda s: s.track.get('state') == 'idle' and not cell.tracking, 25)
+        cell.params = actions.Params()
+        say('clear')
+        wait_for(lambda s: s.marker is not None, 3)
 
         # ---- RELEASE
         ok, msg = run('release', cell.release)

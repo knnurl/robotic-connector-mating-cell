@@ -280,10 +280,10 @@ def test_shipped_presets_are_valid_and_contain_commission():
     doc = yaml.safe_load((HERE / 'config' / 'gain_presets.yaml').read_text())
     presets = doc['presets']
     assert L.validate_presets(presets, LIMITS) == []
-    com = {'k_xy': 150.0, 'k_z': 800.0, 'k_rp': 10.0, 'k_yaw': 20.0, 'zeta': 1.0}
+    com = {'k_xy': 300.0, 'k_z': 800.0, 'k_rp': 20.0, 'k_yaw': 30.0, 'zeta': 1.0}
     i = L.preset_index(com, presets)
     assert i is not None and presets[i]['placeholder'] is False
-    assert [p['name'] for p in presets if not p['placeholder']] == ['commission']
+    assert [p['name'] for p in presets if not p['placeholder']] == ['commission', 'firm', 'stiff']
 
 
 def test_non_monotonic_presets_are_refused():
@@ -338,3 +338,48 @@ def test_settings_reject_unknown_keys(tmp_path):
     f.write_text('no_such_threshold: 1\n')
     with pytest.raises(ValueError):
         L.load_settings(f)
+
+
+def test_track_refused_beyond_the_nodes_lead_cap_unless_clamp():
+    """2026-09-24: entry raised to 90 mm, TRACK started 85 mm out, and the
+    node held forever ('equilibrium would sit 85 mm from the arm, cap 60')."""
+    st = dataclasses.replace(ST, track_entry_mm=90.0)
+    far = dict(GOOD_MARKER, err_mm=85.0, ok=False)
+    en = L.enable(torque(marker=far, over_lead_policy='hold'), st)['track']
+    assert not en.ok and 'lead cap' in en.why and 'clamp' in en.why
+    assert not L.enable(torque(marker=far, over_lead_policy='stop'), st)['track'].ok
+    assert L.enable(torque(marker=far, over_lead_policy='clamp'), st)['track'].ok
+    near = dict(GOOD_MARKER, err_mm=ST.track_max_lead_mm - 1)
+    assert L.enable(torque(marker=near, over_lead_policy='hold'), st)['track'].ok
+
+
+def test_track_holding_on_the_lead_cap_says_how_out():
+    s = tracking(track={'state': 'holding', 'policy': 'hold',
+                        'reason': 'the equilibrium would sit 85 mm from the arm (cap 60 mm)'})
+    b = L.banner(s, ST)
+    assert b.key == 'track' and 'clamp' in b.detail
+    turn = tracking(track={'state': 'holding', 'policy': 'hold',
+                           'reason': 'the equilibrium would sit 16.2 deg from the arm (cap 14.9 deg)'})
+    assert 'clamp' in L.banner(turn, ST).detail
+    stale = tracking(track={'state': 'holding', 'policy': 'hold',
+                            'reason': 'Marker pose stale on /x - holding where the arm is.'})
+    assert 'clamp' not in L.banner(stale, ST).detail
+
+
+def test_fast_only_while_tracking():
+    """FAST never applies at START: the 100 mm/s profile lunged 49 mm there."""
+    en = L.enable(torque(), ST)['track_fast']
+    assert not en.ok and 'only while tracking' in en.why
+    assert L.enable(tracking(), ST)['track_fast'].ok
+    assert not L.enable(tracking(params_ok=False), ST)['track_fast'].ok
+
+
+def test_start_without_marker_skips_every_marker_check():
+    blind = dict(marker=None, marker_age=None)
+    en = L.enable(torque(**blind), ST)['track']
+    assert not en.ok
+    assert L.enable(torque(track_blind=True, **blind), ST)['track'].ok
+    far = dict(GOOD_MARKER, err_mm=150.0)               # entry and lead cap skipped too
+    assert L.enable(torque(marker=far, track_blind=True), ST)['track'].ok
+    # the rest of the TRACK gate still applies
+    assert not L.enable(torque(track_blind=True, floating=True, **blind), ST)['track'].ok

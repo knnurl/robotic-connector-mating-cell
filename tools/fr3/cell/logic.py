@@ -43,7 +43,7 @@ TRACK_LIVE_STATES = ('starting', 'tracking', 'holding', 'stopping')
 POSITION_CONTROLS = ('translate', 'level', 'inplane', 'auto_converge')
 TORQUE_CONTROLS = ('preflight', 'float', 'hold', 'setpoint_minus',
                    'setpoint_plus', 'hold_here', 'track', 'release',
-                   'apply_gains', 'preset', 'speed', 'track_speed')
+                   'apply_gains', 'preset', 'speed', 'track_speed', 'track_fast')
 ALWAYS = ('stop_now', 'pause', 'stop_after', 'record')
 
 
@@ -63,12 +63,14 @@ class Settings:
     inplane_tol_deg: float = 0.5        # core.INPLANE_TOL_DEG
     track_entry_mm: float = 30.0
     track_entry_deg: float = 5.0
+    track_max_lead_mm: float = 60.0     # fr3_params tracking_max_lead_m (pinned by a test)
     marker_loss_policy: str = 'hold'
     marker_loss_ms: float = 1000.0
     pose_jump_mm: float = 10.0
     speed_default_pct: float = 20.0
     track_speed_default_pct: float = 10.0
     speed_confirm_pct: float = 25.0
+    track_fast_pct: float = 40.0
     position_ceiling_pct: float = 20.0  # core.CEIL_SPEED_PCT
     slew_max_mps: float = 0.25          # impedance_detail.hpp ConfigLimits
     slew_max_rps: float = 1.0
@@ -157,6 +159,8 @@ class Snap:
     poses: dict = field(default_factory=dict)   # name -> taught
     recording: float = None             # s since the rosbag started, or None
     over_lead_policy: str = 'hold'
+    track_fast: bool = False
+    track_blind: bool = False           # drawer: TRACK may start without the marker
 
 
 @dataclass(frozen=True)
@@ -348,7 +352,8 @@ def enable(s, st):
     ladder = [idle, state, err, (s.preflight == 'done', 'run PRE-FLIGHT first'
                                  + (' (not known for this session)'
                                     if s.preflight == 'unknown' else '')),
-              rt, move, (imp_loaded(s), f'{IMP} is not loaded - is fr3_cell up?'),
+              rt, move, (imp_loaded(s), f'{IMP} is not loaded - the panel reloads it '
+                                        'within ~20 s of a driver restart'),
               (not trk, 'tracking - end TRACK first')]
     en['float'] = _first(ladder + [(not (imp_on and s.floating), 'already floating')])
     en['hold'] = _first(ladder + [(not holding(s),
@@ -366,13 +371,25 @@ def enable(s, st):
     else:
         m = s.marker or {}
         e_mm, tilt = m.get('err_mm'), m.get('tilt_deg')
-        en['track'] = _first(torque + [
-            move, (s.track_node_up, 'the tracking node is not running'), marker,
+        # 'start without marker' skips every marker check: the node holds
+        # until it sees one, then approaches at TRACK SPEED (or holds at its
+        # lead cap under 'hold') - the same whether the marker was hidden at
+        # START or wanders in later.
+        seen = [] if s.track_blind else [
+            marker,
             (e_mm is not None and e_mm <= st.track_entry_mm,
              f'marker error {e_mm or 0:.0f} mm > TRACK entry {st.track_entry_mm:g} mm'
              ' - ALIGN closer first'),
             (tilt is not None and tilt <= st.track_entry_deg,
-             f'tilt {tilt or 0:.1f} deg > TRACK entry {st.track_entry_deg:g} deg')])
+             f'tilt {tilt or 0:.1f} deg > TRACK entry {st.track_entry_deg:g} deg'),
+            # tracking_node never leads the arm by more than its cap; under
+            # 'hold' (or 'stop') a goal beyond it waits (or ends) forever.
+            (s.over_lead_policy == 'clamp' or (e_mm or 0) <= st.track_max_lead_mm,
+             f'marker error {e_mm or 0:.0f} mm is beyond the tracking node\'s '
+             f'{st.track_max_lead_mm:g} mm lead cap - with over lead \'{s.over_lead_policy}\' '
+             'it would not move: ALIGN closer, or set over lead to clamp')]
+        en['track'] = _first(torque + [
+            move, (s.track_node_up, 'the tracking node is not running')] + seen)
 
     # RELEASE stays pressable while the controller manager is silent: the Tk panel's
     # RELEASE always was, and a flaky poll must never strand the operator.
@@ -390,6 +407,10 @@ def enable(s, st):
     # Before TRACK it only stores the value; while tracking it writes live.
     en['track_speed'] = _first([(not trk or s.params_ok,
                                  'controller parameters unavailable')])
+    # FAST is live-only: every START runs at TRACK SPEED (the START lunge).
+    en['track_fast'] = _first([(trk, 'FAST works only while tracking - START always '
+                                     'runs at TRACK SPEED'),
+                               (s.params_ok, 'controller parameters unavailable')])
     en['recover'] = _first([idle, (s.recover_ready, 'error-recovery server not '
                                    'available - relaunch terminal 1'),
                             (robot_error(s, st), 'no robot error to recover from')])
@@ -443,7 +464,7 @@ def banner(s, st):
     elif s.tracking and not track_live(s, st):
         mismatch = 'no status from tracking_node - is it still running? end TRACK'
     elif s.torque_attempted and not imp_loaded(s):
-        mismatch = f'{IMP} is not loaded - is fr3_cell (terminal 2) up?'
+        mismatch = f'{IMP} is not loaded - the panel reloads it within ~20 s of a driver restart'
     if mismatch:
         return Banner('controller', WARN, 'CONTROLLER MISMATCH', mismatch)
     if robot_error(s, st):
@@ -480,8 +501,11 @@ def banner(s, st):
                       + (f' - {s.marker_why}' if s.marker_why else ''))
     tr = s.track if track_live(s, st) else {}
     if tr.get('state') == 'holding' and tr.get('reason'):
-        return Banner('track', WARN, 'TRACK HOLDING', tr['reason']
-                      + '  -  the node follows again once clear')
+        hint = ('  -  ALIGN closer, or set over lead to clamp'
+                # tracking_law.hpp lead_excess(): '... mm/deg from the arm (cap ...)'
+                if 'from the arm (cap' in tr['reason'] and tr.get('policy') == 'hold'
+                else '  -  the node follows again once clear')
+        return Banner('track', WARN, 'TRACK HOLDING', tr['reason'] + hint)
     return Banner('ready', NORMAL, 'READY', ready_detail(s, st))
 
 

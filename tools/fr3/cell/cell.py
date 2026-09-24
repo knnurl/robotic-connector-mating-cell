@@ -102,6 +102,12 @@ class LiveBackend:
     def set_pending_gains(self, values):
         self.cell.pending_gains = values
 
+    def session_gains(self):
+        return self.cell.session_gains
+
+    def set_session_gains(self, values):
+        self.cell.session_gains = dict(values)
+
     def heartbeat(self):
         self.n.heartbeat()
 
@@ -135,10 +141,14 @@ class LiveBackend:
         elif name == 'speed':
             c.run(name, c.write_speed, a[0])
         elif name == 'track_speed':
-            # Stored for the next START; while tracking it is written live.
+            # Stored for the next START; while tracking it is written live,
+            # unless FAST is on (FAST off then goes back to it).
             self.set_param('track_speed_pct', float(a[0]))
-            if c.tracking or c._track_state() in ('starting', 'tracking', 'holding'):
+            if not c.params.track_fast and (
+                    c.tracking or c._track_state() in ('starting', 'tracking', 'holding')):
                 c.run('track_speed', c.write_speed, float(a[0]))
+        elif name == 'track_fast':
+            c.run(name, c.set_track_fast, bool(a[0]))
         elif name == 'stop_now':
             c.stop_now()
         elif name == 'pause':
@@ -207,6 +217,7 @@ def main():
         return 2
 
     cell = actions.Cell(node, st)
+    cell.reload_impedance = not args.mock      # the mock never loses its controllers
     backend = LiveBackend(node, cell, args.mock)
     app = view.make_app(sys.argv)
     win = view.MainWindow(backend, st, presets, mock=args.mock)

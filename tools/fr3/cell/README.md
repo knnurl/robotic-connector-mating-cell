@@ -16,11 +16,20 @@ fr3_cell mock:=true
 The settings drawer is kept across restarts in
 `~/.config/fr3_cell/settings.yaml` (`settings_mock.yaml` for the mock).
 It is saved on every change, and the start-up log lists every restored value
-that differs from its default. Delete the file to reset. Three things start at
+that differs from its default. Delete the file to reset. The last gains you
+APPLIED are kept too: the controller reloads its yaml gains on every launch,
+so the panel writes yours with the next FLOAT or HOLD. Two things start at
 their safe defaults on every launch instead:
-- both speed sliders (motion 20 %, TRACK 10 %);
-- the robot-state gate, which is ON;
-- the gains, which the controller itself keeps.
+- both speed sliders (motion 20 %, TRACK 10 %), and FAST is off;
+- the robot-state gate, which is ON.
+
+FAST, beside TRACK SPEED, raises the tracking slew to `track_fast_pct`
+(40 % = 100 mm/s, 23 deg/s) while tracking. It works only while tracking
+and switches off whenever tracking ends, so every START runs at the slow
+TRACK SPEED. TRACK is refused when the marker error is beyond tracking_node's
+60 mm lead cap under over lead hold or stop: the node would hold forever.
+The drawer's "TRACK may start without the marker" skips every marker check
+at START; the node holds until it sees the marker. It is off at every launch.
 
 The panel runs as the ROS node `cell_panel`. It refuses to start while
 another `cell_panel` is up, and exits without touching the controllers, so
@@ -90,8 +99,8 @@ every refusal the Tk panel made.
 - `test_cell_exit.py`: the exit handoff and the shutdown order;
 - `test_cell_view.py`: Esc, blocked presses, pending, one blue step,
   confirms;
-- `test_cell_persist.py`: the drawer survives a restart, and the speeds and
-  gate do not;
+- `test_cell_persist.py`: the drawer and the applied gains survive a
+  restart, and the speeds and gate do not;
 - `test_cell_integration.py`: runs `visual.py` and `mock_smoke.py`.
 
 After an intended look change, run `python3 tools/fr3/cell/visual.py --update`.
@@ -123,9 +132,12 @@ The panel does what the GUI side can. These need the controller side:
   which also hosts `/action_server/error_recovery`, so RECOVER usually finds
   no server. The fix is for franka_hardware to catch the control exception;
   that is a franka_ros2 change.
-- **C6 Workspace box in the node.** tracking_node enforces only
-  `tracking_z_floor_m`. The panel's X/Y/Z-max box is GUI-side while tracking.
-  Proposed parameters: `tracking_box_min_m` and `tracking_box_max_m`.
+- **C6 Workspace box in the node.** Done 2026-09-24: the panel hands its box
+  to tracking_node at START (`tracking_box_x_m`, `tracking_box_y_m`,
+  `tracking_box_z_max_m`), and the node holds at it under every over-lead
+  policy, like the Z floor. It also holds while a joint within 8 deg of its
+  end stop is pulled further in. The panel only warns about a TCP outside
+  the box; it no longer stops tracking.
 - **C7 Controller status output.** The impedance controller publishes no
   equilibrium and no commanded wrench. Outside TRACK, the spring lead can
   only come from the GUI's own last setpoint. Needed: `~/state` with the
@@ -141,14 +153,14 @@ The panel does what the GUI side can. These need the controller side:
   publishers and the last one wins (controller README). The panel refuses its
   own setpoints while tracking, but only the controller can enforce a
   single writer.
-- **C10 Driver executor above the control loop.** In `ros2_control_node`
-  the 1 kHz update thread runs at FIFO 50, but the main thread (the ROS
-  executor, which serves every service call) and its DDS threads run at
-  FIFO 99, most likely inherited from libfranka raising the priority of the
-  thread that constructs the robot. Every service call into the driver
-  therefore competes with the control loop. On 2026-09-24 the RT success
-  rate dipped about four times as often with the panel polling at 2 Hz as
-  under the Tk panel, and three `communication_constraints_violation`
-  reflexes followed. The panel now polls rarely (every 5 s and 10 s,
-  re-reading after commands and transitions). The real fix belongs in the
-  driver: run the executor and DDS threads below the control loop.
+- **C10 Comm reflexes: the controller was built unoptimised.** There were
+  five `communication_constraints_violation` reflexes on 2026-09-24, all in
+  HOLD or TRACK and never in FLOAT. `fr3_mating_controllers` and
+  `mating_controller` had an empty `CMAKE_BUILD_TYPE` (no `-O2`) from the
+  09-23 rebuild on, so the 1 kHz impedance law ran unoptimised Eigen.
+  Measured in one session each: HOLD was 8.7-28.7 % below 97 % RT success
+  unoptimised, and 0.0 % (minimum 99 %) after
+  `--cmake-args -DCMAKE_BUILD_TYPE=Release`. FLOAT was clean in both.
+  Pinning to P-cores and rarer polling did not help. Remaining work: make
+  Release the default in both CMakeLists, so a clean rebuild cannot silently
+  go back to unoptimised.

@@ -81,7 +81,8 @@ QPushButton[state="next"] {{ background: {T['blue']}; color: {INK_ON['blue']};
 QPushButton[state="next"]:hover {{ background: #3a78e0; }}
 QPushButton[state="pending"] {{ background: {T['sunken']}; color: {T['ink']};
                                border: 1px dashed {T['ink2']}; }}
-QPushButton[state="confirm"] {{ background: {T['raised']}; color: {T['amber']};
+QPushButton[state="confirm"], QPushButton[state="warn"] {{
+    background: {T['raised']}; color: {T['amber']};
                                border: 1px solid {T['amber']}; }}
 QPushButton[kind="quiet"] {{ font-weight: normal; padding: 4px 8px; }}
 QPushButton#stopNow {{ background: {T['red']}; color: {INK_ON['red']}; border: none;
