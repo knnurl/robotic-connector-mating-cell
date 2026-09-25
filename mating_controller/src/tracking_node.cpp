@@ -1163,7 +1163,16 @@ private:
 
         const tf2::Transform eq = tracking_law::equilibrium_from(goal_ee, lead_);
         const tracking_law::OverLead policy = policy_;
-        tracking_law::Verdict verdict = tracking_law::decide(eq, *measured, cfg_, policy);
+        // Judge the target the newest frame ASKS for, not the glide toward
+        // it: a 100 mm jump (a misdetection, say) glided over 0.25 s stays
+        // inside the lead cap for its first ticks, and under 'hold' the arm
+        // chased 16 mm of it before the cap tripped (tracking_smoke,
+        // 2026-09-25). Only when that target passes does the glide go out.
+        const tf2::Transform eq_frame = tracking_law::equilibrium_from(frame_goal_ee, lead_);
+        tracking_law::Verdict verdict = tracking_law::decide(eq_frame, *measured, cfg_, policy);
+        if (verdict.act == tracking_law::Verdict::Act::kPublish) {
+            verdict = tracking_law::decide(eq, *measured, cfg_, policy);
+        }
         if (verdict.act == tracking_law::Verdict::Act::kPublish) {
             // Workspace limits hold, never stop: the joint stops too.
             const auto joints = fresh_joints();

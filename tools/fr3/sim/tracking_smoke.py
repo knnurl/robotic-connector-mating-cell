@@ -124,6 +124,11 @@ class Cell(Node):
         self.eq_count = 0
         self.raw_on = True
         self.buzz_nm = 0.0                 # amplitude of an injected 40 Hz torque on J1
+        # Joint positions/velocities, as the real robot state carries them:
+        # tracking_node's joint-limit guard holds without them. The FR3 ready
+        # pose, well inside every limit (the fake EE pose is not FK of it).
+        self.q = [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785]
+        self.dq = [0.0] * 7
         self.tfb = TransformBroadcaster(self)
         StaticTransformBroadcaster(self).sendTransform(tf_msg(
             T_TCP_CAM, 'fr3_hand_tcp', 'camera_color_optical_frame',
@@ -164,6 +169,9 @@ class Cell(Node):
         tau = [0.2, -21.0, 0.4, 14.0, 0.6, 2.1, 0.1]
         tau[0] += self.buzz_nm * math.sin(2 * math.pi * 40.0 * time.monotonic())
         state.measured_joint_state.effort = tau
+        with self.lock:
+            state.measured_joint_state.position = list(self.q)
+            state.measured_joint_state.velocity = list(self.dq)
         self.state_pub.publish(state)
 
     def _vision(self):
@@ -337,6 +345,19 @@ def main():
         check('resumes above the floor', wait_for(lambda: op.state()[0] == 'tracking', 4),
               str(op.state()))
 
+        # The joint-limit guard: J2 inside its 8 deg margin and drifting
+        # toward the stop holds (2026-09-24: TRACK drove J2 past it twice);
+        # clear of it, tracking resumes.
+        with cell.lock:
+            cell.q[1], cell.dq[1] = -1.70, -0.10
+        check('a joint drifting into its end stop holds',
+              wait_for(lambda: op.state()[0] == 'holding' and 'J2' in op.state()[1], 3),
+              str(op.state()))
+        with cell.lock:
+            cell.q[1], cell.dq[1] = -0.785, 0.0
+        check('resumes once the joint is clear', wait_for(lambda: op.state()[0] == 'tracking', 4),
+              str(op.state()))
+
         r = call(op.stop)
         check('STOP succeeds', bool(r and r.success), r.message if r else 'no reply')
         check('operator gains untouched', ctl.k_pos() == OPERATOR_GAINS, str(ctl.k_pos()))
@@ -353,10 +374,10 @@ def main():
         r = call(op.start)
         check('START again', bool(r and r.success) and ctl.k_pos() == OPERATOR_GAINS,
               r.message if r else 'no reply')
-        # 8 Nm amplitude = ~5.7 Nm rms at 40 Hz, above tracking_buzz_stop_nm
-        # (3.5) like the real 09-23 buzz (5.9 Nm peak); 4 Nm (~2.8 rms) no
-        # longer is.
-        cell.buzz_nm = 8.0
+        # Above tracking_buzz_stop_nm (3.5) like the real 09-23 buzz (5.9 Nm
+        # peak). This fake publishes at 100 Hz, where 8 Nm read only 3.59:
+        # 10 Nm keeps a margin; 4 Nm (the old value) no longer trips it.
+        cell.buzz_nm = 10.0
         stopped = wait_for(lambda: op.state()[0] in ('stopping', 'idle')
                            and 'buzz' in op.state()[1], 2)
         check('a 40 Hz buzz stops tracking by itself', stopped, str(op.state()))
