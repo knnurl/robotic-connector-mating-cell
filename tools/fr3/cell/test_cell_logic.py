@@ -25,6 +25,7 @@ def position(**kw):
                controllers={L.ARM: 'active', L.IMP: 'inactive'}, floating=False,
                params_ok=True, moveit_up=True, recover_ready=True,
                marker_age=0.05, marker=dict(GOOD_MARKER), image_age=0.2,
+               raw_age=0.05, pose_source='marker',
                calib='loaded', track_age=0.1, track={'state': 'idle'},
                track_node_up=True, inplane_target=90.0,
                poses={'home': True, 'pre_align': False})
@@ -64,7 +65,7 @@ def test_torque_mode_with_stale_marker():
     """Spec case 2: holding on impedance, the marker goes stale."""
     s = torque(marker_age=0.9, marker=None)
     b = L.banner(s, ST)
-    assert b.key == 'vision' and b.title == 'VISION STALE' and b.level == L.WARN
+    assert b.key == 'vision' and b.title == 'POSE STALE' and b.level == L.WARN
     en = L.enable(s, ST)
     assert not en['track'].ok and 'marker' in en['track'].why
     assert en['hold_here'].ok and en['release'].ok        # still in control
@@ -407,3 +408,32 @@ def test_place_at_b_needs_a_held_cube_and_a_recent_sighting_of_b():
     assert 'not holding' in L.enable(torque(grip_node_up=True, grip_target_age=1.0),
                                      ST)['place_b'].why
     assert not L.enable(tracking(grip_target_age=1.0, **held), ST)['place_b'].ok
+
+
+# ------------------------------------------------ the object pose contract
+
+def test_align_moves_only_on_a_fresh_raw_pose():
+    """The filtered pose coasts through short gaps: ALIGN, like TRACK in the
+    node, needs a raw detection at most raw_max_age_s old (TRACKING_SPEC
+    Decision 5)."""
+    assert L.enable(position(), ST)['translate'].ok
+    for age, why in ((None, 'no raw pose yet'), (0.4, 'no raw pose for 400 ms')):
+        en = L.enable(position(raw_age=age), ST)
+        for name in ('translate', 'level', 'inplane'):
+            assert not en[name].ok and why in en[name].why, (name, en[name])
+    assert L.enable(position(raw_age=ST.raw_max_age_s - 0.01), ST)['translate'].ok
+
+
+def test_the_pose_source_changes_only_while_nothing_reads_it_for_motion():
+    assert L.enable(position(), ST)['pose_source'].ok
+    for s in (tracking(), position(busy='translate'), torque(grip={'state': 'busy'}),
+              torque(grip={'state': 'idle', 'holding': 'true'})):
+        assert not L.enable(s, ST)['pose_source'].ok
+
+
+def test_the_vision_chip_and_banners_name_the_pose_source():
+    vis = {c.label: c for c in L.chips(position(), ST)}['VISION']
+    assert vis.value == '50 ms · MARKER' and vis.level == L.NORMAL
+    b = L.banner(torque(marker_age=None, marker=None), ST)
+    assert b.title == 'NO POSE' and '(marker)' in b.detail
+    assert L.banner(torque(marker_age=0.9, marker=None), ST).title == 'POSE STALE'

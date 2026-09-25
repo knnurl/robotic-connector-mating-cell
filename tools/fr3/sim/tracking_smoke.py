@@ -7,8 +7,9 @@
 It fakes everything tracking_node talks to - the controller manager's
 list_controllers, the impedance controller's gain parameters and its
 equilibrium (a first-order arm that follows it), the robot state and TF, the
-hand-eye TF from calib/handeye.yaml, and cam_pub's /aruco/pose +
-/aruco/pose_raw - then drives START -> follow -> over-cap jump -> raw
+hand-eye TF from calib/handeye.yaml, and the vision node's object pose on
+the topics fr3_params.yaml gives tracking_node (the /object/* contract) -
+then drives START -> follow -> over-cap jump -> raw
 dropout -> STOP and checks each step. Its first version found the segfault
 that killed the first hardware START on 2026-09-23.
 
@@ -135,8 +136,11 @@ class Cell(Node):
             self.get_clock().now().to_msg()))
         self.state_pub = self.create_publisher(
             FrankaRobotState, '/franka_robot_state_broadcaster/robot_state', 1)
-        self.pose_pub = self.create_publisher(PoseStamped, '/aruco/pose', 1)
-        self.raw_pub = self.create_publisher(PoseStamped, '/aruco/pose_raw', 1)
+        # the topics tracking_node reads, straight from its parameter file
+        params = yaml.safe_load(open(os.path.join(WS, 'tools/fr3/fr3_params.yaml')))
+        params = params['/**']['ros__parameters']
+        self.pose_pub = self.create_publisher(PoseStamped, params['pose_topic'], 1)
+        self.raw_pub = self.create_publisher(PoseStamped, params['tracking_raw_pose_topic'], 1)
         self.create_subscription(PoseStamped, f'/{IMP}/equilibrium_pose', self._eq, 10)
         self.create_timer(0.01, self._arm)
         self.create_timer(1.0 / 15, self._vision)

@@ -7,6 +7,7 @@
 state_stale_s: 0.3          # core.ROBOT_STATE_STALE_S
 driver_down_s: 2.0          # core.DRIVER_DOWN_S; a robot-state gap this long voids PRE-FLIGHT
 pose_stale_s: 0.5           # core.POSE_STALE_S
+raw_max_age_s: 0.25         # core.RAW_MAX_AGE_S: ALIGN moves only on a raw pose this fresh
 image_stale_s: 1.5          # debug image is capped at 5 Hz by cam_pub
 track_status_stale_s: 1.0   # core.TRACK_STATUS_STALE_S
 

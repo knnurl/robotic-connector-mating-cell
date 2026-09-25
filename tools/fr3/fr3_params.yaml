@@ -17,8 +17,11 @@
     BASE_FRAME_ID: fr3_link0
 
     # --- Vision input -------------------------------------------------------
-    pose_topic: /aruco/pose
-    raw_pose_topic: /aruco/pose_raw  # unpredicted detections; gates insertion arming
+    # The object pose contract (roscam/object_contract.py, PERCEPTION_PLAN
+    # section 2): the vision node's object_source picks where the pose comes
+    # from (only 'marker' so far, mirrored unchanged from /aruco/*).
+    pose_topic: /object/pose
+    raw_pose_topic: /object/pose_raw  # unpredicted detections; gates insertion arming
     control_period_s: 0.4
     vision_timeout_s: 0.6
     tf_lookup_timeout_s: 0.1
@@ -145,7 +148,7 @@
     tracking_max_lead_rad: 0.26         # rad, ~15 deg; angular twin of tracking_max_lead_m. The node refuses above 0.35
     # Predictions never drive committed motion (TRACKING_SPEC Decision 5):
     # hold unless a RAW detection (optical frame, no KF) is this fresh.
-    tracking_raw_pose_topic: /aruco/pose_raw
+    tracking_raw_pose_topic: /object/pose_raw
     tracking_raw_timeout_s: 0.25        # s; ~3 frames at 15 fps
     # Buzz watchdog: tracking stops (gains restored) when any joint's measured
     # torque above 20 Hz exceeds this rms. 2026-09-23 at 1 kHz: normal work

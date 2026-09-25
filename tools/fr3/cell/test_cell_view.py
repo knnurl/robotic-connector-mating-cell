@@ -216,3 +216,12 @@ def test_tracking_on_the_operators_gains_says_so(make):
     assert w.preset.custom_text == 'CUSTOM'
     w, b = make('tracking')                                # an older node: its profile
     assert w.gain_state.text().startswith('tracking profile in force')
+
+
+def test_the_pose_source_dropdown_is_idle_only_and_never_commands_by_itself(app, make):
+    w, b = make('idle')
+    assert w.source.currentText() == 'marker' and w.source.isEnabled()
+    w.render()
+    assert 'pose_source' not in b.names()             # showing is not choosing
+    w, b = make('tracking')
+    assert not w.source.isEnabled() and 'Not available' in w.source.toolTip()

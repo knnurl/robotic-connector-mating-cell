@@ -161,6 +161,17 @@ GRIP_CALL_TIMEOUT_S = 180.0
 # vision_standalone records its own frames while record_dir is set; the
 # panel's REC button sets it beside the bag (PERCEPTION_PLAN Phase 0).
 VISION_PARAMS_SRV = '/aruco_pose_publisher/set_parameters'
+# The object pose contract (roscam/object_contract.py, PERCEPTION_PLAN 2):
+# what the panel, TRACK and GRIP read. The vision node's object_source picks
+# where it comes from; the panel changes it only while the cell is idle.
+POSE_TOPIC = '/object/pose'
+RAW_POSE_TOPIC = '/object/pose_raw'
+POSE_QUALITY_TOPIC = '/object/pose_quality'
+POSE_SOURCES = ('marker',)
+# Predictions never drive committed motion (TRACKING_SPEC Decision 5): ALIGN,
+# like TRACK (tracking_raw_timeout_s), moves only on a raw detection at most
+# this old.
+RAW_MAX_AGE_S = 0.25
 TRACK_STATUS_STALE_S = 1.0
 # Every state but idle: the node drives the arm, is about to, or is still
 # putting back its gain snapshot.

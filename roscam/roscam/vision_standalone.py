@@ -51,6 +51,7 @@ from rclpy.parameter import Parameter
 from roscam.cam_pub import ArucoPosePublisher
 from roscam.connector_pose import ConnectorPoseNode
 from roscam.frame_recorder import FrameRecorder
+from roscam.object_contract import ObjectContract
 from roscam.rs_capture import RsCapture
 
 
@@ -122,6 +123,7 @@ def main(args=None):
     external = [Parameter('source', value='external')]
 
     aruco = ArucoPosePublisher(parameter_overrides=external)
+    ObjectContract(aruco)            # /object/* for the consumers (PERCEPTION_PLAN 2)
 
     icp_node = None
     try:

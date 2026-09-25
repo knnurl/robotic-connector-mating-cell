@@ -152,6 +152,29 @@ off, plus one opt-in:
     `-p capture_fps:=90` — never the driver profile, which would put six
     times the colour traffic on the graph.
 
+## The object pose contract (vision -> TRACK, GRIP, ALIGN)
+
+The vision node (cam_pub or vision_standalone, whichever owns the camera)
+publishes the part's pose on topics that do not depend on where it came from
+(`roscam/object_contract.py`, PERCEPTION_PLAN.md section 2):
+
+| Topic | What |
+|---|---|
+| `/object/pose_raw` | a measurement that passed every gate, optical frame, image stamp; never a prediction |
+| `/object/pose` | filtered, `fr3_link0`; may coast for `max_prediction_s` |
+| `/object/pose_quality` | one DiagnosticArray per processed frame: `source`, `valid`, `compute_ms` |
+
+`fr3_params.yaml` points `tracking_node`, `grip_node` and the panel at them.
+The vision node's `object_source` picks the source; the panel's `source`
+dropdown sets it, only while nothing reads the pose for motion. Today the only
+source is `marker`: the ArUco poses, mirrored unchanged. The marker-free
+estimator (`roscam/object_pose.py`) becomes further sources in the later
+phases. `/aruco/*` stays for hand-eye calibration, `teach_offsets`, target B
+and as ground truth.
+
+Placement: the vision process runs with one BLAS thread, pinned to the
+E-cores (`vision_cpus:=12-19`, `''` to unpin), away from the 1 kHz loop.
+
 ## FR3-specific calibration notes
 
 - **Hand-eye**: `ros2 run roscam handeye_calib --ros-args -p

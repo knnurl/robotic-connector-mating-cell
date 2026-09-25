@@ -17,6 +17,8 @@ SETPOINT_MM_DEFAULT = '10'
 AXES = ['base Z (up)', 'base X', 'base Y', 'tool Z (stroke)']
 OVER_LEAD = ['hold', 'stop', 'clamp']
 OVER_LEAD_DEFAULT = 'hold'
+POSE_SOURCES = ['marker']            # core.POSE_SOURCES (the object pose contract)
+POSE_SOURCE_DEFAULT = 'marker'
 GAIN_LIMITS = {'k_xy': (0.0, 3000.0), 'k_z': (0.0, 3000.0), 'k_rp': (0.0, 300.0),
                'k_yaw': (0.0, 300.0), 'zeta': (0.1, 2.0)}
 GAIN_LABELS = {'k_xy': 'k lateral', 'k_z': 'k tool Z', 'k_rp': 'k roll/pitch',

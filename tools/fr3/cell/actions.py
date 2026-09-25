@@ -81,7 +81,8 @@ class Recorder:
               '/aruco/pose_raw', core.TRACK_STATUS_TOPIC, core.EQUILIBRIUM_TOPIC,
               f'/{core.IMPEDANCE_CONTROLLER}/transition_event',
               '/trajectory_execution_event', '/cell_panel/heartbeat',
-              '/tf', '/tf_static', '/aruco/target_pose_raw', core.GRIP_STATUS_TOPIC]
+              '/tf', '/tf_static', '/aruco/target_pose_raw', core.GRIP_STATUS_TOPIC,
+              core.POSE_TOPIC, core.RAW_POSE_TOPIC, core.POSE_QUALITY_TOPIC]
 
     def __init__(self):
         self.proc, self.t0, self.path = None, None, None
@@ -307,6 +308,8 @@ class Cell:
         s.recover_ready = n.recover_ac.server_is_ready()
         m = n.marker()
         s.marker_age = n.marker_age()
+        s.raw_age = n.raw_age()
+        s.pose_source = n.pose_source()
         if m is not None:
             s.marker = logic.marker_errors(m[0], m[1], p.target_m, p.inplane_target,
                                            p.tol_m, st)
@@ -705,13 +708,27 @@ class Cell:
     def _box_refusal(self, goal):
         return logic.in_box(goal, self.st)
 
+    def _marker_for_motion(self):
+        """(the filtered pose, None) when a raw detection at most
+        RAW_MAX_AGE_S old is behind it, else (None, why). Predictions never
+        drive committed motion (TRACKING_SPEC Decision 5): the filtered pose
+        coasts through short gaps, and ALIGN now gates on raw as TRACK does."""
+        m = self.n.marker()
+        if m is None:
+            return None, 'marker not visible'
+        age = self.n.raw_age()
+        if age is None or age > core.RAW_MAX_AGE_S:
+            return None, ('no raw pose yet' if age is None else
+                          f'no raw pose for {age * 1000:.0f} ms - the pose is a prediction')
+        return m, None
+
     def translate(self, quiet=False):
         p = self.params
         if self.R is None:
             return False, 'no calibration loaded - reload it in settings'
-        m = self.n.marker()
+        m, why = self._marker_for_motion()
         if m is None:
-            return False, 'marker not visible'
+            return False, why
         err = m[0] - np.array([0, 0, p.target_m])
         d = self.R.T @ err
         nrm = np.linalg.norm(d)
@@ -741,9 +758,9 @@ class Cell:
         p = self.params
         if self.R is None:
             return False, 'no calibration loaded - reload it in settings'
-        m = self.n.marker()
+        m, why = self._marker_for_motion()
         if m is None:
-            return False, 'marker not visible'
+            return False, why
         mz = m[1][:, 2]
         tgt = np.array([0, 0, -1.0]) if mz[2] < 0 else np.array([0, 0, 1.0])
         ang = np.arccos(np.clip(mz @ tgt, -1, 1))
@@ -788,9 +805,9 @@ class Cell:
             return True, 'in-plane target is off'
         if self.R is None:
             return False, 'no calibration loaded - reload it in settings'
-        m = self.n.marker()
+        m, why = self._marker_for_motion()
         if m is None:
-            return False, 'marker not visible'
+            return False, why
         cur = core.inplane_angle(m[1])
         if cur is None:
             return False, 'in-plane angle unavailable'
@@ -843,9 +860,9 @@ class Cell:
             return False, 'no calibration loaded - reload it in settings'
         if p.floor_m is None:
             return False, 'REFUSING: set a TCP Z floor first'
-        m0 = self.n.marker()
+        m0, why = self._marker_for_motion()
         if m0 is None:
-            return False, 'marker not visible'
+            return False, why
         self.last_outcome = None
         err0 = float(np.linalg.norm(m0[0] - np.array([0, 0, p.target_m])))
         cap = int(min(core.MAX_ITERS_ABS, max(60, 3 * err0 / p.step_m + 30)))
@@ -885,10 +902,10 @@ class Cell:
                 return self.gate_fault or 'stopped'
             if self.n.gate_edges != seen_edges:
                 seen_edges, phase = self.n.gate_edges, None
-            m = self.n.marker()
+            m, why = self._marker_for_motion()
             if m is None:
-                self.say('ABORT: marker lost / stale')
-                return 'marker_lost'
+                self.say(f'ABORT: {why}')
+                return 'marker_lost' if why == 'marker not visible' else 'raw_stale'
             low = self.n.lowest_link(core.FLOOR_LINKS)
             if p.floor_m is not None and low is not None and low[1] < p.floor_m:
                 self.say(f'ABORT: Z FLOOR - {low[0]} at {low[1]*1000:.1f} mm < '
@@ -1412,6 +1429,22 @@ class Cell:
         self.n.refresh_now()                      # the node put its snapshot back
         self.say(f'STOP TRACKING: {msg}')
         self.trace({'rec': 'track_stop', 'ok': ok, 'msg': msg})
+        return ok, msg
+
+    def set_pose_source(self, source):
+        """The vision node's object_source (the object pose contract). Only
+        while nothing reads the pose for motion (logic.enable 'pose_source'),
+        checked again here: the view's greyed control is a hint, not a lock."""
+        if source not in core.POSE_SOURCES:
+            return False, f'unknown pose source {source!r}'
+        if self.tracking:
+            return False, 'tracking - end TRACK first'
+        g = self.n.grip_status() or {}
+        if g.get('state') == 'busy' or g.get('holding') == 'true':
+            return False, 'grip_node is running a sequence or holding a cube'
+        ok, msg = self.n.set_pose_source(source)
+        self.say(f'pose source -> {source}' + ('' if ok else f': NOT set ({msg})'))
+        self.trace({'rec': 'pose_source', 'source': source, 'ok': ok, 'msg': msg})
         return ok, msg
 
     def write_policy(self, v):

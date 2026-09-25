@@ -60,6 +60,7 @@ from tf2_ros import TransformException
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 
+from roscam.object_contract import ObjectContract
 from roscam.plane_normal import (disambiguate_by_normal, fuse_orientation,
                                  marker_plane_normal, range_scale, solve_square_by_depth)
 from roscam.pose_kf import PoseKF, compose_pose
@@ -279,6 +280,11 @@ class ArucoPosePublisher(Node):
         # embedding process (vision_standalone's recorder) sees exactly what
         # went out, per frame, without subscribing to itself.
         self.on_publish = None
+        # Further listeners: on every pose publish (same arguments), and on
+        # every processed frame as (header, compute_ms) - the object pose
+        # contract (object_contract.py) mirrors and reports through these.
+        self.publish_hooks = []
+        self.frame_hooks = []
         self.target_id = int(self.get_parameter('target_marker_id').value)
         if self.target_id >= 0 and self.target_id in self.board_ids:
             # An optional feature must never take the tracked marker down.
@@ -520,6 +526,7 @@ class ArucoPosePublisher(Node):
         """
         if self.camera_matrix is None:
             return
+        t_frame = time.perf_counter()
 
         stamp = header.stamp.sec + header.stamp.nanosec * 1e-9
         dt = 0.0 if self.last_frame_stamp is None else stamp - self.last_frame_stamp
@@ -611,6 +618,13 @@ class ArucoPosePublisher(Node):
             debug_msg = self.bridge.cv2_to_imgmsg(color_image, encoding='bgr8')
             debug_msg.header = header
             self.debug_pub.publish(debug_msg)
+
+        compute_ms = (time.perf_counter() - t_frame) * 1e3
+        for hook in self.frame_hooks:
+            try:
+                hook(header, compute_ms)
+            except Exception as e:                          # noqa: BLE001
+                self.get_logger().warn(f'frame hook failed: {e}', throttle_duration_sec=5.0)
 
     def _publish_target(self, corners, ids, header, depth_m, color_image):
         flat = ids.flatten()
@@ -717,17 +731,19 @@ class ArucoPosePublisher(Node):
         out.header = header  # camera optical frame, image timestamp
         self._fill_pose(out, t, q)
         publisher.publish(out)
-        if self.on_publish is not None:
+        for hook in ([self.on_publish] if self.on_publish is not None else []) \
+                + self.publish_hooks:
             try:
-                self.on_publish(publisher.topic_name, header, t, q)
+                hook(publisher.topic_name, header, t, q)
             except Exception as e:                          # noqa: BLE001
-                self.get_logger().warn(f'on_publish hook failed: {e}',
+                self.get_logger().warn(f'publish hook failed: {e}',
                                        throttle_duration_sec=5.0)
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = ArucoPosePublisher()
+    ObjectContract(node)             # /object/* for the consumers (PERCEPTION_PLAN 2)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

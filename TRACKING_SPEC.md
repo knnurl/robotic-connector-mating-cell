@@ -202,8 +202,19 @@ stay the hard safety bound. Remove both from `kConfigureOnlyParams`.
 
 ## 5. The tracking node
 
-**Inputs:** `/aruco/pose` (filtered marker pose), TF, the current TCP pose
-from `/franka_robot_state_broadcaster/robot_state`.
+**Inputs:** `/object/pose` (the filtered object pose), TF, the current TCP
+pose from `/franka_robot_state_broadcaster/robot_state`, and
+`/object/pose_raw` for the raw-freshness gate (Decision 5).
+
+> **Pose input: the object pose contract** (`roscam/object_contract.py`,
+> PERCEPTION_PLAN section 2). The node reads `pose_topic` and
+> `tracking_raw_pose_topic` from `fr3_params.yaml`, which point at
+> `/object/pose` and `/object/pose_raw`. The vision node's `object_source`
+> decides what fills them. With `marker` (the only source until the
+> marker-free phases land), they are the ArUco poses mirrored unchanged, so
+> everything below holds as written for `/aruco/pose`. The goal is to track
+> the part without the marker; each step there is a parameter change here,
+> not a code change.
 **Output:** `~/equilibrium_pose` at **50 Hz**, base frame.
 
 Per cycle:

@@ -161,6 +161,8 @@ class LiveBackend:
         elif name == 'policy':
             self.set_param('over_lead', a[0])
             threading.Thread(target=c.write_policy, args=(a[0],), daemon=True).start()
+        elif name == 'pose_source':
+            c.run(name, c.set_pose_source, a[0])
         elif name == 'gate':
             c.set_gate(a[0])
         elif name == 'torque_attempt':

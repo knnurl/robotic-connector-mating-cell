@@ -55,6 +55,7 @@ class Settings:
     state_stale_s: float = 0.3          # core.ROBOT_STATE_STALE_S
     driver_down_s: float = 2.0          # core.DRIVER_DOWN_S; also voids PRE-FLIGHT
     pose_stale_s: float = 0.5           # core.POSE_STALE_S
+    raw_max_age_s: float = 0.25         # core.RAW_MAX_AGE_S (ALIGN needs a raw pose)
     image_stale_s: float = 1.5
     track_status_stale_s: float = 1.0   # core.TRACK_STATUS_STALE_S
     rt_ok: float = 0.99
@@ -134,7 +135,9 @@ class Snap:
     moveit_up: bool = False
     recover_ready: bool = False         # franka error-recovery server reachable
     # vision
-    marker_age: float = None            # s since /aruco/pose; None = never
+    marker_age: float = None            # s since /object/pose; None = never
+    raw_age: float = None               # s since /object/pose_raw; None = never
+    pose_source: str = None             # the vision node's object_source (/object/pose_quality)
     marker: dict = None                 # marker_errors(), when fresh
     marker_why: str = None
     image_age: float = None
@@ -334,10 +337,16 @@ def enable(s, st):
     blk = gate_block(s, st)
     gate = (blk is None, f'gate: {blk[0]}' if blk else '')
     marker = (marker_fresh(s, st), s.marker_why or 'marker not visible or stale')
+    # Predictions never drive committed motion (TRACKING_SPEC Decision 5):
+    # the filtered pose coasts through short gaps, so ALIGN also needs a raw
+    # detection this fresh, as TRACK does in the node.
+    raw = (s.raw_age is not None and s.raw_age <= st.raw_max_age_s,
+           'no raw pose yet' if s.raw_age is None else
+           f'no raw pose for {s.raw_age * 1000:.0f} ms - the pose is a prediction')
     en = {}
 
     align = [idle, state, err, (s.moveit_up, 'MoveIt is down'), arm, gate,
-             (s.calib == 'loaded', f'no calibration ({s.calib})'), marker]
+             (s.calib == 'loaded', f'no calibration ({s.calib})'), marker, raw]
     en['translate'] = _first(align)
     en['level'] = _first(align)
     en['inplane'] = _first(align + [(s.inplane_target is not None,
@@ -441,6 +450,11 @@ def enable(s, st):
     en['recover'] = _first([idle, (s.recover_ready, 'error-recovery server not '
                                    'available - relaunch terminal 1'),
                             (robot_error(s, st), 'no robot error to recover from')])
+    # The pose source changes only with nothing that reads it moving: the
+    # switch resets the object filter and makes a raw gap.
+    en['pose_source'] = _first([idle, (not trk, 'tracking - end TRACK first'),
+                                (s.grip.get('state') != 'busy', 'grip_node is running a sequence'),
+                                (not holding_cube, 'holding a cube - PLACE it first')])
     en['reload_calib'] = _first([idle])
     en['auto_floor'] = _first([idle, marker, (s.tcp is not None, 'no TCP pose')])
     en['teach'] = _first([idle, (s.tcp is not None, 'no TCP pose')])
@@ -520,11 +534,12 @@ def banner(s, st):
                       f'robot is {ROBOT_MODES.get(s.robot_mode, s.robot_mode)}')
     vision_needed = ctl == 'arm' or tracking(s, st) or holding(s)
     if vision_needed and not marker_fresh(s, st):
+        src = f' ({s.pose_source})' if s.pose_source else ''
         if s.marker_age is None:
-            text = s.marker_why or 'no marker pose yet - is cam_pub running?'
-            return Banner('vision', WARN, 'NO MARKER', text)
-        return Banner('vision', WARN, 'VISION STALE',
-                      f'last marker pose {s.marker_age*1000:.0f} ms ago'
+            text = s.marker_why or f'no object pose{src} yet - is the vision node running?'
+            return Banner('vision', WARN, 'NO POSE', text)
+        return Banner('vision', WARN, 'POSE STALE',
+                      f'last object pose{src} {s.marker_age*1000:.0f} ms ago'
                       + (f' - {s.marker_why}' if s.marker_why else ''))
     tr = s.track if track_live(s, st) else {}
     if tr.get('state') == 'holding' and tr.get('reason'):
@@ -624,14 +639,15 @@ def chips(s, st):
     relevant = ctl == 'impedance' or s.torque_attempted
     pre = Chip('PRE-FLIGHT', s.preflight,
                NORMAL if s.preflight == 'done' or not relevant else WARN)
+    src = f' · {s.pose_source.upper()}' if s.pose_source else ''
     if not s.camera_on and s.marker_age is None:
         vis = Chip('VISION', 'off', NORMAL)
     elif s.marker_age is None:
-        vis = Chip('VISION', 'no marker', WARN)
+        vis = Chip('VISION', f'no pose{src}', WARN)
     elif marker_fresh(s, st):
-        vis = Chip('VISION', f'{s.marker_age*1000:.0f} ms', NORMAL)
+        vis = Chip('VISION', f'{s.marker_age*1000:.0f} ms{src}', NORMAL)
     else:
-        vis = Chip('VISION', f'stale {s.marker_age*1000:.0f} ms', WARN)
+        vis = Chip('VISION', f'stale {s.marker_age*1000:.0f} ms{src}', WARN)
     blk = gate_block(s, st)
     if blk is not None and blk[1]:
         gate = Chip('GATE', 'reflex', FAULT)

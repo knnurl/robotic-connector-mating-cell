@@ -23,7 +23,7 @@ import numpy as np
 import rclpy
 import yaml
 from controller_manager_msgs.srv import ListControllers, SwitchController
-from diagnostic_msgs.msg import DiagnosticStatus
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus
 from franka_msgs.action import ErrorRecovery
 from franka_msgs.msg import FrankaRobotState
 from franka_msgs.srv import SetForceTorqueCollisionBehavior, SetLoad
@@ -60,7 +60,7 @@ from state_relay import start_throttle, stop_throttle   # noqa: E402
 HEARTBEAT_TOPIC = '~/heartbeat'          # -> /cell_panel/heartbeat
 RECOVERY_ACTION = '/action_server/error_recovery'
 DESCRIPTION_TOPIC = '/robot_description'
-RAW_POSE_TOPIC = '/aruco/pose_raw'
+RAW_POSE_TOPIC = core.RAW_POSE_TOPIC      # the object pose contract (core.py)
 # The driver's executor and DDS threads run at FIFO 99, above its 1 kHz
 # control loop (FIFO 50), so every service call into it competes with the
 # loop (2026-09-24: RT success dips 4x more often while polling at 2 Hz).
@@ -171,7 +171,7 @@ class CellNodeBase(Node):
         self._pose = None          # (pos(3), R, stamp_s, frame_id) as received
         self.marker_why = None     # why marker() cannot use it, or None
         self._joints = None        # (names, positions)
-        self.create_subscription(PoseStamped, '/aruco/pose', self._cb, 10)
+        self.create_subscription(PoseStamped, core.POSE_TOPIC, self._cb, 10)
         self.create_subscription(JointState, '/joint_states',
                                  self._joint_cb, 10)
 
@@ -676,6 +676,17 @@ class CellNodeBase(Node):
             return True, 'ok'
         return False, (r.reason or 'refused')
 
+    def set_pose_source(self, source, timeout_s=3.0):
+        """The vision node's object_source (the object pose contract)."""
+        if not self.vision_params_cli.service_is_ready():
+            return False, 'the vision node is not running'
+        req = SetParameters.Request(parameters=[_param_msg('object_source', str(source))])
+        fut = self.vision_params_cli.call_async(req)
+        if not self._wait(fut, timeout_s) or fut.result() is None:
+            return False, 'no answer from the vision node'
+        r = fut.result().results[0]
+        return bool(r.successful), ('ok' if r.successful else r.reason or 'refused')
+
     def set_grip_params(self, values, timeout_s=5.0):
         """The drawer's cube size, force and box, all or none, before GRIP."""
         if not self.grip_params_cli.service_is_ready():
@@ -758,8 +769,9 @@ class CellNode(CellNodeBase):
     def __init__(self):
         super().__init__()
         self._extra = None          # (q, dq, errors, last_errors)
-        self._marker_at = None      # monotonic arrival of /aruco/pose
+        self._marker_at = None      # monotonic arrival of /object/pose
         self._raw_at = None
+        self._pose_source = None    # object_source, as /object/pose_quality says
         self._image_at = None
         self._last_marker = None    # (pos, frame) for the jump check
         self._jumps = collections.deque(maxlen=64)   # (monotonic, mm)
@@ -769,6 +781,8 @@ class CellNode(CellNodeBase):
         self._limits_source = 'franka_description' if self._limits else None
 
         self.create_subscription(PoseStamped, RAW_POSE_TOPIC, self._raw_cb, 10)
+        self.create_subscription(DiagnosticArray, core.POSE_QUALITY_TOPIC,
+                                 self._quality_cb, 10)
         self.create_subscription(
             TransitionEvent, f'/{IMPEDANCE_CONTROLLER}/transition_event',
             self._transition_cb, 10)
@@ -817,6 +831,12 @@ class CellNode(CellNodeBase):
     def _raw_cb(self, _m):
         with self._lock:
             self._raw_at = time.monotonic()
+
+    def _quality_cb(self, m):
+        src = next((kv.value for st in m.status for kv in st.values if kv.key == 'source'),
+                   None)
+        with self._lock:
+            self._pose_source = src
 
     def _image_cb(self, m):
         super()._image_cb(m)
@@ -907,6 +927,10 @@ class CellNode(CellNodeBase):
     def raw_age(self):
         with self._lock:
             return self._age(self._raw_at)
+
+    def pose_source(self):
+        with self._lock:
+            return self._pose_source
 
     def image_age(self):
         with self._lock:

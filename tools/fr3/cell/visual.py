@@ -76,6 +76,7 @@ BASE = dict(state_age=0.02, robot_mode=L.MODE_MOVE, rt_rate=0.999, tcp=(0.452, 0
             force=(0.3, -0.2, -0.4), dq_max=0.001, joint_pct=(4, 42.0),
             controllers={ARM: 'active', IMP: 'inactive'}, floating=False, params_ok=True,
             moveit_up=True, recover_ready=True, marker_age=0.041, image_age=0.12,
+            raw_age=0.041, pose_source='marker',
             calib='loaded', track_age=0.1, track={'state': 'idle', 'policy': 'hold'},
             track_node_up=True, inplane_target=90.0,
             poses={'home': True, 'pre_align': False})

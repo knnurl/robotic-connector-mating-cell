@@ -73,6 +73,8 @@ def test_choices_match_core():
     assert C.AXES == core.AXIS_CHOICES
     assert C.OVER_LEAD == core.OVER_LEAD_CHOICES
     assert C.OVER_LEAD_DEFAULT == core.OVER_LEAD_DEFAULT
+    assert C.POSE_SOURCES == list(core.POSE_SOURCES)
+    assert C.POSE_SOURCE_DEFAULT in core.POSE_SOURCES
     assert C.GAIN_LIMITS == core.GAIN_LIMITS
     assert C.MAX_LEAD_MM == core.MAX_LEAD_MM
     assert C.CONTACT_N == core.CONTACT_WRENCH[0] and C.REFLEX_N == core.COLLISION_WRENCH[0]
@@ -90,6 +92,7 @@ def test_settings_copied_from_core_match():
     assert ST.state_stale_s == core.ROBOT_STATE_STALE_S
     assert ST.driver_down_s == core.DRIVER_DOWN_S
     assert ST.pose_stale_s == core.POSE_STALE_S
+    assert ST.raw_max_age_s == core.RAW_MAX_AGE_S
     assert ST.track_status_stale_s == core.TRACK_STATUS_STALE_S
     assert ST.rot_tol_deg == core.ROT_TOL_DEG and ST.inplane_tol_deg == core.INPLANE_TOL_DEG
     assert ST.position_ceiling_pct == core.CEIL_SPEED_PCT
@@ -413,3 +416,17 @@ def test_the_panel_offers_cubes_the_grip_node_accepts():
     assert grip_logic.cube_problem(0.073, margin) is not None      # and nothing past it
     assert grip_logic.cube_problem(0.010, margin) is None          # the drawer's bottom too
     assert grip_logic.max_cube_m(0.006) == 0.0                     # a margin that allows none
+
+
+def test_the_pose_topics_are_the_object_contracts():
+    """tracking_node, grip_node and the panel read the object pose contract
+    the vision node publishes (roscam/object_contract.py); ALIGN's raw
+    freshness is TRACK's."""
+    from roscam import object_contract as oc
+    prm = yaml.safe_load((core.FR3 / 'fr3_params.yaml').read_text())['/**']['ros__parameters']
+    assert prm['pose_topic'] == core.POSE_TOPIC == oc.POSE_TOPIC
+    assert prm['raw_pose_topic'] == prm['tracking_raw_pose_topic'] == core.RAW_POSE_TOPIC \
+        == oc.RAW_POSE_TOPIC
+    assert core.POSE_QUALITY_TOPIC == oc.QUALITY_TOPIC
+    assert tuple(core.POSE_SOURCES) == tuple(oc.SOURCES)
+    assert core.RAW_MAX_AGE_S == prm['tracking_raw_timeout_s']

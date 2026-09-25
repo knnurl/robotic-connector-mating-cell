@@ -95,6 +95,7 @@ ros2 control list_controllers      # fr3_arm_controller active,
                                    # cartesian_impedance_stroke_controller inactive
 ros2 topic hz /aruco/debug_image   # ~4-5 Hz once the panel subscribes
 ros2 topic hz /aruco/pose          # only while the marker is actually seen
+ros2 topic hz /object/pose         # the same, as TRACK/GRIP/ALIGN read it (object_source marker)
 ```
 
 If `debug_image` flows but `pose` is silent, the camera is fine and the

@@ -573,6 +573,11 @@ class MainWindow(QMainWindow):
         hdr = QHBoxLayout()
         hdr.addWidget(lab('CAMERA', 'section'))
         hdr.addStretch(1)
+        hdr.addWidget(lab('source', 'caption'))
+        self.source = self._combo(C.POSE_SOURCES, C.POSE_SOURCE_DEFAULT,
+                                  lambda t: self.b.command('pose_source', t), 80)
+        hdr.addWidget(self.source)
+        hdr.addSpacing(8)
         self.cam_age = lab('', 'caption')
         hdr.addWidget(self.cam_age)
         cv.addLayout(hdr)
@@ -1439,6 +1444,7 @@ class MainWindow(QMainWindow):
         self.calib_chip.set(res, {'loaded': 'normal', 'waiting': 'warn'}.get(cstate, 'fault'))
         self._render_calib(meta, cstate)
 
+        self._render_source(s, en)
         self._render_speed(s, en, m)
         self._render_tspeed(s, en, trk)
         self._render_grip(s)
@@ -1497,6 +1503,18 @@ class MainWindow(QMainWindow):
             if name == 'track_fast' and e.ok and s.track_fast:
                 state = 'warn'                # raised speed: amber, shape and word
             btn.show_state(state, e.why, text)
+
+    def _render_source(self, s, en):
+        """The pose source: changeable only while nothing reads the pose for
+        motion, and always showing what the vision node reports."""
+        e = en['pose_source']
+        self.source.setEnabled(e.ok)
+        self.source.setToolTip('Where the object pose comes from (the vision node\'s '
+                               'object_source)' if e.ok else f'Not available: {e.why}')
+        if s.pose_source and s.pose_source != self.source.currentText():
+            self.source.blockSignals(True)      # showing, not choosing: no command
+            self.source.setCurrentText(s.pose_source)
+            self.source.blockSignals(False)
 
     def _render_speed(self, s, en, m):
         pct = self.speed.value()

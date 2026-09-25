@@ -81,6 +81,11 @@ def generate_launch_description():
                               description='SDK spatial filter on the depth'),
         DeclareLaunchArgument('capture_exposure_us', default_value='-1',
                               description='locked exposure in us (-1 = auto)'),
+        # The vision process on the E-cores (PERCEPTION_PLAN section 4): the
+        # 1 kHz control loop and its driver keep the P-cores to themselves.
+        DeclareLaunchArgument('vision_cpus', default_value='12-19',
+                              description="taskset CPU list for the vision process "
+                                          "('' = not pinned)"),
         DeclareLaunchArgument('range_source', default_value='depth',
                               description='marker distance: depth = the ArUco ray onto the '
                                           'depth plane around the marker; aruco = ArUco alone '
@@ -224,8 +229,10 @@ def _vision(context):
     # one BLAS thread, at the same speed).
     one_thread = {v: '1' for v in ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS',
                                    'MKL_NUM_THREADS')}
+    cpus = arg('vision_cpus').strip()
     return [Node(package='roscam', executable=executable, output='screen',
-                 parameters=[params], additional_env=one_thread)]
+                 parameters=[params], additional_env=one_thread,
+                 prefix=f'taskset -c {cpus}' if cpus else None)]
 
 
 def _tracking(params_file):

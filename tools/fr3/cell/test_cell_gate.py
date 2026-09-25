@@ -420,3 +420,44 @@ def test_a_box_excursion_while_tracking_warns_and_never_stops(monkeypatch):
     assert threads == [] and 'holds at the box' in said[-1]
     actions.Cell._watch_box(cell, types.SimpleNamespace(tcp=(0.95, 0.0, 0.4)))
     assert len(said) == 1                                  # once per excursion
+
+
+# ------------------------------------------------ the object pose contract
+
+def _align_cell(raw_age):
+    """Enough of a Cell for one ALIGN step: a visible, filtered marker pose;
+    the raw detection behind it raw_age seconds old (None = never)."""
+    import numpy as np
+    n = types.SimpleNamespace(marker=lambda: (np.array([0.0, 0.0, 0.2]), np.eye(3), 0.0, 'cam'),
+                              raw_age=lambda: raw_age)
+    cell = types.SimpleNamespace(n=n, R=np.eye(3), st=actions.logic.Settings(),
+                                 params=types.SimpleNamespace(target_m=0.1, inplane_target=90.0))
+    cell._marker_for_motion = lambda: actions.Cell._marker_for_motion(cell)
+    return cell
+
+
+def test_align_steps_refuse_a_pose_with_no_fresh_raw_detection_behind_it():
+    """Predictions never drive committed motion: ALIGN checks it again at
+    the move, not only in the view's enable."""
+    for age in (None, core.RAW_MAX_AGE_S + 0.1):
+        cell = _align_cell(age)
+        for step in (actions.Cell.translate, actions.Cell.level, actions.Cell.inplane):
+            ok, msg = step(cell)
+            assert not ok and 'raw pose' in msg, (step.__name__, msg)
+    m, why = actions.Cell._marker_for_motion(_align_cell(0.05))
+    assert m is not None and why is None
+
+
+def test_the_pose_source_is_refused_while_tracking_or_gripping():
+    set_to = []
+    n = types.SimpleNamespace(grip_status=lambda: {'state': 'idle'},
+                              set_pose_source=lambda s: (set_to.append(s) or (True, 'ok')))
+    cell = types.SimpleNamespace(n=n, tracking=False, say=lambda m: None, trace=lambda r: None)
+    assert actions.Cell.set_pose_source(cell, 'marker')[0] and set_to == ['marker']
+    assert not actions.Cell.set_pose_source(cell, 'nonsense')[0]
+    cell.tracking = True
+    assert not actions.Cell.set_pose_source(cell, 'marker')[0]
+    cell.tracking = False
+    n.grip_status = lambda: {'state': 'idle', 'holding': 'true'}
+    assert not actions.Cell.set_pose_source(cell, 'marker')[0]
+    assert set_to == ['marker']                       # nothing sent after the first

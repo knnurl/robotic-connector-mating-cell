@@ -36,7 +36,7 @@ import rclpy  # noqa: E402
 import yaml  # noqa: E402
 from controller_manager_msgs.msg import ControllerState  # noqa: E402
 from controller_manager_msgs.srv import ListControllers, SwitchController  # noqa: E402
-from diagnostic_msgs.msg import DiagnosticStatus, KeyValue  # noqa: E402
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue  # noqa: E402
 from franka_msgs.action import ErrorRecovery  # noqa: E402
 from franka_msgs.msg import FrankaRobotState  # noqa: E402
 from franka_msgs.srv import SetForceTorqueCollisionBehavior, SetLoad  # noqa: E402
@@ -202,6 +202,10 @@ class Arm(Node):
         self.js_pub = self.create_publisher(JointState, '/joint_states', 1)
         self.pose_pub = self.create_publisher(PoseStamped, '/aruco/pose', 1)
         self.raw_pub = self.create_publisher(PoseStamped, '/aruco/pose_raw', 1)
+        # the object pose contract, source 'marker': the same messages
+        self.obj_pose_pub = self.create_publisher(PoseStamped, '/object/pose', 1)
+        self.obj_raw_pub = self.create_publisher(PoseStamped, '/object/pose_raw', 1)
+        self.quality_pub = self.create_publisher(DiagnosticArray, '/object/pose_quality', 1)
         self.img_pub = self.create_publisher(Image, '/aruco/debug_image', 1)
         latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -304,10 +308,12 @@ class Arm(Node):
 
     def _vision(self):
         cam, marker, faults = self.cam()
-        if 'vision_stale' in faults or 'marker_lost' in faults:
+        if 'vision_stale' in faults:                # the vision node is down: silence
             return
+        now = self.get_clock().now().to_msg()
         t_cm = np.linalg.inv(cam) @ marker
-        if not self.visible(t_cm):
+        if 'marker_lost' in faults or not self.visible(t_cm):
+            self._quality(now, False)
             return
         m = marker.copy()
         m[:3, 3] += np.random.normal(0.0, 0.0002, 3)
@@ -315,9 +321,22 @@ class Arm(Node):
             m[:3, 3] += [0.03, 0.0, 0.0]
             with self.w.lock:
                 self.w.faults.discard('pose_jump')
-        now = self.get_clock().now().to_msg()
-        self.pose_pub.publish(pose_msg(m, 'fr3_link0', now))
-        self.raw_pub.publish(pose_msg(t_cm, CALIB['child_frame'], now))
+        pose, raw = pose_msg(m, 'fr3_link0', now), pose_msg(t_cm, CALIB['child_frame'], now)
+        self.pose_pub.publish(pose)
+        self.raw_pub.publish(raw)
+        self.obj_pose_pub.publish(pose)
+        self.obj_raw_pub.publish(raw)
+        self._quality(now, True)
+
+    def _quality(self, stamp, valid):
+        st = DiagnosticStatus(level=DiagnosticStatus.OK if valid else DiagnosticStatus.WARN,
+                              name='object_pose', hardware_id='marker',
+                              message='' if valid else 'no raw pose this frame')
+        st.values = [KeyValue(key='source', value='marker'),
+                     KeyValue(key='valid', value='true' if valid else 'false')]
+        arr = DiagnosticArray(status=[st])
+        arr.header.stamp = stamp
+        self.quality_pub.publish(arr)
 
     def _image(self):
         """Subscribe-gated like cam_pub: nothing is drawn with no reader."""
