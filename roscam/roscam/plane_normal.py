@@ -281,3 +281,27 @@ def disambiguate_by_normal(candidate_normals, reference_normal):
         dots.append(-np.inf if nn < 1e-12 else float((n / nn) @ ref))
     i = int(np.argmax(dots))
     return i, dots[i]
+
+
+def solve_square_by_depth(obj_pts, img_pts, camera_matrix, dist_coeffs, depth_m,
+                          scale=1.6):
+    """(rvec, tvec, depth_normal) of a square marker whose IPPE mirror
+    ambiguity is resolved by the depth plane alone - for a STATIC marker (e.g.
+    a place target on the table), where there is no history to lock in on.
+    The depth normal comes back too: IPPE's out-of-plane angle is the badly
+    conditioned part, so callers publish fuse_orientation(R, normal), as the
+    tracked marker does. None if there is no depth plane to decide by, or the
+    solve fails; a marker that is never guessed is better than one that is
+    sometimes the mirror."""
+    fit = marker_plane_normal(depth_m, img_pts, camera_matrix[0, 0], camera_matrix[1, 1],
+                              camera_matrix[0, 2], camera_matrix[1, 2], scale=scale)
+    if fit is None:
+        return None
+    n_sol, rvecs, tvecs, _ = cv2.solvePnPGeneric(
+        obj_pts, img_pts, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_IPPE_SQUARE)
+    if not n_sol:
+        return None
+    pick = disambiguate_by_normal([cv2.Rodrigues(r)[0][:, 2] for r in rvecs], fit['normal'])
+    if pick is None:
+        return None
+    return rvecs[pick[0]], tvecs[pick[0]], fit['normal']

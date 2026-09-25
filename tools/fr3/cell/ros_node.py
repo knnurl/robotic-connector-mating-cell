@@ -48,7 +48,8 @@ from core import (COLLISION_TORQUE_NM, COLLISION_WRENCH, CONTACT_TORQUE_NM,
                   ROBOT_STATE_RELAY, ROBOT_STATE_RELAY_HZ, ROBOT_STATE_TOPIC,
                   TRACK_CALL_TIMEOUT_S, TRACK_PARAMS_SRV, TRACK_PARAM_SRV,
                   TRACK_START_SRV, TRACK_STATUS_TOPIC, TRACK_STOP_SRV, q2R,
-                  GRIP_SRV, PLACE_SRV, GRIP_STOP_SRV, GRIP_PARAMS_SRV, GRIP_STATUS_TOPIC,
+                  GRIP_SRV, PLACE_SRV, PLACE_AT_SRV, GRIP_STOP_SRV, GRIP_PARAMS_SRV,
+                  GRIP_STATUS_TOPIC,
                   run_resumable)
 
 sys.path.insert(0, str(core.FR3))
@@ -220,6 +221,7 @@ class CellNodeBase(Node):
                                                   TRACK_PARAM_SRV)
         self.grip_cli = self.create_client(Trigger, GRIP_SRV)
         self.place_cli = self.create_client(Trigger, PLACE_SRV)
+        self.place_at_cli = self.create_client(Trigger, PLACE_AT_SRV)
         self.grip_stop_cli = self.create_client(Trigger, GRIP_STOP_SRV)
         self.grip_params_cli = self.create_client(SetParametersAtomically, GRIP_PARAMS_SRV)
         self._grip_status = None   # (fields, monotonic stamp)

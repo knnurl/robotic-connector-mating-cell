@@ -317,6 +317,10 @@ class Cell:
         s.track_node_up = n.track_start_cli.service_is_ready()
         s.grip_node_up = n.grip_cli.service_is_ready()
         s.grip = n.grip_status() or {}
+        try:
+            s.grip_target_age = max(0.0, time.time() - float(s.grip['target_t']))
+        except (KeyError, TypeError, ValueError):
+            s.grip_target_age = None
         s.grip_cube_mm = p.grip_cube_mm
         s.busy = self.busy
         s.preflight = self.preflight
@@ -496,7 +500,7 @@ class Cell:
         """PAUSE / RESUME. Position: the Tk panel's pause (halt, keep the run, resume
         from rest). Torque: pin the equilibrium where the arm is; while
         tracking there is no pause interface (TODO C3), so it stops tracking."""
-        if self.busy in ('grip', 'place'):
+        if self.busy in ('grip', 'place', 'place_b'):
             self.n.grip_stop()
             self.say(f'PAUSE during {self.busy.upper()}: grip_node has no pause - stopped it; '
                      'it holds where the arm is. Press it again to redo it from the start.')
@@ -540,7 +544,7 @@ class Cell:
             self.say('stop after current move: nothing is running (a setpoint '
                      'glide always runs to its end)')
             return
-        if self.busy in ('grip', 'place'):
+        if self.busy in ('grip', 'place', 'place_b'):
             self.say(f'stop after current move: {self.busy.upper()} is one move and runs to '
                      'its end - STOP NOW stops it now')
             return
@@ -1335,8 +1339,7 @@ class Cell:
         self.setpoint = None
         ok, msg = self.n.set_grip_params({
             'grip_cube_m': p.grip_cube_mm / 1000.0, 'grip_force_n': float(p.grip_force_n),
-            'tracking_box_x_m': list(self.st.box_x), 'tracking_box_y_m': list(self.st.box_y),
-            'tracking_box_z_max_m': float(self.st.box_z_max)})
+            **self._grip_box()})
         if not ok:
             return False, f'could not hand the cube size to {core.GRIP_NODE} ({msg})'
         self.open_trace()
@@ -1351,6 +1354,32 @@ class Cell:
         self.say(f'GRIP: {msg}')
         return ok, msg
 
+    def _grip_box(self):
+        """The drawer's box as grip_node's parameters: sent before EVERY
+        sequence, so a box narrowed after GRIP binds PLACE too."""
+        return {'tracking_box_x_m': list(self.st.box_x), 'tracking_box_y_m': list(self.st.box_y),
+                'tracking_box_z_max_m': float(self.st.box_z_max)}
+
+    def place_at(self):
+        """PLACE AT B: carry the held cube to target marker B and set it down."""
+        self.abort = self.stopped = False
+        why = self.blocked()
+        if why is not None:
+            return False, why
+        if self.tracking:
+            return False, 'end TRACK first - PLACE AT B and TRACK both drive the equilibrium'
+        ok, msg = self.n.set_grip_params(self._grip_box())
+        if not ok:
+            return False, f'could not hand the workspace box to {core.GRIP_NODE} ({msg})'
+        if self.abort:
+            return False, 'PLACE AT B not started: STOP NOW'
+        self.setpoint = None
+        ok, msg = self.n.call_trigger(self.n.place_at_cli, core.GRIP_CALL_TIMEOUT_S, 'grip_node')
+        self.setpoint = None
+        self.trace({'rec': 'place_at', 'ok': ok, 'msg': msg})
+        self.say(f'PLACE AT B: {msg}')
+        return ok, msg
+
     def place(self):
         self.abort = self.stopped = False
         why = self.blocked()
@@ -1358,6 +1387,11 @@ class Cell:
             return False, why
         if self.tracking:
             return False, 'end TRACK first - PLACE and TRACK both drive the equilibrium'
+        ok, msg = self.n.set_grip_params(self._grip_box())
+        if not ok:
+            return False, f'could not hand the workspace box to {core.GRIP_NODE} ({msg})'
+        if self.abort:
+            return False, 'PLACE not started: STOP NOW'
         self.setpoint = None
         ok, msg = self.n.call_trigger(self.n.place_cli, core.GRIP_CALL_TIMEOUT_S, 'grip_node')
         self.setpoint = None

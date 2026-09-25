@@ -395,3 +395,21 @@ def test_grip_node_defaults_are_the_shipped_params_and_the_panels():
             assert shipped[k] == pytest.approx(v) if not isinstance(v, str) else shipped[k] == v, k
     assert shipped['grip_cube_m'] * 1000 == pytest.approx(ST.grip_cube_mm)
     assert shipped['grip_force_n'] == pytest.approx(ST.grip_force_n)
+
+
+def test_target_b_age_limit_is_one_number():
+    assert _shipped()['grip_target_max_age_s'] == pytest.approx(ST.grip_target_max_age_s)
+    assert core.GRIP_TARGET_MAX_AGE_S == pytest.approx(ST.grip_target_max_age_s)
+
+
+def test_the_panel_offers_cubes_the_grip_node_accepts():
+    import grip_logic
+    import view
+    src = pathlib.Path(view.__file__).read_text()
+    assert 'self._spin(st.grip_cube_mm, 10, 72, 0, None)' in src
+    margin = _shipped()['grip_open_margin_m']
+    assert grip_logic.max_cube_m(margin) * 1000 == pytest.approx(72.0)
+    assert grip_logic.cube_problem(0.072, margin) is None          # the drawer's top accepted
+    assert grip_logic.cube_problem(0.073, margin) is not None      # and nothing past it
+    assert grip_logic.cube_problem(0.010, margin) is None          # the drawer's bottom too
+    assert grip_logic.max_cube_m(0.006) == 0.0                     # a margin that allows none

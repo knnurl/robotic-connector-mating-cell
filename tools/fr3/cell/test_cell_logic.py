@@ -396,3 +396,14 @@ def test_grip_needs_the_hold_the_node_and_the_marker_and_never_runs_with_track()
     assert 'PLACE it first' in L.enable(torque(**held), ST)['grip'].why
     assert L.enable(torque(**held), ST)['place'].ok
     assert 'not holding' in L.enable(torque(**up), ST)['place'].why
+
+
+def test_place_at_b_needs_a_held_cube_and_a_recent_sighting_of_b():
+    held = dict(grip_node_up=True, grip={'holding': 'true'})
+    assert L.enable(torque(grip_target_age=12.0, **held), ST)['place_b'].ok
+    assert 'not been seen' in L.enable(torque(**held), ST)['place_b'].why
+    old = ST.grip_target_max_age_s + 1
+    assert 'last seen' in L.enable(torque(grip_target_age=old, **held), ST)['place_b'].why
+    assert 'not holding' in L.enable(torque(grip_node_up=True, grip_target_age=1.0),
+                                     ST)['place_b'].why
+    assert not L.enable(tracking(grip_target_age=1.0, **held), ST)['place_b'].ok

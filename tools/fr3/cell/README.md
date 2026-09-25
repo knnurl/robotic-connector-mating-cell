@@ -39,7 +39,17 @@ marker, opens the Hand, glides above the cube, descends, grasps and lifts -
 all on the impedance controller with your gains. PLACE reverses it. STOP NOW
 holds where the arm is and leaves the Hand as it is. The cube size and grasp
 force are in the drawer; the rest is `grip_*` in `fr3_params.yaml`. Each
-GRIP or PLACE writes `runs/<day>/grip_*.jsonl`. The geometry is
+GRIP or PLACE writes `runs/<day>/grip_*.jsonl`.
+
+PLACE AT B carries the held cube to a second marker B lying flat on the table
+(ArUco id `target_marker_id`, launch argument, default 1; `-1` turns it off)
+and sets it down centred on B, faces turned to B's axes: straight up, level
+across, down over B, lower until the set-down, open, back off. `cam_pub` solves
+B with its own depth-resolved pose (no state shared with the tracked marker)
+on `/aruco/target_pose_raw`. `grip_node` remembers B whenever it is steadily in
+view with the arm still, so bring B into view once before or after the pick.
+The panel shows B's position and how long ago it was seen; a sighting older
+than 10 minutes, or a B leaning more than 10 deg, refuses PLACE AT B. The geometry is
 `grip_logic.py` (pure, tested); the node was run against the mock arm with
 the Hand stubbed, not yet on the arm.
 

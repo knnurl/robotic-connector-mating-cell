@@ -151,6 +151,8 @@ TRACK_STATUS_TOPIC = f'/{TRACKING_NODE}/status'
 GRIP_NODE = 'grip_node'
 GRIP_SRV = f'/{GRIP_NODE}/grip'
 PLACE_SRV = f'/{GRIP_NODE}/place'
+PLACE_AT_SRV = f'/{GRIP_NODE}/place_at_target'
+GRIP_TARGET_MAX_AGE_S = 600.0      # = fr3_params grip_target_max_age_s (pinned by a test)
 GRIP_STOP_SRV = f'/{GRIP_NODE}/stop'
 GRIP_PARAMS_SRV = f'/{GRIP_NODE}/set_parameters_atomically'
 GRIP_STATUS_TOPIC = f'/{GRIP_NODE}/status'

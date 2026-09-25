@@ -155,3 +155,32 @@ def test_quaternions_round_trip_in_general():
         assert np.linalg.norm(q) == pytest.approx(1.0)
         assert q2R(*q) == pytest.approx(R, abs=1e-9)
 
+
+def test_a_cube_is_set_down_centred_on_the_target_resting_on_its_plane():
+    target = (np.array([0.40, -0.20, 0.050]), rz(15))          # flat on the table
+    p, R = G.place_tcp(target[0], target[1], (0.0, 0.0), 0.055, 0.025, DOWN)
+    assert p == pytest.approx([0.40, -0.20, 0.050 + 0.055 - 0.025])
+    assert R[:, 2] == pytest.approx([0, 0, -1])
+    y = R[:, 1]                                                  # fingers across a face pair
+    assert max(abs(float(y @ target[1][:, 0])), abs(float(y @ target[1][:, 1]))) == pytest.approx(1.0)
+
+
+def test_the_place_offset_is_in_the_targets_own_axes():
+    target_R = rz(90)                                            # target x = base y
+    p, _ = G.place_tcp(np.zeros(3), target_R, (0.030, 0.0), 0.055, 0.025, DOWN)
+    assert p[:2] == pytest.approx([0.0, 0.030])
+
+
+def test_a_leaning_target_is_measured():
+    assert G.target_tilt_deg(np.eye(3)) == pytest.approx(0.0)
+    lean = G.from_rotvec(np.array([math.radians(12), 0.0, 0.0]))
+    assert G.target_tilt_deg(lean) == pytest.approx(12.0)
+
+
+def test_the_carry_goes_up_across_then_down_never_diagonal_low():
+    now = (np.array([0.50, 0.10, 0.25]), DOWN)
+    approach = (np.array([0.40, -0.20, 0.18]), rz(30) @ DOWN)
+    up, across, last = G.carry_path(now, approach, 0.03)
+    assert up[0] == pytest.approx([0.50, 0.10, 0.28]) and up[1] is DOWN      # straight up
+    assert across[0] == pytest.approx([0.40, -0.20, 0.28])                  # level
+    assert last[0] == pytest.approx(approach[0])

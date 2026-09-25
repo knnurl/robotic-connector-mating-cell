@@ -201,6 +201,15 @@
     grip_turn_radps: 0.4                # rad/s wrist turn at most
     grip_contact_n: 10.0                # N change in external force (vs the move's start): hold, or set down
     grip_arrive_window_m: 0.015         # m; PLACE takes a contact as the set-down only this close to it
+    # PLACE AT B: target marker B (cam_pub target_marker_id, launch arg, default
+    # id 1) lies flat on the table; grip_node remembers its pose whenever it is
+    # steadily in view. The cube is set down centred on B + offset (B's x/y),
+    # resting on B's plane, faces turned to B's axes.
+    grip_target_topic: /aruco/target_pose_raw
+    grip_target_offset_m: [0.0, 0.0]    # m in B's own x/y
+    grip_target_max_age_s: 600.0        # s; an older sighting refuses PLACE AT B (= cell settings.yaml)
+    grip_target_max_tilt_deg: 10.0      # deg; B must lie flat
+    grip_carry_clearance_m: 0.03        # m above both ends for the level carry
     grip_tol_m: 0.003                   # m settled within, before the next step
     grip_tol_deg: 3.0                   # deg
     grip_settle_s: 8.0                  # s to settle, else it fails with how far off it is

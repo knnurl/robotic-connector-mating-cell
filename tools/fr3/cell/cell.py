@@ -125,7 +125,8 @@ class LiveBackend:
                 'setpoint_plus': (c.setpoint_step, 1.0), 'hold_here': (c.hold_here,),
                 'track': (c.start_tracking,), 'release': (c.release,),
                 'recover': (c.recover,), 'reload_calib': (c.load_calib,),
-                'auto_floor': (c.auto_floor,), 'grip': (c.grip,), 'place': (c.place,)}
+                'auto_floor': (c.auto_floor,), 'grip': (c.grip,), 'place': (c.place,),
+                'place_b': (c.place_at,)}
         if name in ('translate', 'level', 'inplane', 'auto_converge'):
             c.run(name, c.start_align, name)
         elif name.startswith('goto:'):

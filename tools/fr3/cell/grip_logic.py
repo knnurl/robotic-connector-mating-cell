@@ -159,8 +159,11 @@ def cube_problem(cube_m, margin_m):
 
 
 def max_cube_m(margin_m):
-    """The largest cube cube_problem accepts, for the panel's drawer range."""
-    return min(HAND_MAX_OPEN_M - 2 * MIN_SIDE_CLEARANCE_M, HAND_MAX_OPEN_M)
+    """The largest cube cube_problem accepts, for the panel's drawer range:
+    0 when the margin itself leaves under MIN_SIDE_CLEARANCE_M per side."""
+    if margin_m / 2.0 < MIN_SIDE_CLEARANCE_M - 1e-9:
+        return 0.0
+    return HAND_MAX_OPEN_M - 2 * MIN_SIDE_CLEARANCE_M
 
 
 def clamp_to_limits(p, floor_m, box):
@@ -178,3 +181,29 @@ def joint_problem(q, lower, upper, margin_rad):
             return (f'J{j+1} is {math.degrees(room):.1f} deg from its end stop - '
                     'the grip stops here')
     return None
+
+
+def target_tilt_deg(target_R):
+    """How far a place target's normal leans from the base's vertical."""
+    return math.degrees(math.acos(max(-1.0, min(1.0, float(target_R[2, 2])))))
+
+
+def place_tcp(target_p, target_R, offset_xy, cube_m, depth_m, tcp_R_now):
+    """The TCP pose that sets a held cube down on a flat target marker: the
+    cube centred on target + offset (in the target's own x/y), resting on
+    the target's plane, its faces turned to the target's axes by the yaw
+    needing the least wrist turn. The Hand holds the cube depth_m below its
+    top face, so the TCP ends up (cube - depth) above the plane."""
+    centre = target_p + target_R[:, 0] * offset_xy[0] + target_R[:, 1] * offset_xy[1]
+    top = centre + target_R[:, 2] * cube_m
+    return grasp_tcp(top, target_R, tcp_R_now, depth_m)
+
+
+def carry_path(tcp_now, approach, clearance_m):
+    """Waypoints from the lifted cube to above the target: straight up to
+    a carry height above both ends, level across, then down to approach.
+    Never a diagonal with the cube low."""
+    z = max(tcp_now[0][2], approach[0][2]) + clearance_m
+    up = (np.array([tcp_now[0][0], tcp_now[0][1], z]), tcp_now[1])
+    across = (np.array([approach[0][0], approach[0][1], z]), approach[1])
+    return [up, across, approach]

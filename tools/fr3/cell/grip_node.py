@@ -8,6 +8,9 @@ controller, one GRIP press at a time.
              the operator's gains - compliant if the height is off.
     ~/place  Trigger, blocks: the reverse, back down to where it was gripped,
              open, up again.
+    ~/place_at_target  Trigger, blocks: carry the held cube to target marker B
+             (/aruco/target_pose_raw, remembered whenever it is in view): up,
+             level across, down over B, lower until the set-down, open, back off.
     ~/stop   Trigger, instant: the running sequence holds where the arm is.
              The Hand is left as it is (never drops the cube).
     ~/status DiagnosticStatus, latched: state, step, holding, reason.
@@ -26,6 +29,7 @@ flight. cell_panel keeps GRIP and TRACK apart: both command the equilibrium.
 Run by fr3_cell.launch.py with fr3_params.yaml; parameters grip_*.
 """
 
+import collections
 import datetime
 import json
 import math
@@ -91,6 +95,11 @@ DEFAULTS = {
     'grip_raw_timeout_s': 0.25,
     'grip_joint_margin_rad': 0.05,
     'grip_arrive_window_m': 0.015,
+    'grip_target_topic': '/aruco/target_pose_raw',
+    'grip_target_offset_m': [0.0, 0.0],
+    'grip_target_max_age_s': 600.0,
+    'grip_target_max_tilt_deg': 10.0,
+    'grip_carry_clearance_m': 0.03,
 }
 FRICTION_N = 6.5                 # tracking_law kFrictionBreakawayN
 FRICTION_NM = 0.6                # tracking_law kFrictionBreakawayNm
@@ -123,6 +132,12 @@ class GripNode(Node):
         self._lock = threading.Lock()
         self._state = None               # (ee (p, R), F_ext (3,) N, q, monotonic)
         self._raw = []                   # [(PoseStamped, monotonic)]
+        self._traw = []                  # the same for target marker B
+        self.target = None               # (p, R, wall time) of B in the base frame
+        self._last_status = ('idle', '', 'ready', DiagnosticStatus.OK)
+        self._report_lock = threading.Lock()     # one status at a time, newest wins
+        self._reported_t = -math.inf
+        self._ee_hist = collections.deque(maxlen=60)   # (monotonic, p, R), ~1.2 s at 50 Hz
         self._busy = threading.Lock()
         self._stop = threading.Event()
         self._stop_t = -math.inf         # monotonic time of the last ~/stop
@@ -144,6 +159,9 @@ class GripNode(Node):
                                  callback_group=cb)
         self.create_subscription(PoseStamped, self.p('tracking_raw_pose_topic'), self._raw_cb,
                                  10, callback_group=cb)
+        self.create_subscription(PoseStamped, self.p('grip_target_topic'), self._traw_cb,
+                                 10, callback_group=cb)
+        self.create_timer(0.2, self._update_target, callback_group=cb)
         imp = self.p('impedance_controller')
         self.get_params_cli = self.create_client(GetParameters, f'/{imp}/get_parameters',
                                                  callback_group=cb)
@@ -151,6 +169,7 @@ class GripNode(Node):
         self.grasp_ac = ActionClient(self, Grasp, '/franka_gripper/grasp', callback_group=cb)
         self.create_service(Trigger, '~/grip', self._grip_srv, callback_group=cb)
         self.create_service(Trigger, '~/place', self._place_srv, callback_group=cb)
+        self.create_service(Trigger, '~/place_at_target', self._place_at_srv, callback_group=cb)
         self.create_service(Trigger, '~/stop', self._stop_srv, callback_group=cb)
         self.report('idle', '', 'ready')
         self.get_logger().info('grip_node ready: ~/grip, ~/place, ~/stop')
@@ -163,14 +182,56 @@ class GripNode(Node):
     def _state_cb(self, m):
         ee = pose_of(m.o_t_ee.pose)
         f = m.o_f_ext_hat_k.wrench.force
+        now = time.monotonic()
         with self._lock:
             self._state = (ee, np.array([f.x, f.y, f.z]),
-                           list(m.measured_joint_state.position), time.monotonic())
+                           list(m.measured_joint_state.position), now)
+            self._ee_hist.append((now, ee[0], ee[1]))
 
     def _raw_cb(self, m):
         now = time.monotonic()
         with self._lock:
             self._raw = [(r, t) for r, t in self._raw if now - t < 1.0] + [(m, now)]
+
+    def _traw_cb(self, m):
+        now = time.monotonic()
+        with self._lock:
+            self._traw = [(r, t) for r, t in self._traw if now - t < 1.0] + [(m, now)]
+
+    def _arm_still(self, window_s=0.5):
+        """The EE moved under 1 mm and 0.5 deg over the last window_s. An
+        eye-in-hand sighting taken while moving carries the capture-latency
+        error (v * dt) in the base frame, and passes the scatter check."""
+        now = time.monotonic()
+        with self._lock:
+            hist = [h for h in self._ee_hist if now - h[0] <= window_s]
+        if len(hist) < 5 or now - hist[-1][0] > 0.1:
+            return False
+        p0, R0 = hist[0][1], hist[0][2]
+        return all(np.linalg.norm(p - p0) < 0.001 and
+                   G.rotation_angle(R @ R0.T) < math.radians(0.5) for _, p, R in hist)
+
+    def _update_target(self):
+        """Remember B whenever it is steadily in view WITH THE ARM STILL: it
+        is static on the table, so a still sighting from before the pick stays
+        good (up to grip_target_max_age_s), and a moving one never replaces it."""
+        now = time.monotonic()
+        with self._lock:
+            raw = [r for r, t in self._traw if now - t < 0.5]
+        if len(raw) >= 3 and self._arm_still():
+            try:
+                p, R = self.base_pose_of(raw, 'target B')
+                self.target = (p, R, time.time())
+            except Failed:
+                pass
+        # Refresh the latched status (B's age and place) at most once a
+        # second, rate-limited by the last REPORT - not by the last sighting.
+        if self.target is not None and now - self._reported_t > 1.0:
+            self.report_again()
+
+    def report_again(self):
+        with self._report_lock:
+            self._publish_status(*self._last_status)
 
     def state(self):
         with self._lock:
@@ -182,10 +243,23 @@ class GripNode(Node):
     # ------------------------------------------------------------ outputs
 
     def report(self, state, step, reason, level=DiagnosticStatus.OK):
+        # One lock over 'remember' and 'publish': the target timer's
+        # re-publish can never land after, and so hide, a newer report.
+        with self._report_lock:
+            self._last_status = (state, step, reason, level)
+            self._publish_status(state, step, reason, level)
+
+    def _publish_status(self, state, step, reason, level):
+        self._reported_t = time.monotonic()
         msg = DiagnosticStatus(name='grip_node', level=level, message=reason)
         msg.values = [KeyValue(key='state', value=state), KeyValue(key='step', value=step),
                       KeyValue(key='holding', value='true' if self.holding else 'false'),
                       KeyValue(key='reason', value=reason)]
+        tgt = getattr(self, 'target', None)
+        if tgt is not None:
+            msg.values += [KeyValue(key='target_t', value=f'{tgt[2]:.3f}'),
+                           KeyValue(key='target_xy_mm',
+                                    value=f'{tgt[0][0]*1000:.0f}, {tgt[0][1]*1000:.0f}')]
         self.status_pub.publish(msg)
 
     def publish(self, pose):
@@ -224,6 +298,9 @@ class GripNode(Node):
 
     def _place_srv(self, _req, res):
         return self._run(res, 'place', self.place)
+
+    def _place_at_srv(self, _req, res):
+        return self._run(res, 'place at B', self.place_at_target)
 
     def _run(self, res, name, fn):
         if not self._busy.acquire(blocking=False):
@@ -334,6 +411,43 @@ class GripNode(Node):
         self.step('retreat', lambda: self.move_to(approach, t_tcp_ee, self.p('grip_travel_mps')))
         return 'placed the cube and backed off above it'
 
+    def place_at_target(self):
+        if not self.holding:
+            raise Failed('not holding a cube')
+        tgt = self.target
+        if tgt is None:
+            raise Failed('target B has not been seen - bring it into the camera view once')
+        age = time.time() - tgt[2]
+        if age > self.p('grip_target_max_age_s'):
+            raise Failed(f'target B was last seen {age:.0f} s ago - bring it into view again')
+        tilt = G.target_tilt_deg(tgt[1])
+        if tilt > self.p('grip_target_max_tilt_deg'):
+            raise Failed(f'target B leans {tilt:.0f} deg - it must lie flat on the table')
+        _grasp, _marker_R, t_tcp_ee = self.holding
+        cube = self.p('grip_cube_m')
+        self.check_controller()
+        tcp_now = G.compose(self.state()[0], G.inverse(t_tcp_ee))
+        place = G.place_tcp(tgt[0], tgt[1], self.p('grip_target_offset_m'), cube,
+                            G.grasp_depth(cube, self.p('grip_depth_m')), tcp_now[1])
+        approach = G.above(place, tgt[1], self.p('grip_approach_m'))
+        rise, across, _ = G.carry_path(tcp_now, approach, self.p('grip_carry_clearance_m'))
+        for name, pose in (('rise', rise), ('carry', across), ('approach', approach),
+                           ('set-down', place)):
+            self.check_target(name, G.compose(pose, t_tcp_ee))
+        self.trace({'rec': 'plan', 'target': tgt[:2], 'target_age_s': age, 'place': place,
+                    'approach': approach, 'rise': rise, 'across': across})
+        travel = self.p('grip_travel_mps')
+        self.step('rise', lambda: self.move_to(rise, t_tcp_ee, travel, contact='hold'))
+        self.step('carry', lambda: self.move_to(across, t_tcp_ee, travel, contact='hold'))
+        self.step('over B', lambda: self.move_to(approach, t_tcp_ee, travel, contact='hold'))
+        self.step('lower', lambda: self.move_to(place, t_tcp_ee, self.p('grip_descend_mps'),
+                                                contact='arrive'))
+        self.step('open', lambda: self.hand_move(G.open_width(cube, self.p('grip_open_margin_m'))))
+        self.holding = None
+        self.step('retreat', lambda: self.move_to(approach, t_tcp_ee, travel))
+        return (f'placed the cube on target B at ({tgt[0][0]*1000:.0f}, {tgt[0][1]*1000:.0f}) mm '
+                'and backed off above it')
+
     def step(self, name, fn):
         if self._stop.is_set():
             raise Stopped()
@@ -374,6 +488,11 @@ class GripNode(Node):
             raise Failed('the marker is not in view - GRIP reads the cube from it')
         if len(raw) < 3:
             raise Failed(f'only {len(raw)} fresh detection(s) - hold still and try again')
+        return self.base_pose_of(raw, 'marker')
+
+    def base_pose_of(self, raw, what):
+        """Mean base-frame pose of up to five detections, each through TF at
+        its own image stamp; refused if they scatter more than 5 mm."""
         base = self.p('grip_base_frame')
         poses = []
         for r in raw[-5:]:
@@ -389,7 +508,7 @@ class GripNode(Node):
         p = np.mean([q[0] for q in poses], axis=0)
         spread = max(float(np.linalg.norm(q[0] - p)) for q in poses)
         if spread > 0.005:
-            raise Failed(f'the marker pose scatters {spread*1000:.1f} mm - hold still')
+            raise Failed(f'the {what} pose scatters {spread*1000:.1f} mm - hold still')
         return p, poses[-1][1]
 
     def tool_offset(self):

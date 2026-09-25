@@ -61,7 +61,7 @@ from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 
 from roscam.plane_normal import (disambiguate_by_normal, fuse_orientation,
-                                 marker_plane_normal)
+                                 marker_plane_normal, solve_square_by_depth)
 from roscam.pose_kf import PoseKF, compose_pose
 from roscam.rs_capture import RsCapture
 
@@ -125,6 +125,11 @@ class ArucoPosePublisher(Node):
         # ids marker_id..marker_id+N-1. Pose = board centre, so taught
         # offsets keep their meaning. Print with `cv2.aruco.GridBoard(...)
         # .generateImage()` using the same geometry.
+        # A second, STATIC marker (a place target on the table), published
+        # raw on /aruco/target_pose_raw: its own IPPE solve resolved by depth
+        # only, no filter, no state shared with marker_id. -1 = off.
+        self.declare_parameter('target_marker_id', -1)
+        self.declare_parameter('target_marker_size_m', -1.0)   # -1 = marker_size_m
         self.declare_parameter('board_markers_x', 1)
         self.declare_parameter('board_markers_y', 1)
         self.declare_parameter('board_marker_separation_m', 0.005)
@@ -250,6 +255,20 @@ class ArucoPosePublisher(Node):
 
         self.pose_pub = self.create_publisher(PoseStamped, '/aruco/pose', 10)
         self.pose_raw_pub = self.create_publisher(PoseStamped, '/aruco/pose_raw', 10)
+        self.target_id = int(self.get_parameter('target_marker_id').value)
+        if self.target_id >= 0 and self.target_id in self.board_ids:
+            # An optional feature must never take the tracked marker down.
+            self.get_logger().error(
+                f'target_marker_id {self.target_id} is one of the tracked ids - target B is '
+                'OFF (pass target_marker_id:=<another id>)')
+            self.target_id = -1
+        size = float(self.get_parameter('target_marker_size_m').value)
+        half_t = (size if size > 0 else self.marker_size) / 2.0
+        self.target_obj_points = np.array([[-half_t, half_t, 0.0], [half_t, half_t, 0.0],
+                                           [half_t, -half_t, 0.0], [-half_t, -half_t, 0.0]],
+                                          dtype=np.float32)
+        self.target_raw_pub = (self.create_publisher(PoseStamped, '/aruco/target_pose_raw', 10)
+                               if self.target_id >= 0 else None)
         self.debug_pub = self.create_publisher(Image, '/aruco/debug_image', 2)
 
         self._capture = None
@@ -545,6 +564,9 @@ class ArucoPosePublisher(Node):
             self.get_logger().warn('Publishing predicted pose (marker not detected).',
                                    throttle_duration_sec=1.0)
 
+        if self.target_raw_pub is not None and ids is not None:
+            self._publish_target(corners, ids, header, depth_m, color_image)
+
         # Debug image: only while subscribed, and rate-capped outside topic
         # mode - it exists for humans, full rate is bandwidth waste.
         now_mono = time.monotonic()
@@ -554,6 +576,30 @@ class ArucoPosePublisher(Node):
             debug_msg = self.bridge.cv2_to_imgmsg(color_image, encoding='bgr8')
             debug_msg.header = header
             self.debug_pub.publish(debug_msg)
+
+    def _publish_target(self, corners, ids, header, depth_m, color_image):
+        flat = ids.flatten()
+        if self.target_id not in flat:
+            return
+        img_pts = corners[int(np.where(flat == self.target_id)[0][0])][0].astype(np.float32)
+        sol = solve_square_by_depth(self.target_obj_points, img_pts, self.camera_matrix,
+                                    self.dist_coeffs, depth_m, scale=self.tilt_depth_scale)
+        if sol is None:
+            self.get_logger().warn('Target marker seen but not solved (no depth to resolve '
+                                   'the IPPE mirror) - not published', throttle_duration_sec=5.0)
+            return
+        raw = self._validate(sol[0], sol[1], img_pts, self.target_obj_points)
+        if raw is None:
+            return
+        # Out-of-plane from depth, in-plane from ArUco - as for the tracked
+        # marker: IPPE's own tilt was 3-12 deg off for a 21 mm marker.
+        fused = fuse_orientation(cv2.Rodrigues(sol[0])[0], sol[2])
+        if fused is None:
+            return
+        self._publish(self.target_raw_pub, header, raw[0], rotation_matrix_to_quaternion(fused))
+        if self.publish_debug:
+            cv2.drawFrameAxes(color_image, self.camera_matrix, self.dist_coeffs, sol[0], sol[1],
+                              float(self.target_obj_points[1, 0] * 2))
 
     def _validate(self, rvec, tvec, img_points, obj_points):
         """Gate a raw solvePnP result on reprojection error.

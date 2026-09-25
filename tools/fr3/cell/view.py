@@ -43,7 +43,7 @@ TEXT = {
     'auto_converge': 'AUTO-CONVERGE', 'preflight': 'PRE-FLIGHT',
     'float': 'FLOAT', 'hold': 'HOLD', 'setpoint_minus': 'SETPOINT  −',
     'setpoint_plus': 'SETPOINT  +', 'hold_here': 'hold HERE', 'track': 'TRACK',
-    'track_fast': 'FAST', 'grip': 'GRIP', 'place': 'PLACE',
+    'track_fast': 'FAST', 'grip': 'GRIP', 'place': 'PLACE', 'place_b': 'PLACE AT B',
     'release': 'RELEASE  →  arm controller', 'apply_gains': 'APPLY GAINS',
     'recover': 'RECOVER', 'stop_now': 'STOP NOW', 'pause': 'PAUSE',
     'stop_after': 'stop after\ncurrent move',
@@ -780,6 +780,7 @@ class MainWindow(QMainWindow):
         r.setSpacing(8)
         r.addWidget(self._btn('grip', height=36), 2)
         r.addWidget(self._btn('place', height=36), 1)
+        r.addWidget(self._btn('place_b', height=36), 1)
         self.grip_state = lab('', 'caption', wrap=True)
         r.addWidget(self.grip_state, 3)
         self.tq_sec.v.addLayout(r)
@@ -1534,6 +1535,10 @@ class MainWindow(QMainWindow):
         else:
             text = (('holding a cube  ·  ' if g.get('holding') == 'true' else '')
                     + (g.get('reason') or g.get('message') or ''))
+        if s.grip_node_up:
+            text += ('  ·  B never seen' if s.grip_target_age is None else
+                     f'  ·  B at ({g.get("target_xy_mm", "?")}) mm, seen '
+                     f'{s.grip_target_age:.0f} s ago')
         set_text(self.grip_state, text)
 
     def _render_tspeed(self, s, en, trk):

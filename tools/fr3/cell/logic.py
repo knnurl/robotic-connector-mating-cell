@@ -44,7 +44,7 @@ POSITION_CONTROLS = ('translate', 'level', 'inplane', 'auto_converge')
 TORQUE_CONTROLS = ('preflight', 'float', 'hold', 'setpoint_minus',
                    'setpoint_plus', 'hold_here', 'track', 'release',
                    'apply_gains', 'preset', 'speed', 'track_speed', 'track_fast',
-                   'grip', 'place')
+                   'grip', 'place', 'place_b')
 ALWAYS = ('stop_now', 'pause', 'stop_after', 'record')
 
 
@@ -74,6 +74,7 @@ class Settings:
     track_fast_pct: float = 40.0
     grip_cube_mm: float = 55.0
     grip_force_n: float = 20.0
+    grip_target_max_age_s: float = 600.0
     position_ceiling_pct: float = 20.0  # core.CEIL_SPEED_PCT
     slew_max_mps: float = 0.25          # impedance_detail.hpp ConfigLimits
     slew_max_rps: float = 1.0
@@ -167,6 +168,7 @@ class Snap:
     grip_node_up: bool = False
     grip: dict = field(default_factory=dict)     # grip_node's status: state, step, holding
     grip_cube_mm: float = 55.0
+    grip_target_age: float = None       # s since grip_node last saw target B; None = never
 
 
 @dataclass(frozen=True)
@@ -407,6 +409,14 @@ def enable(s, st):
                                   (not holding_cube, 'already holding a cube - PLACE it first')])
     en['place'] = _first(torque + [move, grip_up,
                                    (holding_cube, 'not holding a cube - GRIP one first')])
+    age = s.grip_target_age
+    en['place_b'] = _first(torque + [move, grip_up,
+                                     (holding_cube, 'not holding a cube - GRIP one first'),
+                                     (age is not None, 'target B has not been seen - bring it '
+                                                       'into the camera view once'),
+                                     (age is None or age <= st.grip_target_max_age_s,
+                                      f'target B was last seen {age or 0:.0f} s ago - bring it '
+                                      'into view again')])
 
     # RELEASE stays pressable while the controller manager is silent: the Tk panel's
     # RELEASE always was, and a flaky poll must never strand the operator.

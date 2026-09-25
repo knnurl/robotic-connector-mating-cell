@@ -216,4 +216,3 @@ def test_tracking_on_the_operators_gains_says_so(make):
     assert w.preset.custom_text == 'CUSTOM'
     w, b = make('tracking')                                # an older node: its profile
     assert w.gain_state.text().startswith('tracking profile in force')
-

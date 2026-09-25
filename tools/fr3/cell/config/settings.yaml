@@ -40,6 +40,7 @@ track_fast_pct: 40.0        # the FAST switch while tracking (100 mm/s, 22.9 deg
                             # hand-moved marker outran it 1 % / 3 % of the time (vs 45 % / 52 % at 10 %)
 grip_cube_mm: 55.0          # GRIP: the drawer's cube size at launch (Franka Hand strokes 80 mm)
 grip_force_n: 20.0          # GRIP: the drawer's grasp force at launch
+grip_target_max_age_s: 600.0  # PLACE AT B: target B must have been seen this recently (= fr3_params)
 position_ceiling_pct: 20.0  # core.CEIL_SPEED_PCT: slider 100 % = 20 % of MoveIt's planned speed
 slew_max_mps: 0.25          # impedance_detail.hpp ConfigLimits::slewMpsMax
 slew_max_rps: 1.0           # impedance_detail.hpp ConfigLimits::slewRpsMax

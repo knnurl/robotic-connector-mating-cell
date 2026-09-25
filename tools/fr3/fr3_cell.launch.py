@@ -47,6 +47,7 @@ def generate_launch_description():
     filter_frame = LaunchConfiguration('filter_frame')
     vision_source = LaunchConfiguration('vision_source')
     marker_id = LaunchConfiguration('marker_id')
+    target_marker_id = LaunchConfiguration('target_marker_id')
     capture_fps = LaunchConfiguration('capture_fps')
     mock = LaunchConfiguration('mock')
 
@@ -67,6 +68,9 @@ def generate_launch_description():
         # flows, /aruco/pose is silent.
         DeclareLaunchArgument('marker_id', default_value='0',
                               description='ArUco id to track (DICT_6X6_250)'),
+        DeclareLaunchArgument('target_marker_id', default_value='1',
+                              description='ArUco id of the static place target for PLACE '
+                                          'AT B (-1 = off)'),
         DeclareLaunchArgument('vision_source', default_value='realsense',
                               description='realsense = in-process capture with depth, no '
                                           'image topics (default); topic = a separate camera '
@@ -96,7 +100,7 @@ def generate_launch_description():
     return LaunchDescription(args + [_impedance_spawner(real),
                                      _static_tf(handeye, real),
                                      _vision(filter_frame, vision_source,
-                                             marker_id, capture_fps, real),
+                                             marker_id, target_marker_id, capture_fps, real),
                                      TimerAction(period=3.0, condition=real, actions=[
                                          _tracking(params_file),
                                          _grip(params_file),
@@ -160,7 +164,7 @@ def _static_tf(handeye, condition):
     return OpaqueFunction(function=make, condition=condition)
 
 
-def _vision(filter_frame, vision_source, marker_id, capture_fps, condition):
+def _vision(filter_frame, vision_source, marker_id, target_marker_id, capture_fps, condition):
     return Node(
         condition=condition,
         package='roscam',
@@ -175,6 +179,7 @@ def _vision(filter_frame, vision_source, marker_id, capture_fps, condition):
             'source': vision_source,
             'filter_frame': filter_frame,
             'marker_id': ParameterValue(marker_id, value_type=int),
+            'target_marker_id': ParameterValue(target_marker_id, value_type=int),
             'capture_fps': ParameterValue(capture_fps, value_type=int),
             # Debug image is only encoded/published while something
             # subscribes - keep GUI subscriptions off the robot NIC.
