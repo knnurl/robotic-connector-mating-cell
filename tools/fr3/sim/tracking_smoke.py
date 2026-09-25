@@ -67,6 +67,8 @@ from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster  # noqa: E4
 IMP = 'cartesian_impedance_stroke_controller'
 OPERATOR_GAINS = [150.0, 150.0, 800.0]     # what the panel's HOLD leaves
 TRACK_GAINS = [1500.0, 1500.0, 1500.0]     # fr3_params.yaml track_k_pos_tool
+TRACK_SLEW = 0.10                          # fr3_params.yaml track_setpoint_slew_mps
+OPERATOR_SLEW = 0.05                       # what the fake controller starts with
 
 
 def homog(pos, quat_xyzw):
@@ -189,6 +191,9 @@ class Controller(Node):
     def k_pos(self):
         return list(self.get_parameter('k_pos_tool').value)
 
+    def slew(self):
+        return float(self.get_parameter('setpoint_slew_mps').value)
+
 
 class ControllerManager(Node):
     def __init__(self):
@@ -235,6 +240,8 @@ def main():
            '-p', 'tracking_log_dir:=' + log_dir]
     if '--gdb' in sys.argv:
         cmd = ['gdb', '-q', '-batch', '-ex', 'run', '-ex', 'bt', '--args'] + cmd
+    # The second run: tracking_use_operator_gains false, the track profile.
+    profile_cmd = cmd + ['-p', 'tracking_use_operator_gains:=false']
 
     rclpy.init()
     cell, ctl, cm, op = Cell(), Controller(), ControllerManager(), Operator()
@@ -274,7 +281,13 @@ def main():
 
         r = call(op.start)
         check('START succeeds', bool(r and r.success), r.message if r else 'no reply')
-        check('track profile applied', ctl.k_pos() == TRACK_GAINS, str(ctl.k_pos()))
+        # fr3_params.yaml: tracking_use_operator_gains true - the operator's k
+        # stays, only the profile's slew goes out (TRACK SPEED follows it).
+        check('operator gains kept at START', ctl.k_pos() == OPERATOR_GAINS, str(ctl.k_pos()))
+        check('only the profile slew written', abs(ctl.slew() - TRACK_SLEW) < 1e-9,
+              str(ctl.slew()))
+        check('status says gains=operator', op.status.get('gains') == 'operator',
+              str(op.status.get('gains')))
         check('status tracking', wait_for(lambda: op.state()[0] == 'tracking', 3),
               str(op.state()))
         n0 = cell.eq_count
@@ -326,7 +339,8 @@ def main():
 
         r = call(op.stop)
         check('STOP succeeds', bool(r and r.success), r.message if r else 'no reply')
-        check('operator gains restored', ctl.k_pos() == OPERATOR_GAINS, str(ctl.k_pos()))
+        check('operator gains untouched', ctl.k_pos() == OPERATOR_GAINS, str(ctl.k_pos()))
+        check('operator slew restored', abs(ctl.slew() - OPERATOR_SLEW) < 1e-9, str(ctl.slew()))
         check('status idle', wait_for(lambda: op.state()[0] == 'idle', 3), str(op.state()))
         logs = [f for f in os.listdir(log_dir)
                 if f.startswith('tracking_') and f.endswith('.jsonl')]
@@ -337,16 +351,36 @@ def main():
         # session by itself and put the operator's gains back.
         time.sleep(1.0)
         r = call(op.start)
-        check('START again', bool(r and r.success) and ctl.k_pos() == TRACK_GAINS,
+        check('START again', bool(r and r.success) and ctl.k_pos() == OPERATOR_GAINS,
               r.message if r else 'no reply')
-        cell.buzz_nm = 4.0
+        # 8 Nm amplitude = ~5.7 Nm rms at 40 Hz, above tracking_buzz_stop_nm
+        # (3.5) like the real 09-23 buzz (5.9 Nm peak); 4 Nm (~2.8 rms) no
+        # longer is.
+        cell.buzz_nm = 8.0
         stopped = wait_for(lambda: op.state()[0] in ('stopping', 'idle')
                            and 'buzz' in op.state()[1], 2)
         check('a 40 Hz buzz stops tracking by itself', stopped, str(op.state()))
-        check('operator gains restored after the buzz',
+        check('operator gains intact after the buzz',
               wait_for(lambda: ctl.k_pos() == OPERATOR_GAINS, 2), str(ctl.k_pos()))
         cell.buzz_nm = 0.0
         check('node alive throughout', node.poll() is None, f'exit code {node.poll()}')
+
+        # The track profile, as before operator gains (flag false).
+        node.terminate()
+        node.wait(timeout=20)
+        node = subprocess.Popen(profile_cmd, stdout=node_log, stderr=subprocess.STDOUT)
+        up = wait_for(lambda: op.start.service_is_ready(), 30)
+        time.sleep(2.0)
+        r = call(op.start)
+        check('profile mode: START applies the track profile',
+              bool(r and r.success) and ctl.k_pos() == TRACK_GAINS,
+              (r.message if r else 'no reply') + f' k={ctl.k_pos()}')
+        check('profile mode: status says gains=profile',
+              wait_for(lambda: op.status.get('gains') == 'profile', 3),
+              str(op.status.get('gains')))
+        r = call(op.stop)
+        check('profile mode: STOP puts the operator gains back',
+              wait_for(lambda: ctl.k_pos() == OPERATOR_GAINS, 3), str(ctl.k_pos()))
     finally:
         if node.poll() is None:
             node.terminate()

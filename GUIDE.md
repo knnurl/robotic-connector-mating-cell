@@ -164,11 +164,14 @@ with the over-lead dropdown on `hold`), below the Z floor (100 mm above the
 base), outside the drawer's workspace box, when it would pull a joint within
 8 deg of its end stop further in, or when vision is not fresh (no raw
 detection within 0.25 s). Workspace limits always hold, never stop. It
-**stops** by itself when a joint **buzzes** (more than 2.5 Nm rms above 20 Hz),
+**stops** by itself when a joint **buzzes** (more than 3.5 Nm rms above 20 Hz),
 when the impedance controller leaves ACTIVE, or past the cap with the dropdown
 on `stop`.
 
-The track profile is k 1500 N/m, k_rot 90 Nm/rad, **ζ 0.5**, slew 0.10 m/s.
+TRACK keeps **your applied gains** (`tracking_use_operator_gains: true`,
+since 2026-09-24); the node scales its friction deadband and extra-pull caps
+to that stiffness, and logs both at START. With it set to false, TRACK uses
+the track profile: k 1500 N/m, k_rot 90 Nm/rad, **ζ 0.5**, slew 0.10 m/s.
 ζ was 1.0 until 2026-09-23, when it drove a 40 Hz wrist buzz (1 kHz data in
 [TRACKING_SPEC.md](TRACKING_SPEC.md) O1); 0.5 is **not yet proven on the arm**,
 so keep the recorder running on the first runs:

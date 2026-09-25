@@ -979,7 +979,51 @@ std::array<double, 7> nudged(std::array<double, 7> q, size_t joint, double by)
     q[joint] += by;
     return q;
 }
+
+const tf2::Vector3 kIsoPos(1500.0, 1500.0, 1500.0);    // the track profile
+const tf2::Vector3 kIsoRot(90.0, 90.0, 90.0);
+
+// d(point fixed to the flange)/dq_j by central differences: the Jacobian's
+// linear column, independent of the axis-cross-lever formula it checks.
+tf2::Vector3 numeric_column(const std::array<double, 7> &q, const tf2::Vector3 &p, size_t j)
+{
+    const double h = 1e-6;
+    const tf2::Vector3 local = tracking_law::joint_frames(q).flange.inverse() * p;
+    return (tracking_law::joint_frames(nudged(q, j, h)).flange * local -
+            tracking_law::joint_frames(nudged(q, j, -h)).flange * local) / (2.0 * h);
+}
 }  // namespace
+
+TEST(JointPulls, AreTheJacobianTransposeOfTheSpring)
+{
+    const auto here = tcp(kJ2AtItsStop);
+    const tf2::Vector3 d(0.004, -0.007, 0.003);
+    const tf2::Transform eq(here.getRotation(), here.getOrigin() + d);   // translation only
+    const auto pull = tracking_law::joint_pulls(kJ2AtItsStop, eq, here, kIsoPos, kIsoRot);
+    for (size_t j = 0; j < 7; ++j) {
+        EXPECT_NEAR(pull[j], numeric_column(kJ2AtItsStop, here.getOrigin(), j).dot(d * 1500.0),
+                    1e-4) << "J" << j + 1;
+    }
+}
+
+TEST(JointPulls, UseTheAnisotropicStiffnessInTheToolFrame)
+{
+    // The controller's default and commission gains are anisotropic
+    // (150/150/800): the force is R diag(k) R^T d, not k_max * d.
+    const auto here = tcp(kJ2AtItsStop);
+    const tf2::Vector3 k(150.0, 150.0, 800.0);
+    const tf2::Vector3 d(0.006, 0.002, -0.004);
+    const tf2::Transform eq(here.getRotation(), here.getOrigin() + d);
+    const tf2::Matrix3x3 R = eq.getBasis();
+    const tf2::Vector3 local = R.transpose() * d;
+    const tf2::Vector3 force = R * tf2::Vector3(k.x() * local.x(), k.y() * local.y(),
+                                               k.z() * local.z());
+    const auto pull = tracking_law::joint_pulls(kJ2AtItsStop, eq, here, k, kIsoRot);
+    for (size_t j = 0; j < 7; ++j) {
+        EXPECT_NEAR(pull[j], numeric_column(kJ2AtItsStop, here.getOrigin(), j).dot(force), 1e-4)
+            << "J" << j + 1;
+    }
+}
 
 TEST(JointFrames, TheZeroPoseFlangeIsWhereFrankaSaysItIs)
 {
@@ -1006,7 +1050,7 @@ TEST(JointLimitVeto, HoldsWhileTheGoalPullsAJointIntoItsStop)
     const std::array<double, 7> still{};
     const auto why = tracking_law::joint_limit_veto(
         kJ2AtItsStop, still, tcp(nudged(kJ2AtItsStop, 1, -0.05)), tcp(kJ2AtItsStop), cfg,
-        1500.0, 90.0);
+        kIsoPos, kIsoRot);
     EXPECT_NE(why.find("J2"), std::string::npos) << why;
     EXPECT_NE(why.find("lower end stop"), std::string::npos) << why;
 }
@@ -1017,7 +1061,7 @@ TEST(JointLimitVeto, LetsGoAsSoonAsTheGoalPullsItBackOut)
     const std::array<double, 7> still{};
     EXPECT_EQ(tracking_law::joint_limit_veto(kJ2AtItsStop, still,
                                              tcp(nudged(kJ2AtItsStop, 1, +0.05)),
-                                             tcp(kJ2AtItsStop), cfg, 1500.0, 90.0),
+                                             tcp(kJ2AtItsStop), cfg, kIsoPos, kIsoRot),
               "");
 }
 
@@ -1027,7 +1071,7 @@ TEST(JointLimitVeto, IgnoresJointsWellInsideTheirRange)
     const std::array<double, 7> still{};
     const auto mid = nudged(kJ2AtItsStop, 1, 1.0);       // J2 at -47 deg
     EXPECT_EQ(tracking_law::joint_limit_veto(mid, still, tcp(nudged(mid, 1, -0.05)), tcp(mid),
-                                             cfg, 1500.0, 90.0),
+                                             cfg, kIsoPos, kIsoRot),
               "");
 }
 
@@ -1037,10 +1081,10 @@ TEST(JointLimitVeto, HoldsADriftIntoTheStopEvenWithNoPull)
     const auto here = tcp(kJ2AtItsStop);
     std::array<double, 7> dq{};
     dq[1] = -0.10;                                        // the drift seen at 18:52
-    EXPECT_NE(tracking_law::joint_limit_veto(kJ2AtItsStop, dq, here, here, cfg, 1500.0, 90.0),
+    EXPECT_NE(tracking_law::joint_limit_veto(kJ2AtItsStop, dq, here, here, cfg, kIsoPos, kIsoRot),
               "");
     dq[1] = -0.01;                                        // sensor noise
-    EXPECT_EQ(tracking_law::joint_limit_veto(kJ2AtItsStop, dq, here, here, cfg, 1500.0, 90.0),
+    EXPECT_EQ(tracking_law::joint_limit_veto(kJ2AtItsStop, dq, here, here, cfg, kIsoPos, kIsoRot),
               "");
 }
 

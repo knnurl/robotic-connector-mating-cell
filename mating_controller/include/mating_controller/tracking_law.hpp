@@ -457,32 +457,52 @@ inline JointFrames joint_frames(const std::array<double, 7> &q)
     return f;
 }
 
-// Empty unless a joint within joint_margin_rad of a limit would go further in.
-// It would when the move to eq pulls it there - the pull is J^T [k_pos dp;
-// k_rot dr], the joint torque a spring from the arm to eq applies - or when
-// it is already moving there faster than 0.05 rad/s. Holding only then lets
-// the operator back out by moving the marker; holding on proximity alone would
-// never let go, because a held arm stays where it is. 2026-09-24: TRACK drove
-// J2 past its stop twice, and the FR3's position-dependent velocity limit
-// (zero at the stop) ended both runs with a joint_velocity_violation.
-inline std::string joint_limit_veto(const std::array<double, 7> &q,
-                                    const std::array<double, 7> &dq, const tf2::Transform &eq,
-                                    const tf2::Transform &measured_ee, const Config &cfg,
-                                    double k_pos, double k_rot)
+// J^T of the spring from the arm to eq, per joint: the torque the controller's
+// stiffness - diagonal in the equilibrium's tool frame, as the controller
+// builds it from the target orientation - would apply there. k_pos / k_rot
+// are the tool-frame diagonals (k_pos_tool / k_rot_tool): the operator's
+// gains are anisotropic, and one scalar gets the pull's direction wrong.
+inline std::array<double, 7> joint_pulls(const std::array<double, 7> &q, const tf2::Transform &eq,
+                                         const tf2::Transform &measured_ee,
+                                         const tf2::Vector3 &k_pos, const tf2::Vector3 &k_rot)
 {
     const JointFrames f = joint_frames(q);
     const tf2::Vector3 p = measured_ee.getOrigin();
-    const tf2::Vector3 force = (eq.getOrigin() - p) * k_pos;
+    const tf2::Matrix3x3 R = eq.getBasis();
+    auto spring = [&R](const tf2::Vector3 &k, const tf2::Vector3 &d) {
+        const tf2::Vector3 local = R.transpose() * d;
+        return R * tf2::Vector3(k.x() * local.x(), k.y() * local.y(), k.z() * local.z());
+    };
+    const tf2::Vector3 force = spring(k_pos, eq.getOrigin() - p);
     const tf2::Vector3 moment =
-        rotation_vector(eq.getRotation() * measured_ee.getRotation().inverse()) * k_rot;
+        spring(k_rot, rotation_vector(eq.getRotation() * measured_ee.getRotation().inverse()));
+    std::array<double, 7> pull{};
+    for (size_t j = 0; j < 7; ++j) {
+        pull[j] = f.axis[j].dot((p - f.origin[j]).cross(force) + moment);
+    }
+    return pull;
+}
+
+// Empty unless a joint within joint_margin_rad of a limit would go further in:
+// pulled there by the move to eq (joint_pulls) or already moving there faster
+// than 0.05 rad/s. Holding only then lets the operator back out by moving the
+// marker; holding on proximity alone would never let go, because a held arm
+// stays where it is. 2026-09-24: TRACK drove J2 past its stop twice, and the
+// FR3's position-dependent velocity limit (zero at the stop) ended both runs
+// with a joint_velocity_violation.
+inline std::string joint_limit_veto(const std::array<double, 7> &q,
+                                    const std::array<double, 7> &dq, const tf2::Transform &eq,
+                                    const tf2::Transform &measured_ee, const Config &cfg,
+                                    const tf2::Vector3 &k_pos, const tf2::Vector3 &k_rot)
+{
+    const std::array<double, 7> pull = joint_pulls(q, eq, measured_ee, k_pos, k_rot);
     constexpr double kPullEps = 0.05;   // Nm: below this the goal is not pulling
     constexpr double kDriftEps = 0.05;  // rad/s: the drift speeds seen were 0.06-0.16
     for (size_t j = 0; j < 7; ++j) {
-        const double pull = f.axis[j].dot((p - f.origin[j]).cross(force) + moment);
         const double to_lower = q[j] - cfg.joint_lower[j];
         const double to_upper = cfg.joint_upper[j] - q[j];
-        const bool deeper_low = pull < -kPullEps || dq[j] < -kDriftEps;
-        const bool deeper_high = pull > kPullEps || dq[j] > kDriftEps;
+        const bool deeper_low = pull[j] < -kPullEps || dq[j] < -kDriftEps;
+        const bool deeper_high = pull[j] > kPullEps || dq[j] > kDriftEps;
         if ((to_lower < cfg.joint_margin_rad && deeper_low) ||
             (to_upper < cfg.joint_margin_rad && deeper_high)) {
             const bool low = to_lower < to_upper;
@@ -591,7 +611,8 @@ inline std::string validate_config(const Config &cfg, double k_pos_max_n_per_m,
         return "tracking_deadband_rad must be within [" + mm(band_rad) + ", " +
                mm(3.0 * band_rad) + "] mrad at this k_rot_tool";
     }
-    if (k_pos_max_n_per_m * cfg.lead_max_m > kLeadForceMaxN) {
+    // The relative tolerance: a lead cap scaled to 15 N / k lands on the bound.
+    if (k_pos_max_n_per_m * cfg.lead_max_m > kLeadForceMaxN * (1.0 + 1e-9)) {
         return "k_pos_tool * tracking_lead_max_m must not exceed 15 N";
     }
     if (kLeadForceMaxN >= max_force_n) {

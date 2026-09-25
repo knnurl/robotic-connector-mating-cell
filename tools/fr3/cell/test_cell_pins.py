@@ -385,3 +385,13 @@ def test_the_joint_guard_uses_franka_descriptions_limits():
     assert shipped['tracking_joint_lower'] == pytest.approx([lo for lo, _ in limits])
     assert shipped['tracking_joint_upper'] == pytest.approx([hi for _, hi in limits])
     assert 0.05 < shipped['tracking_joint_margin_rad'] <= 0.25
+
+
+def test_grip_node_defaults_are_the_shipped_params_and_the_panels():
+    import grip_node
+    shipped = _shipped()
+    for k, v in grip_node.DEFAULTS.items():
+        if k.startswith('grip_'):
+            assert shipped[k] == pytest.approx(v) if not isinstance(v, str) else shipped[k] == v, k
+    assert shipped['grip_cube_m'] * 1000 == pytest.approx(ST.grip_cube_mm)
+    assert shipped['grip_force_n'] == pytest.approx(ST.grip_force_n)

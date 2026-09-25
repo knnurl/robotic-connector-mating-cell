@@ -43,7 +43,7 @@ TEXT = {
     'auto_converge': 'AUTO-CONVERGE', 'preflight': 'PRE-FLIGHT',
     'float': 'FLOAT', 'hold': 'HOLD', 'setpoint_minus': 'SETPOINT  −',
     'setpoint_plus': 'SETPOINT  +', 'hold_here': 'hold HERE', 'track': 'TRACK',
-    'track_fast': 'FAST',
+    'track_fast': 'FAST', 'grip': 'GRIP', 'place': 'PLACE',
     'release': 'RELEASE  →  arm controller', 'apply_gains': 'APPLY GAINS',
     'recover': 'RECOVER', 'stop_now': 'STOP NOW', 'pause': 'PAUSE',
     'stop_after': 'stop after\ncurrent move',
@@ -776,6 +776,13 @@ class MainWindow(QMainWindow):
         r.addSpacing(16)
         r.addWidget(self._btn('hold_here', height=36), 1)
         self.tq_sec.v.addLayout(r)
+        r = QHBoxLayout()
+        r.setSpacing(8)
+        r.addWidget(self._btn('grip', height=36), 2)
+        r.addWidget(self._btn('place', height=36), 1)
+        self.grip_state = lab('', 'caption', wrap=True)
+        r.addWidget(self.grip_state, 3)
+        self.tq_sec.v.addLayout(r)
 
         gh = QHBoxLayout()
         gh.addWidget(lab('GAIN PRESET  ·  soft → stiff  ·  free space only', 'section'))
@@ -913,6 +920,16 @@ class MainWindow(QMainWindow):
                                  "'hold'. Off at every launch.")
         self.blind_cb.toggled.connect(lambda on: self.b.set_param('track_blind', bool(on)))
         g.addWidget(self.blind_cb, 5, 0, 1, 2)
+
+        g = self._group(v, 'GRIP')
+        self.grip_cube = self._spin(st.grip_cube_mm, 10, 72, 0, None)   # grip_logic.max_cube_m
+        self.grip_cube.valueChanged.connect(lambda x: self.b.set_param('grip_cube_mm', float(x)))
+        self.grip_force = self._spin(st.grip_force_n, 5, 70, 0, None)
+        self.grip_force.valueChanged.connect(lambda x: self.b.set_param('grip_force_n', float(x)))
+        for r, (name, w) in enumerate((('cube  mm', self.grip_cube),
+                                       ('grasp force  N', self.grip_force))):
+            g.addWidget(lab(name, 'caption'), r, 0)
+            g.addWidget(w, r, 1)
 
         g = self._group(v, 'GAINS  (numeric - pending until APPLY)')
         self.gain_edits = {}
@@ -1251,6 +1268,7 @@ class MainWindow(QMainWindow):
                 'track_entry_mm': self.entry_mm.value(), 'track_entry_deg': self.entry_deg.value(),
                 'marker_loss': self.loss.currentText(), 'marker_loss_ms': self.loss_ms.value(),
                 'pose_jump_mm': self.jump.value(), 'camera': self.cam_cb.isChecked(),
+                'grip_cube_mm': self.grip_cube.value(), 'grip_force_n': self.grip_force.value(),
                 **({'gains': dict(g)} if (g := self.b.session_gains()) else {})}
 
     def _restore_settings(self):
@@ -1294,6 +1312,8 @@ class MainWindow(QMainWindow):
         combo('marker_loss', self.loss, 'marker loss', '')
         spin('track_entry_mm', self.entry_mm, 'TRACK entry', ' mm')
         spin('track_entry_deg', self.entry_deg, 'TRACK entry tilt', ' deg')
+        spin('grip_cube_mm', self.grip_cube, 'GRIP cube', ' mm')
+        spin('grip_force_n', self.grip_force, 'GRIP force', ' N')
         spin('marker_loss_ms', self.loss_ms, 'marker loss after', ' ms')
         spin('pose_jump_mm', self.jump, 'pose jump alarm', ' mm')
         if 'floor_mm' in vals:
@@ -1348,7 +1368,8 @@ class MainWindow(QMainWindow):
         kick = lambda *_: self._save_timer.start()           # noqa: E731
         for cb in (self.target, self.tol, self.inplane, self.step, self.rot, self.loss):
             cb.currentTextChanged.connect(kick)
-        for sp in (self.entry_mm, self.entry_deg, self.loss_ms, self.jump):
+        for sp in (self.entry_mm, self.entry_deg, self.loss_ms, self.jump, self.grip_cube,
+                   self.grip_force):
             sp.valueChanged.connect(kick)
         for e in (self.floor_edit, self.box['x'][0], self.box['x'][1], self.box['y'][0],
                   self.box['y'][1], self.box['z']):
@@ -1419,6 +1440,7 @@ class MainWindow(QMainWindow):
 
         self._render_speed(s, en, m)
         self._render_tspeed(s, en, trk)
+        self._render_grip(s)
         self._render_buttons(s, en, nxt, now, trk)
         self.pos_sec.set_inactive(m != 'POSITION',
                                   'impedance holds the arm - RELEASE returns here'
@@ -1464,6 +1486,8 @@ class MainWindow(QMainWindow):
                         if self.inplane.currentText() != 'off' else 'In-plane  (off)')
             elif name == 'auto_converge':
                 text = f'AUTO-CONVERGE   →   {self.target.currentText()} mm standoff'
+            elif name == 'grip':
+                text = f'GRIP  {s.grip_cube_mm:.0f} mm cube'
             elif name == 'track_fast':
                 fast = logic.speed_torque(self.st.track_fast_pct, self.st)
                 text = (('▲ FAST ON  ' if s.track_fast else 'FAST  ')
@@ -1501,6 +1525,17 @@ class MainWindow(QMainWindow):
             text += '   ·   applies to the next planned move'
         set_text(self.speed_txt, text)
 
+    def _render_grip(self, s):
+        g = s.grip
+        if not s.grip_node_up:
+            text = 'grip_node not running'
+        elif g.get('state') == 'busy':
+            text = f'{g.get("step", "")}...'
+        else:
+            text = (('holding a cube  ·  ' if g.get('holding') == 'true' else '')
+                    + (g.get('reason') or g.get('message') or ''))
+        set_text(self.grip_state, text)
+
     def _render_tspeed(self, s, en, trk):
         pct = self.tspeed.value()
         set_text(self.tspeed_val, f'{pct:3d} %')
@@ -1529,8 +1564,10 @@ class MainWindow(QMainWindow):
         if self.pending_gains is None and applied is not None and not trk:
             self._set_pending(dict(applied))
         pend = self.pending_gains or {}
-        set_text(self.gain_state, 'tracking profile in force - yours come back at END TRACK' if trk else 'applied' + ('  →  pending (amber)' if s.gains_pending
-                                                         and applied else ''))
+        own = trk and s.track.get('gains') == 'operator'     # TRACK kept the operator's gains
+        set_text(self.gain_state, 'your gains in force - locked while tracking' if own else
+                 'tracking profile in force - yours come back at END TRACK' if trk else
+                 'applied' + ('  →  pending (amber)' if s.gains_pending and applied else ''))
         for k, lbl in self.gain_lbls.items():
             a, p = (applied or {}).get(k), pend.get(k)
             if trk:
@@ -1546,9 +1583,10 @@ class MainWindow(QMainWindow):
             pending = a is not None and p is not None and abs(p - a) > 1e-9
             lbl.setStyleSheet(f'color: {T["amber"] if pending else T["ink"]};')
             restyle(self.gain_edits[k], pending='true' if pending else 'false')
-        idx = logic.preset_index(pend, self.presets) if pend and not trk else None
+        shown = applied if own else pend
+        idx = logic.preset_index(shown, self.presets) if shown and (own or not trk) else None
         self.preset.set_index(idx)
-        self.preset.custom_text = 'TRACK PROFILE' if trk else 'CUSTOM'
+        self.preset.custom_text = 'TRACK PROFILE' if trk and not own else 'CUSTOM'
         e = en['preset']
         self.preset.set_blocked(not e.ok, e.why)
 

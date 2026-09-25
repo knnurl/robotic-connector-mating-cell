@@ -207,3 +207,13 @@ def test_fast_blocked_before_track_says_why(make):
     w.buttons['track_fast'].click()
     assert not any(c[0] == 'track_fast' for c in b.cmds)
     assert 'only while tracking' in w.log_box.toPlainText()
+
+
+def test_tracking_on_the_operators_gains_says_so(make):
+    track = {'state': 'tracking', 'reason': '', 'policy': 'hold', 'gains': 'operator'}
+    w, b = make('tracking', track=track)
+    assert w.gain_state.text().startswith('your gains in force')
+    assert w.preset.custom_text == 'CUSTOM'
+    w, b = make('tracking')                                # an older node: its profile
+    assert w.gain_state.text().startswith('tracking profile in force')
+

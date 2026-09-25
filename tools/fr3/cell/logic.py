@@ -43,7 +43,8 @@ TRACK_LIVE_STATES = ('starting', 'tracking', 'holding', 'stopping')
 POSITION_CONTROLS = ('translate', 'level', 'inplane', 'auto_converge')
 TORQUE_CONTROLS = ('preflight', 'float', 'hold', 'setpoint_minus',
                    'setpoint_plus', 'hold_here', 'track', 'release',
-                   'apply_gains', 'preset', 'speed', 'track_speed', 'track_fast')
+                   'apply_gains', 'preset', 'speed', 'track_speed', 'track_fast',
+                   'grip', 'place')
 ALWAYS = ('stop_now', 'pause', 'stop_after', 'record')
 
 
@@ -71,6 +72,8 @@ class Settings:
     track_speed_default_pct: float = 10.0
     speed_confirm_pct: float = 25.0
     track_fast_pct: float = 40.0
+    grip_cube_mm: float = 55.0
+    grip_force_n: float = 20.0
     position_ceiling_pct: float = 20.0  # core.CEIL_SPEED_PCT
     slew_max_mps: float = 0.25          # impedance_detail.hpp ConfigLimits
     slew_max_rps: float = 1.0
@@ -161,6 +164,9 @@ class Snap:
     over_lead_policy: str = 'hold'
     track_fast: bool = False
     track_blind: bool = False           # drawer: TRACK may start without the marker
+    grip_node_up: bool = False
+    grip: dict = field(default_factory=dict)     # grip_node's status: state, step, holding
+    grip_cube_mm: float = 55.0
 
 
 @dataclass(frozen=True)
@@ -361,7 +367,10 @@ def enable(s, st):
 
     torque = [idle, state, err, (imp_on, 'impedance controller is not active'),
               (s.floating is False, 'floating - press HOLD first'),
-              (not trk, 'the tracking node owns the equilibrium')]
+              (not trk, 'the tracking node owns the equilibrium'),
+              # grip_node's own word, not only this panel's busy flag: a
+              # panel restarted mid-GRIP must not start TRACK under it.
+              (s.grip.get('state') != 'busy', 'grip_node is running a sequence')]
     en['setpoint_minus'] = _first(torque + [move])
     en['setpoint_plus'] = en['setpoint_minus']
     en['hold_here'] = _first(torque)
@@ -390,6 +399,14 @@ def enable(s, st):
              'it would not move: ALIGN closer, or set over lead to clamp')]
         en['track'] = _first(torque + [
             move, (s.track_node_up, 'the tracking node is not running')] + seen)
+
+    # GRIP drives the equilibrium like TRACK does: never both.
+    holding_cube = s.grip.get('holding') == 'true'
+    grip_up = (s.grip_node_up, 'grip_node is not running - relaunch fr3_cell')
+    en['grip'] = _first(torque + [move, grip_up, marker,
+                                  (not holding_cube, 'already holding a cube - PLACE it first')])
+    en['place'] = _first(torque + [move, grip_up,
+                                   (holding_cube, 'not holding a cube - GRIP one first')])
 
     # RELEASE stays pressable while the controller manager is silent: the Tk panel's
     # RELEASE always was, and a flaky poll must never strand the operator.
@@ -722,9 +739,8 @@ def marker_errors(p, R, target_m, inplane_target, pos_tol_m, st):
 
 
 def vision_event(s, st):
-    """Why the camera view should enlarge by itself, or None."""
-    if s.marker_age is not None and s.marker_age > st.pose_stale_s:
-        return f'marker lost ({s.marker_age*1000:.0f} ms)'
+    """Why the camera view should enlarge by itself, or None. Not a lost
+    marker: the banner already says so, and TRACK may now run without one."""
     if s.camera_on and s.image_age is not None and s.image_age > st.image_stale_s:
         return f'camera frames stale ({s.image_age:.1f} s)'
     if s.jump_mm > st.pose_jump_mm:

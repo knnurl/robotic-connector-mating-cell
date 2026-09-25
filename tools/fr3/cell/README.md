@@ -30,6 +30,18 @@ TRACK SPEED. TRACK is refused when the marker error is beyond tracking_node's
 60 mm lead cap under over lead hold or stop: the node would hold forever.
 The drawer's "TRACK may start without the marker" skips every marker check
 at START; the node holds until it sees the marker. It is off at every launch.
+TRACK keeps the gains you applied (`tracking_use_operator_gains`); the node
+scales its friction deadband and extra-pull caps to that stiffness.
+
+GRIP (TORQUE section, from HOLD with the marker in view) grips the marked
+cube with the Franka Hand: `grip_node.py` reads the cube pose once from the
+marker, opens the Hand, glides above the cube, descends, grasps and lifts -
+all on the impedance controller with your gains. PLACE reverses it. STOP NOW
+holds where the arm is and leaves the Hand as it is. The cube size and grasp
+force are in the drawer; the rest is `grip_*` in `fr3_params.yaml`. Each
+GRIP or PLACE writes `runs/<day>/grip_*.jsonl`. The geometry is
+`grip_logic.py` (pure, tested); the node was run against the mock arm with
+the Hand stubbed, not yet on the arm.
 
 The panel runs as the ROS node `cell_panel`. It refuses to start while
 another `cell_panel` is up, and exits without touching the controllers, so
@@ -46,8 +58,8 @@ on 2026-09-24; its ROS layer and exit handoff carried over unchanged
 - **Banner:** below the status bar, showing the one highest-priority fault
   (`logic.banner`), or READY and the mode.
 - **Left column:**
-  - camera thumbnail: click to enlarge; it enlarges by itself on marker
-    loss, stale frames or a pose jump;
+  - camera thumbnail: click to enlarge; it enlarges by itself on stale
+    frames or a pose jump (not on a lost marker: the banner says that);
   - telemetry;
   - force bar against this session's PRE-FLIGHT thresholds;
   - worst joint;
@@ -161,6 +173,6 @@ The panel does what the GUI side can. These need the controller side:
   Measured in one session each: HOLD was 8.7-28.7 % below 97 % RT success
   unoptimised, and 0.0 % (minimum 99 %) after
   `--cmake-args -DCMAKE_BUILD_TYPE=Release`. FLOAT was clean in both.
-  Pinning to P-cores and rarer polling did not help. Remaining work: make
-  Release the default in both CMakeLists, so a clean rebuild cannot silently
-  go back to unoptimised.
+  Pinning to P-cores and rarer polling did not help. Done 2026-09-24
+  (da51731): both CMakeLists default to Release, so a clean rebuild cannot
+  silently go back to unoptimised.

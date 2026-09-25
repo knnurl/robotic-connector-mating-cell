@@ -99,6 +99,7 @@ def generate_launch_description():
                                              marker_id, capture_fps, real),
                                      TimerAction(period=3.0, condition=real, actions=[
                                          _tracking(params_file),
+                                         _grip(params_file),
                                          _panel([])]),
                                      _mock_cell(IfCondition(mock)),
                                      TimerAction(period=2.0, condition=IfCondition(mock),
@@ -200,6 +201,15 @@ def _tracking(params_file):
         output='screen',
         parameters=[params_file, overrides],
     )
+
+
+def _grip(params_file):
+    # Python, run from the source tree like the panel: no rebuild after an
+    # edit. It holds the equilibrium only while GRIP or PLACE runs.
+    return ExecuteProcess(
+        cmd=['python3', '-u', os.path.join(THIS_DIR, 'cell', 'grip_node.py'),
+             '--ros-args', '--params-file', params_file],
+        name='grip_node', output='screen')
 
 
 def _mock_cell(condition):

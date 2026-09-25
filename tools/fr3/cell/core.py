@@ -145,6 +145,16 @@ OVER_LEAD_DEFAULT = 'hold'
 # The node's own word on tracking: latched (transient_local), ~5 Hz and on
 # every state change. Older than this, the node is silent - maybe gone.
 TRACK_STATUS_TOPIC = f'/{TRACKING_NODE}/status'
+# grip_node (cell/grip_node.py): GRIP and PLACE block until the sequence ends
+# (open, approach, descend at 15 mm/s, grasp, lift: well under a minute);
+# STOP answers at once. Status latched like the tracking node's.
+GRIP_NODE = 'grip_node'
+GRIP_SRV = f'/{GRIP_NODE}/grip'
+PLACE_SRV = f'/{GRIP_NODE}/place'
+GRIP_STOP_SRV = f'/{GRIP_NODE}/stop'
+GRIP_PARAMS_SRV = f'/{GRIP_NODE}/set_parameters_atomically'
+GRIP_STATUS_TOPIC = f'/{GRIP_NODE}/status'
+GRIP_CALL_TIMEOUT_S = 180.0
 TRACK_STATUS_STALE_S = 1.0
 # Every state but idle: the node drives the arm, is about to, or is still
 # putting back its gain snapshot.

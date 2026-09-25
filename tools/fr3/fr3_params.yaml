@@ -150,13 +150,13 @@
     # Buzz watchdog: tracking stops (gains restored) when any joint's measured
     # torque above 20 Hz exceeds this rms. 2026-09-23 at 1 kHz: normal work
     # peaked at 0.15 Nm over 24 min; the 40 Hz wrist buzz read 4-5 Nm (5.9 peak).
-    # 2.5, was 0.5 then 1.0 (2026-09-24, operator's call): fast TRACK
-    # (125-250 mm/s) reads 0.2-1.0 Nm without buzzing - the arm stop-starts on
-    # each 15 fps goal step and lunges on catch-ups - and tripped 0.5 in 6 of 7
-    # runs and 1.0 in 2 of 3. Replaying the 09-23 recording, 2.5 catches the
-    # real buzz 0.71 s after 0.5 did (it grew 0.3 -> 3 Nm in 0.85 s and peaked
-    # at 5.9), still ~10 s before the operator stopped it.
-    tracking_buzz_stop_nm: 2.5
+    # 3.5, was 0.5, 1.0, 2.5 (2026-09-24, operator's call): fast TRACK reads
+    # 0.2-2.6 Nm without a sustained buzz, rising with the catch-up speed
+    # (~1 Nm at 125-160 mm/s, 2.55 Nm at 230 mm/s after marker dropouts; the
+    # frame glide did not remove it). Replaying the 09-23 recording, 3.5 catches
+    # the real buzz 0.76 s after 0.5 did (it grew 0.3 -> 3 Nm in 0.85 s, then
+    # sat above 3.5 for ~10 s at up to 5.9), still before the operator stopped it.
+    tracking_buzz_stop_nm: 3.5
     # Each camera frame (~15 Hz) moves the goal; the 50 Hz loop glides between
     # frames instead of stepping, so a fast slew no longer stop-starts the arm
     # on every frame. Adds up to one frame of delay; false = the old steps.
@@ -174,6 +174,39 @@
     tracking_joint_lower: [-2.7437, -1.7837, -2.9007, -3.0421, -2.8065, 0.5445, -3.0159]
     tracking_joint_upper: [2.7437, 1.7837, 2.9007, -0.1518, 2.8065, 4.5169, 3.0159]
     tracking_joint_margin_rad: 0.14     # ~8 deg; the FR3 still allows ~0.4-1 rad/s toward a stop there
+    # true = TRACK keeps the operator's applied gains (2026-09-24, the user's
+    # call); only the profile slew is written, and the deadband and lead caps
+    # below scale by (profile k / k in force) so they stay F/k and 15 N/k.
+    # false = the track_* gain profile is applied at START, as before.
+    tracking_use_operator_gains: true
+
+    # --- GRIP (cell/grip_node.py) ------------------------------------------
+    # The panel's GRIP grips a marked cube with the Franka Hand on the
+    # impedance controller (the operator's gains), reading its pose ONCE from
+    # the marker centred on its top face. cell_panel writes grip_cube_m and
+    # grip_force_n from its drawer before every GRIP. Heights are along the
+    # marker normal; the Z floor, the workspace box and the joint limits above
+    # apply to every target.
+    grip_base_frame: fr3_link0
+    grip_tcp_frame: fr3_hand_tcp
+    grip_cube_m: 0.055                  # m; the Franka Hand strokes 80 mm
+    grip_open_margin_m: 0.020           # m opened beyond the cube before the descent
+    grip_depth_m: 0.025                 # m below the top face for the TCP (fingertip centre)
+    grip_approach_m: 0.10               # m above the grasp before the descent
+    grip_lift_m: 0.05                   # m lifted after the grasp
+    grip_force_n: 20.0                  # N grasp force
+    grip_epsilon_m: 0.008               # m either side of grip_cube_m the grasp accepts
+    grip_travel_mps: 0.04               # m/s approach, lift, retreat
+    grip_descend_mps: 0.015             # m/s the last approach_m down (and PLACE's)
+    grip_turn_radps: 0.4                # rad/s wrist turn at most
+    grip_contact_n: 10.0                # N change in external force (vs the move's start): hold, or set down
+    grip_arrive_window_m: 0.015         # m; PLACE takes a contact as the set-down only this close to it
+    grip_tol_m: 0.003                   # m settled within, before the next step
+    grip_tol_deg: 3.0                   # deg
+    grip_settle_s: 8.0                  # s to settle, else it fails with how far off it is
+    grip_ki: 0.5                        # 1/s friction integrator, as tracking_ki
+    grip_raw_timeout_s: 0.25            # s; GRIP needs a raw detection this fresh
+    grip_joint_margin_rad: 0.05         # rad; a joint this close to its stop halts the grip
 
     # Gain profile (TRACKING_SPEC.md section 4 C1). Sent as ONE atomic
     # set_parameters request; the controller's GainLimits still reject the

@@ -184,3 +184,18 @@ def test_applied_gains_are_saved(app, tmp_path):
     w.may_close = True
     w.close()
 
+
+def test_the_grip_drawer_survives_a_restart(app, tmp_path):
+    p = tmp_path / 'settings.yaml'
+    w = _window(Live(p))
+    w.grip_cube.setValue(48)
+    w.grip_force.setValue(30)
+    w._save_settings()
+    w.may_close = True
+    w.close()
+    b = Live(p)
+    w2 = _window(b)
+    assert w2.grip_cube.value() == 48 and b.params['grip_cube_mm'] == 48.0
+    assert w2.grip_force.value() == 30 and b.params['grip_force_n'] == 30.0
+    w2.may_close = True
+    w2.close()

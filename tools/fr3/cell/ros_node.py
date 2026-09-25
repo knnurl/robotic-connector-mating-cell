@@ -48,6 +48,7 @@ from core import (COLLISION_TORQUE_NM, COLLISION_WRENCH, CONTACT_TORQUE_NM,
                   ROBOT_STATE_RELAY, ROBOT_STATE_RELAY_HZ, ROBOT_STATE_TOPIC,
                   TRACK_CALL_TIMEOUT_S, TRACK_PARAMS_SRV, TRACK_PARAM_SRV,
                   TRACK_START_SRV, TRACK_STATUS_TOPIC, TRACK_STOP_SRV, q2R,
+                  GRIP_SRV, PLACE_SRV, GRIP_STOP_SRV, GRIP_PARAMS_SRV, GRIP_STATUS_TOPIC,
                   run_resumable)
 
 sys.path.insert(0, str(core.FR3))
@@ -217,6 +218,15 @@ class CellNodeBase(Node):
                                                    TRACK_PARAMS_SRV)
         self.track_param_cli = self.create_client(SetParameters,
                                                   TRACK_PARAM_SRV)
+        self.grip_cli = self.create_client(Trigger, GRIP_SRV)
+        self.place_cli = self.create_client(Trigger, PLACE_SRV)
+        self.grip_stop_cli = self.create_client(Trigger, GRIP_STOP_SRV)
+        self.grip_params_cli = self.create_client(SetParametersAtomically, GRIP_PARAMS_SRV)
+        self._grip_status = None   # (fields, monotonic stamp)
+        self.create_subscription(
+            DiagnosticStatus, GRIP_STATUS_TOPIC, self._grip_status_cb,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
         # Latched: a panel started mid-run still gets the node's last word.
         self._track_status = None  # (fields, monotonic stamp)
         self.create_subscription(
@@ -633,19 +643,64 @@ class CellNodeBase(Node):
         with self._lock:
             self._track_status = (f, time.monotonic())
 
+    def _grip_status_cb(self, m):
+        f = {'message': m.message}
+        f.update((kv.key, kv.value) for kv in m.values)
+        with self._lock:
+            self._grip_status = (f, time.monotonic())
+
+    def grip_status(self):
+        """The grip node's latest status fields, or None."""
+        with self._lock:
+            s = self._grip_status
+        return None if s is None else dict(s[0])
+
+    def grip_stop(self):
+        """Fire and forget: grip_node holds at once; nothing to wait for."""
+        if self.grip_stop_cli.service_is_ready():
+            self.grip_stop_cli.call_async(Trigger.Request())
+
+    def set_grip_params(self, values, timeout_s=5.0):
+        """The drawer's cube size, force and box, all or none, before GRIP."""
+        if not self.grip_params_cli.service_is_ready():
+            return False, 'grip_node is not running'
+        req = SetParametersAtomically.Request()
+        req.parameters = [_param_msg(k, v) for k, v in values.items()]
+        fut = self.grip_params_cli.call_async(req)
+        if not self._wait(fut, timeout_s) or fut.result() is None:
+            return False, f'no answer from {self.grip_params_cli.srv_name}'
+        r = fut.result().result
+        return bool(r.successful), ('applied' if r.successful else r.reason or 'refused')
+
     def track_status(self):
         """(fields, age_s) of the tracking node's latest status, or None."""
         with self._lock:
             s = self._track_status
         return None if s is None else (s[0], time.monotonic() - s[1])
 
-    def call_trigger(self, cli, timeout_s=TRACK_CALL_TIMEOUT_S):
+    def call_trigger(self, cli, timeout_s=TRACK_CALL_TIMEOUT_S, who='the tracking node'):
         """One Trigger call, answered rather than waited on: the tracking
-        node is optional, so a missing one is an answer, not a stall."""
+        node is optional, so a missing one is an answer, not a stall. The
+        wait also ends if the server leaves the graph mid-call - a future
+        never completes once its server is gone."""
         if not cli.service_is_ready():
-            return False, 'the tracking node is not running'
+            return False, f'{who} is not running'
         fut = cli.call_async(Trigger.Request())
-        if not self._wait(fut, timeout_s) or fut.result() is None:
+        end = time.time() + timeout_s
+        gone_since = None
+        while not fut.done() and time.time() < end:
+            if cli.service_is_ready():
+                gone_since = None
+            elif gone_since is None:
+                gone_since = time.time()
+            elif time.time() - gone_since > 1.0:
+                return False, (f'{who} went away mid-call - whatever it last commanded is '
+                               'still held by the controller; press STOP NOW')
+            time.sleep(0.02)
+        if not fut.done() and who != 'the tracking node':
+            return False, (f'no answer from {cli.srv_name} in {timeout_s:.0f} s - {who} may '
+                           'still be moving the arm; press STOP NOW')
+        if not fut.done() or fut.result() is None:
             # A timeout says nothing about what the node did - it may be
             # tracking. Never report this as "not started".
             return False, (f'no answer from {cli.srv_name} in {timeout_s:.0f} s '

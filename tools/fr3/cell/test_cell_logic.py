@@ -315,7 +315,7 @@ def test_marker_loss_policy():
 
 def test_vision_events():
     assert L.vision_event(position(), ST) is None
-    assert 'lost' in L.vision_event(position(marker_age=2.0), ST)
+    assert L.vision_event(position(marker_age=2.0), ST) is None     # the banner says it
     assert 'stale' in L.vision_event(position(image_age=9.0), ST)
     assert 'jumped' in L.vision_event(position(jump_mm=ST.pose_jump_mm + 5), ST)
 
@@ -383,3 +383,16 @@ def test_start_without_marker_skips_every_marker_check():
     assert L.enable(torque(marker=far, track_blind=True), ST)['track'].ok
     # the rest of the TRACK gate still applies
     assert not L.enable(torque(track_blind=True, floating=True, **blind), ST)['track'].ok
+
+
+def test_grip_needs_the_hold_the_node_and_the_marker_and_never_runs_with_track():
+    up = dict(grip_node_up=True)
+    assert L.enable(torque(**up), ST)['grip'].ok
+    assert 'grip_node' in L.enable(torque(), ST)['grip'].why
+    assert not L.enable(torque(marker=None, marker_age=None, **up), ST)['grip'].ok
+    assert not L.enable(tracking(**up), ST)['grip'].ok            # both drive the equilibrium
+    assert not L.enable(torque(floating=True, **up), ST)['grip'].ok
+    held = dict(grip={'holding': 'true'}, **up)
+    assert 'PLACE it first' in L.enable(torque(**held), ST)['grip'].why
+    assert L.enable(torque(**held), ST)['place'].ok
+    assert 'not holding' in L.enable(torque(**up), ST)['place'].why

@@ -54,6 +54,8 @@ class Params:
     track_speed_pct: float = 10.0
     track_fast: bool = False          # FAST: live only while tracking, off at every START/end
     track_blind: bool = False         # drawer: TRACK may start without the marker; off at launch
+    grip_cube_mm: float = 55.0        # drawer: the cube GRIP grips
+    grip_force_n: float = 20.0        # drawer: the Hand's grasp force
     setpoint_mm: float = float(core.SETPOINT_MM_DEFAULT)
     axis: str = core.AXIS_CHOICES[0]
     over_lead: str = core.OVER_LEAD_DEFAULT
@@ -126,6 +128,8 @@ class Cell:
         self.emit = emit or (lambda *a: None)
         self.params = Params(speed_pct=settings.speed_default_pct,
                              track_speed_pct=settings.track_speed_default_pct,
+                             grip_cube_mm=settings.grip_cube_mm,
+                             grip_force_n=settings.grip_force_n,
                              marker_loss=settings.marker_loss_policy,
                              marker_loss_ms=settings.marker_loss_ms)
         # run state
@@ -311,6 +315,9 @@ class Cell:
         if ts is not None:
             s.track, s.track_age = dict(ts[0]), ts[1]
         s.track_node_up = n.track_start_cli.service_is_ready()
+        s.grip_node_up = n.grip_cli.service_is_ready()
+        s.grip = n.grip_status() or {}
+        s.grip_cube_mm = p.grip_cube_mm
         s.busy = self.busy
         s.preflight = self.preflight
         s.thresholds = self.thresholds
@@ -457,6 +464,8 @@ class Cell:
         self.user_paused = False
         self.n.stop_now()
 
+        self.n.grip_stop()                  # a running GRIP/PLACE holds where the arm is
+
         def work():
             msgs, ok = ['MoveIt halted'], True
             ctl = self.controller()
@@ -487,6 +496,12 @@ class Cell:
         """PAUSE / RESUME. Position: the Tk panel's pause (halt, keep the run, resume
         from rest). Torque: pin the equilibrium where the arm is; while
         tracking there is no pause interface (TODO C3), so it stops tracking."""
+        if self.busy in ('grip', 'place'):
+            self.n.grip_stop()
+            self.say(f'PAUSE during {self.busy.upper()}: grip_node has no pause - stopped it; '
+                     'it holds where the arm is. Press it again to redo it from the start.')
+            self.trace({'rec': 'pause_grip', 'busy': self.busy})
+            return
         if self.controller() == 'impedance':
             if self.tracking or self._track_state() in logic.TRACK_LIVE_STATES:
                 self.say('PAUSE while tracking: tracking_node has no pause '
@@ -524,6 +539,10 @@ class Cell:
         if not self.busy:
             self.say('stop after current move: nothing is running (a setpoint '
                      'glide always runs to its end)')
+            return
+        if self.busy in ('grip', 'place'):
+            self.say(f'stop after current move: {self.busy.upper()} is one move and runs to '
+                     'its end - STOP NOW stops it now')
             return
         self.abort = True
         self.stopped = True
@@ -1299,6 +1318,52 @@ class Cell:
         self.say(f'TRACKING: {msg} at {p.track_speed_pct:.0f}% - the arm follows the '
                  'marker. STOP NOW or END TRACK ends it.')
         return True, msg
+
+    def grip(self):
+        """GRIP: grip_node reads the cube from the marker, opens, glides above
+        it, descends, grasps and lifts - on the impedance controller, with the
+        operator's gains. Blocks until it is done; STOP NOW stops it."""
+        p = self.params
+        self.abort = self.stopped = False
+        why = self.blocked()
+        if why is not None:
+            return False, why
+        if self.tracking:
+            return False, 'end TRACK first - GRIP and TRACK both drive the equilibrium'
+        # grip_node moves the equilibrium: a later SETPOINT +/- must re-anchor
+        # at the arm, not step from wherever the panel last put it.
+        self.setpoint = None
+        ok, msg = self.n.set_grip_params({
+            'grip_cube_m': p.grip_cube_mm / 1000.0, 'grip_force_n': float(p.grip_force_n),
+            'tracking_box_x_m': list(self.st.box_x), 'tracking_box_y_m': list(self.st.box_y),
+            'tracking_box_z_max_m': float(self.st.box_z_max)})
+        if not ok:
+            return False, f'could not hand the cube size to {core.GRIP_NODE} ({msg})'
+        self.open_trace()
+        self.say(f'GRIP: {p.grip_cube_mm:.0f} mm cube, {p.grip_force_n:.0f} N - STOP NOW holds '
+                 'where the arm is')
+        if self.abort:                    # STOP NOW while the parameters went out
+            return False, 'GRIP not started: STOP NOW'
+        ok, msg = self.n.call_trigger(self.n.grip_cli, core.GRIP_CALL_TIMEOUT_S, 'grip_node')
+        self.setpoint = None
+        self.trace({'rec': 'grip', 'ok': ok, 'msg': msg, 'cube_mm': p.grip_cube_mm,
+                    'force_n': p.grip_force_n})
+        self.say(f'GRIP: {msg}')
+        return ok, msg
+
+    def place(self):
+        self.abort = self.stopped = False
+        why = self.blocked()
+        if why is not None:
+            return False, why
+        if self.tracking:
+            return False, 'end TRACK first - PLACE and TRACK both drive the equilibrium'
+        self.setpoint = None
+        ok, msg = self.n.call_trigger(self.n.place_cli, core.GRIP_CALL_TIMEOUT_S, 'grip_node')
+        self.setpoint = None
+        self.trace({'rec': 'place', 'ok': ok, 'msg': msg})
+        self.say(f'PLACE: {msg}')
+        return ok, msg
 
     def stop_tracking(self):
         """Never refuses."""

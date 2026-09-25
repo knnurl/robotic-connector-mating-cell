@@ -112,6 +112,7 @@ struct Params
     std::vector<double> joint_lower;    // FR3 limits, franka_description joint_limits.yaml
     std::vector<double> joint_upper;
     double joint_margin_rad{0.14};      // a pull toward a stop inside this holds
+    bool use_operator_gains{true};      // TRACK keeps the operator's k/zeta; only the slew changes
     double state_timeout_s{0.1};
     double profile_timeout_s{2.0};
     double settle_s{1.0};
@@ -409,6 +410,7 @@ private:
         get("tracking_joint_lower", p.joint_lower);
         get("tracking_joint_upper", p.joint_upper);
         get("tracking_joint_margin_rad", p.joint_margin_rad);
+        get("tracking_use_operator_gains", p.use_operator_gains);
         if (p.joint_lower.size() != 7 || p.joint_upper.size() != 7) {
             throw std::runtime_error("tracking_joint_lower/upper need 7 entries each");
         }
@@ -855,12 +857,69 @@ private:
             return "could not read the current gains from " + params_.impedance_controller +
                    " - refusing to change what cannot be put back";
         }
+        // The deadband and the extra-pull caps are F_friction / k and
+        // 15 N / k: with the operator's gains they scale from the yaml values
+        // (tuned at the profile's stiffness) by k_profile / k_in_force.
+        auto largest = [](const rclcpp::Parameter &prm) {
+            double worst = 0.0;
+            for (double k : prm.as_double_array()) {
+                worst = std::max(worst, k);
+            }
+            return worst;
+        };
+        const double k_pos = params_.use_operator_gains ? largest((*snapshot)[0]) : max_gain(0);
+        const double k_rot = params_.use_operator_gains ? largest((*snapshot)[1]) : max_gain(1);
+        if (!(k_pos > 0.0) || !(k_rot > 0.0)) {
+            return "the stiffness in force is zero - apply gains before TRACK";
+        }
+        tracking_law::Config session_cfg = cfg_;
+        session_cfg.deadband_m = params_.deadband_m * max_gain(0) / k_pos;
+        session_cfg.lead_max_m = params_.lead_max_m * max_gain(0) / k_pos;
+        session_cfg.deadband_rad = params_.deadband_rad * max_gain(1) / k_rot;
+        session_cfg.lead_max_rad = params_.lead_max_rad * max_gain(1) / k_rot;
+        // Friction alone parks a soft arm F/k off the goal. Past half the
+        // over-lead cap that is no tracking at all, and a lead cap that far
+        // out can wind the lead beyond the cap during a hold and latch it.
+        if (session_cfg.deadband_m > 0.5 * cfg_.max_lead_m ||
+            session_cfg.deadband_rad > 0.5 * cfg_.max_lead_rad) {
+            char why[240];
+            std::snprintf(why, sizeof(why),
+                          "the gains in force are too soft to track: joint friction alone "
+                          "parks the arm up to %.0f mm / %.1f deg off the marker (k_pos %.0f "
+                          "N/m, k_rot %.0f Nm/rad) - apply commission or stiffer",
+                          session_cfg.deadband_m * 1000.0,
+                          session_cfg.deadband_rad * 180.0 / M_PI, k_pos, k_rot);
+            return why;
+        }
+        session_cfg.lead_max_m = std::min(session_cfg.lead_max_m, 0.5 * cfg_.max_lead_m);
+        session_cfg.lead_max_rad = std::min(session_cfg.lead_max_rad, 0.5 * cfg_.max_lead_rad);
+        const std::string bad = tracking_law::validate_config(
+            session_cfg, k_pos, k_rot, params_.max_force_n, params_.max_torque_nm);
+        if (!bad.empty()) {
+            return "the gains in force do not suit tracking: " + bad;
+        }
+        auto axes = [](const rclcpp::Parameter &prm) {
+            const auto k = prm.as_double_array();
+            return k.size() == 3 ? tf2::Vector3(k[0], k[1], k[2]) : tf2::Vector3(0, 0, 0);
+        };
+        const tf2::Vector3 k_pos_axes =
+            axes(params_.use_operator_gains ? (*snapshot)[0] : profile_.at(0));
+        const tf2::Vector3 k_rot_axes =
+            axes(params_.use_operator_gains ? (*snapshot)[1] : profile_.at(1));
         {
             std::lock_guard<std::mutex> lock(control_mutex_);
             if (start_aborted_) {
                 return "stopped during start";
             }
             restore_ = snapshot;
+            cfg_.deadband_m = session_cfg.deadband_m;
+            cfg_.lead_max_m = session_cfg.lead_max_m;
+            cfg_.deadband_rad = session_cfg.deadband_rad;
+            cfg_.lead_max_rad = session_cfg.lead_max_rad;
+            session_k_pos_ = k_pos;
+            session_k_rot_ = k_rot;
+            session_k_pos_axes_ = k_pos_axes;
+            session_k_rot_axes_ = k_rot_axes;
         }
 
         // Re-seed the equilibrium at the arm and let it settle BEFORE the
@@ -878,7 +937,15 @@ private:
                 return "stopped during start";
             }
         }
-        const auto [ok, reason] = apply_params(profile_);
+        // Operator gains: only the profile's slew goes out (TRACK SPEED
+        // overrides it right after START); k and zeta stay the operator's.
+        std::vector<rclcpp::Parameter> session;
+        for (const auto &prm : profile_) {
+            if (!params_.use_operator_gains || prm.get_name().rfind("setpoint_slew", 0) == 0) {
+                session.push_back(prm);
+            }
+        }
+        const auto [ok, reason] = apply_params(session);
 
         std::lock_guard<std::mutex> lock(control_mutex_);
         if (start_aborted_) {
@@ -942,6 +1009,15 @@ private:
                     tracking_law::rotation_vector(offset->getRotation()).length() *
                         180.0 / M_PI,
                     params_.eef_frame.c_str());
+        const std::string gains = params_.use_operator_gains
+                                      ? std::string("the operator's")
+                                      : "the '" + params_.gain_profile + "' profile";
+        RCLCPP_INFO(get_logger(),
+                    "Gains: %s - k_pos %.0f N/m, k_rot %.0f Nm/rad in force; deadband %.1f mm "
+                    "/ %.2f deg, extra pull up to %.1f mm / %.2f deg.",
+                    gains.c_str(), session_k_pos_, session_k_rot_, cfg_.deadband_m * 1000.0,
+                    cfg_.deadband_rad * 180.0 / M_PI, cfg_.lead_max_m * 1000.0,
+                    cfg_.lead_max_rad * 180.0 / M_PI);
         return {};
     }
 
@@ -1094,7 +1170,8 @@ private:
             const std::string why =
                 joints ? tracking_law::joint_limit_veto(joints->first, joints->second,
                                                         verdict.eq, *measured, cfg_,
-                                                        max_gain(0), max_gain(1))
+                                                        session_k_pos_axes_,
+                                                        session_k_rot_axes_)
                        : std::string("no joint state to check the joint limits against");
             if (!why.empty()) {
                 verdict = {tracking_law::Verdict::Act::kHold, verdict.eq, why};
@@ -1238,6 +1315,7 @@ private:
         add("state", s.state);
         add("reason", s.reason);
         add("policy", tracking_law::over_lead_name(policy_));
+        add("gains", params_.use_operator_gains ? "operator" : "profile");
         add("pos_err_mm", num(s.pos_err_mm, 1));
         add("rot_err_deg", num(s.rot_err_deg, 2));
         add("lead_mm", num(s.lead_mm, 1));
@@ -1402,6 +1480,10 @@ private:
     // The session values are written by START before tracking_ goes true.
     tracking_law::Lead lead_;
     tracking_law::GoalGlide glide_;
+    double session_k_pos_{1500.0};      // the stiffness in force this session (START)
+    double session_k_rot_{90.0};
+    tf2::Vector3 session_k_pos_axes_{1500.0, 1500.0, 1500.0};   // tool-frame diagonals
+    tf2::Vector3 session_k_rot_axes_{90.0, 90.0, 90.0};
     tf2::Transform t_tcp_ee_{tf2::Transform::getIdentity()};
     tf2::Transform t_tcp_cam_{tf2::Transform::getIdentity()};
     double standoff_m_{0.10};

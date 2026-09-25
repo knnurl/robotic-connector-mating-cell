@@ -344,10 +344,10 @@ than the 4.3 mm worst case computed above. If V1 beats it, that is why.
   amplitude sat at the torque-rate limit (1 Nm/ms / (2 pi 40 Hz) = 4 Nm); the
   same gains at HOLD with position kicks stayed quiet, because a still wrist
   sits in stiction. Now: `track_damping_ratio` 0.5, and tracking_node stops
-  itself above 2.5 Nm rms of >20 Hz joint torque (normal work peaked at
+  itself above 3.5 Nm rms of >20 Hz joint torque (normal work peaked at
   0.15 Nm over 24 min of recording; 0.5, then 1.0, until 2026-09-24, when
   fast TRACK's stop-start on 15 fps goal steps and catch-ups read 0.2-1.0 Nm
-  without a buzz; the real buzz crosses 2.5 0.71 s after 0.5). Since
+  without a buzz, then 2.5; the real buzz crosses 3.5 0.76 s after 0.5). Since
   then the node glides the goal between camera frames (`GoalGlide`,
   `tracking_goal_glide`), so a fast slew follows the marker continuously
   instead of stop-starting each frame. Walking k_rot up again is still open.

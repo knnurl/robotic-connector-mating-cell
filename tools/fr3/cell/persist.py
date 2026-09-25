@@ -22,7 +22,8 @@ import yaml
 
 KEYS = ('standoff_mm', 'pos_tol_mm', 'inplane', 'floor_mm', 'box_x_mm', 'box_y_mm',
         'box_z_max_mm', 'step_mm', 'rot_deg', 'track_entry_mm', 'track_entry_deg',
-        'marker_loss', 'marker_loss_ms', 'pose_jump_mm', 'camera', 'gains')
+        'marker_loss', 'marker_loss_ms', 'pose_jump_mm', 'camera', 'gains',
+        'grip_cube_mm', 'grip_force_n')
 HEADER = ('# FR3 Cell Control - the settings drawer as last left, restored at start.\n'
           '# Written by the GUI on every change. Delete this file to go back to the\n'
           '# defaults in tools/fr3/cell/config/settings.yaml.\n')
