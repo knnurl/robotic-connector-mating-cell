@@ -218,8 +218,14 @@ def _vision(context):
     else:
         params['source'] = source
         executable = 'cam_pub'
+    # One BLAS thread: the per-frame plane fits are tiny SVDs, and OpenBLAS
+    # spreads each over every core, next to the 1 kHz control loop
+    # (measured on recorded frames: cam_pub kept 4.7 cores busy, 2.5 with
+    # one BLAS thread, at the same speed).
+    one_thread = {v: '1' for v in ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS',
+                                   'MKL_NUM_THREADS')}
     return [Node(package='roscam', executable=executable, output='screen',
-                 parameters=[params])]
+                 parameters=[params], additional_env=one_thread)]
 
 
 def _tracking(params_file):
