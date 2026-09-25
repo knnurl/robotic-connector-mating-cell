@@ -49,7 +49,7 @@ from core import (COLLISION_TORQUE_NM, COLLISION_WRENCH, CONTACT_TORQUE_NM,
                   TRACK_CALL_TIMEOUT_S, TRACK_PARAMS_SRV, TRACK_PARAM_SRV,
                   TRACK_START_SRV, TRACK_STATUS_TOPIC, TRACK_STOP_SRV, q2R,
                   GRIP_SRV, PLACE_SRV, PLACE_AT_SRV, GRIP_STOP_SRV, GRIP_PARAMS_SRV,
-                  GRIP_STATUS_TOPIC,
+                  GRIP_STATUS_TOPIC, VISION_PARAMS_SRV,
                   run_resumable)
 
 sys.path.insert(0, str(core.FR3))
@@ -224,6 +224,7 @@ class CellNodeBase(Node):
         self.place_at_cli = self.create_client(Trigger, PLACE_AT_SRV)
         self.grip_stop_cli = self.create_client(Trigger, GRIP_STOP_SRV)
         self.grip_params_cli = self.create_client(SetParametersAtomically, GRIP_PARAMS_SRV)
+        self.vision_params_cli = self.create_client(SetParameters, VISION_PARAMS_SRV)
         self._grip_status = None   # (fields, monotonic stamp)
         self.create_subscription(
             DiagnosticStatus, GRIP_STATUS_TOPIC, self._grip_status_cb,
@@ -661,6 +662,19 @@ class CellNodeBase(Node):
         """Fire and forget: grip_node holds at once; nothing to wait for."""
         if self.grip_stop_cli.service_is_ready():
             self.grip_stop_cli.call_async(Trigger.Request())
+
+    def set_vision_record(self, record_dir, timeout_s=3.0):
+        """Start ('<dir>') or stop ('') vision_standalone's frame recording."""
+        if not self.vision_params_cli.service_is_ready():
+            return False, 'the vision node is not running'
+        req = SetParameters.Request(parameters=[_param_msg('record_dir', str(record_dir))])
+        fut = self.vision_params_cli.call_async(req)
+        if not self._wait(fut, timeout_s) or fut.result() is None:
+            return False, 'no answer from the vision node'
+        r = fut.result().results[0]
+        if r.successful:
+            return True, 'ok'
+        return False, (r.reason or 'refused')
 
     def set_grip_params(self, values, timeout_s=5.0):
         """The drawer's cube size, force and box, all or none, before GRIP."""

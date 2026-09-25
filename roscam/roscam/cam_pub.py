@@ -255,6 +255,10 @@ class ArucoPosePublisher(Node):
 
         self.pose_pub = self.create_publisher(PoseStamped, '/aruco/pose', 10)
         self.pose_raw_pub = self.create_publisher(PoseStamped, '/aruco/pose_raw', 10)
+        # Called after every pose publish with (topic, header, t, q): an
+        # embedding process (vision_standalone's recorder) sees exactly what
+        # went out, per frame, without subscribing to itself.
+        self.on_publish = None
         self.target_id = int(self.get_parameter('target_marker_id').value)
         if self.target_id >= 0 and self.target_id in self.board_ids:
             # An optional feature must never take the tracked marker down.
@@ -665,6 +669,12 @@ class ArucoPosePublisher(Node):
         out.header = header  # camera optical frame, image timestamp
         self._fill_pose(out, t, q)
         publisher.publish(out)
+        if self.on_publish is not None:
+            try:
+                self.on_publish(publisher.topic_name, header, t, q)
+            except Exception as e:                          # noqa: BLE001
+                self.get_logger().warn(f'on_publish hook failed: {e}',
+                                       throttle_duration_sec=5.0)
 
 
 def main(args=None):

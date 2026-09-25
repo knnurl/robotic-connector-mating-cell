@@ -157,6 +157,10 @@ GRIP_STOP_SRV = f'/{GRIP_NODE}/stop'
 GRIP_PARAMS_SRV = f'/{GRIP_NODE}/set_parameters_atomically'
 GRIP_STATUS_TOPIC = f'/{GRIP_NODE}/status'
 GRIP_CALL_TIMEOUT_S = 180.0
+# The vision node (cam_pub or vision_standalone, both ArucoPosePublisher).
+# vision_standalone records its own frames while record_dir is set; the
+# panel's REC button sets it beside the bag (PERCEPTION_PLAN Phase 0).
+VISION_PARAMS_SRV = '/aruco_pose_publisher/set_parameters'
 TRACK_STATUS_STALE_S = 1.0
 # Every state but idle: the node drives the arm, is about to, or is still
 # putting back its gain snapshot.

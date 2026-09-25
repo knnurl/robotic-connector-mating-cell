@@ -31,7 +31,6 @@ from launch.actions import (DeclareLaunchArgument, ExecuteProcess, LogInfo,
 from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 HANDEYE_FILE = os.path.join(THIS_DIR, 'calib', 'handeye.yaml')
@@ -44,11 +43,6 @@ IMPEDANCE_PARAMS = os.path.normpath(os.path.join(
 
 def generate_launch_description():
     params_file = LaunchConfiguration('params_file')
-    filter_frame = LaunchConfiguration('filter_frame')
-    vision_source = LaunchConfiguration('vision_source')
-    marker_id = LaunchConfiguration('marker_id')
-    target_marker_id = LaunchConfiguration('target_marker_id')
-    capture_fps = LaunchConfiguration('capture_fps')
     mock = LaunchConfiguration('mock')
 
     # Read on every launch: the file is the one copy of the calibration and
@@ -73,8 +67,19 @@ def generate_launch_description():
                                           'AT B (-1 = off)'),
         DeclareLaunchArgument('vision_source', default_value='realsense',
                               description='realsense = in-process capture with depth, no '
-                                          'image topics (default); topic = a separate camera '
-                                          'driver publishes colour only'),
+                                          'image topics (default); standalone = the same, '
+                                          'run by vision_standalone (frame recording, capture '
+                                          'settings - PERCEPTION_PLAN Phase 0); topic = a '
+                                          'separate camera driver publishes colour only'),
+        DeclareLaunchArgument('capture_width', default_value='640'),
+        DeclareLaunchArgument('capture_height', default_value='480'),
+        DeclareLaunchArgument('capture_preset', default_value='',
+                              description="standalone only: D405 visual preset name, e.g. "
+                                          "'High Accuracy' ('' = device default)"),
+        DeclareLaunchArgument('capture_spatial_filter', default_value='false',
+                              description='standalone only: SDK spatial filter on the depth'),
+        DeclareLaunchArgument('capture_exposure_us', default_value='-1',
+                              description='standalone only: locked exposure in us (-1 = auto)'),
         DeclareLaunchArgument('capture_fps', default_value='15',
                               description='D405 capture rate in realsense mode; '
                                           '/aruco/pose is published at this rate'),
@@ -99,8 +104,7 @@ def generate_launch_description():
     real = UnlessCondition(mock)
     return LaunchDescription(args + [_impedance_spawner(real),
                                      _static_tf(handeye, real),
-                                     _vision(filter_frame, vision_source,
-                                             marker_id, target_marker_id, capture_fps, real),
+                                     OpaqueFunction(function=_vision),
                                      TimerAction(period=3.0, condition=real, actions=[
                                          _tracking(params_file),
                                          _grip(params_file),
@@ -164,28 +168,40 @@ def _static_tf(handeye, condition):
     return OpaqueFunction(function=make, condition=condition)
 
 
-def _vision(filter_frame, vision_source, marker_id, target_marker_id, capture_fps, condition):
-    return Node(
-        condition=condition,
-        package='roscam',
-        executable='cam_pub',
-        output='screen',
-        parameters=[{
-            # topic mode: RealSense D405 driver defaults (remap via -p).
-            # realsense mode ignores these and captures in-process -
-            # zero image topics on the graph (see README defence 0).
-            'image_topic': '/camera/camera/color/image_rect_raw',
-            'camera_info_topic': '/camera/camera/color/camera_info',
-            'source': vision_source,
-            'filter_frame': filter_frame,
-            'marker_id': ParameterValue(marker_id, value_type=int),
-            'target_marker_id': ParameterValue(target_marker_id, value_type=int),
-            'capture_fps': ParameterValue(capture_fps, value_type=int),
-            # Debug image is only encoded/published while something
-            # subscribes - keep GUI subscriptions off the robot NIC.
-            'publish_debug_image': True,
-        }],
-    )
+def _vision(context):
+    """cam_pub (realsense / topic) or vision_standalone (standalone): the
+    same ArucoPosePublisher and the same parameters either way, so the
+    marker pipeline is identical and only the camera owner changes."""
+    arg = lambda name: LaunchConfiguration(name).perform(context)     # noqa: E731
+    if arg('mock') == 'true':
+        return []
+    source = arg('vision_source')
+    params = {
+        # topic mode: RealSense D405 driver defaults (remap via -p).
+        # realsense / standalone capture in-process - zero image topics
+        # on the graph (see README defence 0).
+        'image_topic': '/camera/camera/color/image_rect_raw',
+        'camera_info_topic': '/camera/camera/color/camera_info',
+        'filter_frame': arg('filter_frame'),
+        'marker_id': int(arg('marker_id')),
+        'target_marker_id': int(arg('target_marker_id')),
+        'capture_fps': int(arg('capture_fps')),
+        'capture_width': int(arg('capture_width')),
+        'capture_height': int(arg('capture_height')),
+        # Debug image is only encoded/published while something
+        # subscribes - keep GUI subscriptions off the robot NIC.
+        'publish_debug_image': True,
+    }
+    if source == 'standalone':
+        params.update(capture_preset=arg('capture_preset'),
+                      capture_spatial_filter=arg('capture_spatial_filter') == 'true',
+                      capture_exposure_us=int(arg('capture_exposure_us')))
+        executable = 'vision_standalone'
+    else:
+        params['source'] = source
+        executable = 'cam_pub'
+    return [Node(package='roscam', executable=executable, output='screen',
+                 parameters=[params])]
 
 
 def _tracking(params_file):

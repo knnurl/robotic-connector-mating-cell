@@ -80,7 +80,7 @@ class Recorder:
               '/aruco/pose_raw', core.TRACK_STATUS_TOPIC, core.EQUILIBRIUM_TOPIC,
               f'/{core.IMPEDANCE_CONTROLLER}/transition_event',
               '/trajectory_execution_event', '/cell_panel/heartbeat',
-              '/tf', '/tf_static']
+              '/tf', '/tf_static', '/aruco/target_pose_raw', core.GRIP_STATUS_TOPIC]
 
     def __init__(self):
         self.proc, self.t0, self.path = None, None, None
@@ -1497,9 +1497,17 @@ class Cell:
         return ok, msg
 
     def toggle_record(self):
-        ok, msg = (self.recorder.stop() if self.recorder.running()
-                   else self.recorder.start())
+        stopping = self.recorder.running()
+        ok, msg = self.recorder.stop() if stopping else self.recorder.start()
         self.say(msg)
+        # The camera's own frames, recorded inside vision_standalone (images
+        # never go on DDS); cam_pub has no record_dir and says so.
+        v_ok, v_msg = self.n.set_vision_record('' if stopping else
+                                               str(core.trace_dir() / 'vision'))
+        if not stopping:
+            self.say('camera frames: ' + (f'recording -> {core.trace_dir() / "vision"}' if v_ok
+                                          else f'NOT recorded ({v_msg}) - launch with '
+                                               'vision_source:=standalone to record them'))
         return ok, msg
 
     # ------------------------------------------------------------ 50 Hz sample
