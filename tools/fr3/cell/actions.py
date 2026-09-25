@@ -15,6 +15,7 @@ waits for a busy flag is not a stop.
 """
 
 import collections
+import concurrent.futures
 import ctypes
 import datetime
 import json
@@ -84,6 +85,11 @@ class Recorder:
 
     def __init__(self):
         self.proc, self.t0, self.path = None, None, None
+        # PR_SET_PDEATHSIG fires when the THREAD that forked the child exits,
+        # not the process. REC runs on a short-lived action thread, so forking
+        # there sent the bag SIGINT at once; fork from this one, which lives
+        # as long as the panel.
+        self._spawner = concurrent.futures.ThreadPoolExecutor(1, 'bag_spawner')
 
     def running(self):
         return self.proc is not None and self.proc.poll() is None
@@ -99,10 +105,10 @@ class Recorder:
         self.path = folder / ('bag_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
         libc = ctypes.CDLL('libc.so.6', use_errno=True)
         # SIGINT on parent death: the bag is finalised even if the GUI dies.
-        self.proc = subprocess.Popen(
-            ['ros2', 'bag', 'record', '-o', str(self.path)] + self.TOPICS,
+        self.proc = self._spawner.submit(
+            subprocess.Popen, ['ros2', 'bag', 'record', '-o', str(self.path)] + self.TOPICS,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            preexec_fn=lambda: libc.prctl(1, signal.SIGINT))
+            preexec_fn=lambda: libc.prctl(1, signal.SIGINT)).result()
         self.t0 = time.monotonic()
         return True, f'recording -> {self.path}'
 
