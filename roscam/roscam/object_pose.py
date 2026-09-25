@@ -144,7 +144,7 @@ class ObjectPoseEstimator:
     seeds the search. bgr_clean (the camera's own colour frame, never
     drawn on) gives the outline from colour edges (stage B); None: depth only."""
 
-    def __init__(self, part, sample_m=0.0015, edge_step_m=0.0003, max_points=800,
+    def __init__(self, part, sample_m=0.0015, edge_step_m=0.0003, max_points=600,
                  search_m=0.010, prior_err_m=0.005, depth_band_m=0.015, support_band_m=0.003,
                  max_incidence_deg=86.0, rim_max_incidence_deg=75.0, outline_offset_px=0.5,
                  max_iter=30, min_points=200, max_rms_m=0.0015, min_inlier_frac=0.8,
@@ -374,8 +374,8 @@ class ObjectPoseEstimator:
             zr = zs[ring]
             gr = full_nrm[wy0:wy1:4, wx0:wx1:4][ring]
             pts = np.column_stack([gr[:, 0] * zr, gr[:, 1] * zr, zr])
-            if len(pts) > 3000:
-                pts = pts[np.linspace(0, len(pts) - 1, 3000).astype(int)]
+            if len(pts) > 800:                    # plenty for a plane
+                pts = pts[np.linspace(0, len(pts) - 1, 800).astype(int)]
             fit = fit_plane_robust(pts)
             if fit is not None:
                 n, c = fit[0], fit[1]
@@ -516,13 +516,17 @@ class ObjectPoseEstimator:
                'out_uv': out_uv, 'out_n': out_n, 'region': region}
 
         # Stage A: the depth outline, from the prior (only close enough for
-        # the colour edge search when stage B follows).
+        # the colour edge search when stage B follows). When colour edges
+        # follow and the prior is already inside their search window (the
+        # last estimate while tracking), only height and tilt from the
+        # surface: the depth outline would add time and nothing else.
         colour = self.colour_edges and self.use_outline and bgr_clean is not None
-        T, rim = self._solve(prior, ctx, q, coarse=colour, err=err)
+        near = colour and err * ctx['f'] / max(float(prior[2, 3]), 0.05) <= 6.0
+        T, rim = self._solve(prior, ctx, q, coarse=colour, err=err, outline=not near)
         if T is None:
             q['compute_ms'] = (time.perf_counter() - t_start) * 1e3
             return None, False, q
-        edges = None
+        edges = obs = None
         q['edge_source'] = 'depth' if self.use_outline else None
         # Stage B: the outline from colour edges, from stage A's pose, with
         # the silhouette points it sees there. Kept only if enough of them
@@ -531,19 +535,20 @@ class ObjectPoseEstimator:
             X, _, eid = self._rim(T[:3, :3], T[:3, 3], K, dist, depth, roi)
             if len(X):
                 img = self._edge_image(bgr_clean, roi)
-                T_b, frac = self._stage_b(T, ctx, q, (X, eid), img)
+                T_b, frac, obs_b = self._stage_b(T, ctx, q, (X, eid), img)
                 if T_b is not None and frac >= self.gates['min_outline_frac']:
-                    T, rim, edges = T_b, (X, eid), (img, (3, 4))
+                    T, rim, edges, obs = T_b, (X, eid), (img, (3, 4)), obs_b
                     q['edge_source'] = 'colour'
-            if edges is None:
-                T, rim = self._solve(T, ctx, q, err=0.0015)   # finish stage A properly
+            if edges is None:                               # finish stage A properly
+                T, rim = self._solve(T, ctx, q, err=0.0015 if not near else err)
                 if T is None:
                     q['compute_ms'] = (time.perf_counter() - t_start) * 1e3
                     return None, False, q
 
-        # Final statistics at the tight gates.
+        # Final statistics at the tight gates (the last colour round's edges).
         R, t = T[:3, :3], T[:3, 3]
-        J, r, wts, _ = self._rows(ctx, R, t, 0.003, 0.003, q, rim=rim, edges=edges, final=True)
+        J, r, wts, _ = self._rows(ctx, R, t, 0.003, 0.003, q, rim=rim, edges=edges, obs=obs,
+                                  final=True)
         if J is not None:
             L = max(self.size_m / 2.0, 0.005)
             D = np.diag([1.0 / L] * 3 + [1.0] * 3)
@@ -592,13 +597,14 @@ class ObjectPoseEstimator:
         q['compute_ms'] = (time.perf_counter() - t_start) * 1e3
         return T, q['valid'], q
 
-    def _solve(self, T0, ctx, q, coarse=False, err=0.005):
+    def _solve(self, T0, ctx, q, coarse=False, err=0.005, outline=True):
         """Stage A: Gauss-Newton from T0 against the depth outline, gates
         shrinking from 2x err (surface) and 6x err (outline) to 3 mm, the
         silhouette points frozen once both are tight. coarse (colour edges
         follow and will set the outline anyway): stop at 0.05 mm / 0.05 deg
-        a step instead of 0.01 / 0.01, and after 8 steps at most. Returns
-        (T, rim) or (None, rim)."""
+        a step instead of 0.01 / 0.01, and after 8 steps at most. outline
+        False: the surface alone (height and tilt; the prior keeps the rest).
+        Returns (T, rim) or (None, rim)."""
         T = np.array(T0, dtype=np.float64, copy=True)
         tol_t, tol_r = (5e-5, np.radians(0.05)) if coarse else (1e-5, np.radians(0.01))
         rim = None
@@ -607,18 +613,18 @@ class ObjectPoseEstimator:
             R, t = T[:3, :3], T[:3, 3]
             gate_s = max(0.003, 2.0 * err * 0.6 ** it)
             gate_o = max(0.003, 6.0 * err * 0.6 ** it)
-            J, r, wts, X = self._rows(ctx, R, t, gate_s, gate_o, q, rim=rim)
+            J, r, wts, X = self._rows(ctx, R, t, gate_s, gate_o, q, rim=rim, outline=outline)
             # Once the gates are tight, keep the silhouette points fixed:
             # re-deciding their visibility every step made them flicker in
             # and out by sub-pixel pose changes, and the answer with them.
-            if rim is None and gate_s <= 0.003 and gate_o <= 0.003:
+            if outline and rim is None and gate_s <= 0.003 and gate_o <= 0.003:
                 rim = X
             if J is None:
                 return None, rim
             x = self._gn_step(J, r, wts)
             T = self._apply(T, x)
             q['iterations'] = q.get('iterations', 0) + 1
-            if (rim is not None and np.linalg.norm(x[3:]) < tol_t
+            if ((rim is not None or not outline) and np.linalg.norm(x[3:]) < tol_t
                     and np.linalg.norm(x[:3]) < tol_r):
                 break
         return T, rim
@@ -629,8 +635,8 @@ class ObjectPoseEstimator:
         held FIXED: re-searching every step let the targets move with the
         model and the solve crawl. A wide search (8 px in, 10 out), then a
         narrow one (3, 4) from where the first landed. Returns (T, the
-        fraction of silhouette points that found an edge in the last round)
-        or (None, that fraction)."""
+        fraction of silhouette points that found an edge in the last round,
+        that round's edges) or (None, that fraction, None)."""
         X, eid = rim
         frac = 0.0
         for win, steps in (((8, 10), 4), ((3, 4), 3)):
@@ -639,7 +645,7 @@ class ObjectPoseEstimator:
             frac = len(obs[0]) / max(1, len(X))
             pairs = self._surface_pairs(ctx, R, t, 0.003)
             if len(obs[0]) + len(pairs[0]) < 12:
-                return None, frac
+                return None, frac, None
             for _ in range(steps):
                 J, r, w = self._fixed_rows(ctx, T, pairs, X, obs, max(win) + 1.0)
                 x = self._gn_step(J, r, w)
@@ -647,7 +653,7 @@ class ObjectPoseEstimator:
                 q['iterations'] = q.get('iterations', 0) + 1
                 if np.linalg.norm(x[3:]) < 1e-5 and np.linalg.norm(x[:3]) < np.radians(0.01):
                     break
-        return T, frac
+        return T, frac, obs
 
     @staticmethod
     def _gn_step(J, r, w):
@@ -784,16 +790,20 @@ class ObjectPoseEstimator:
         return found, uv[found] + off[:, None] * nrm[found], nrm[found]
 
     @staticmethod
-    def _part_like(pool, inner, pk, share=0.03, tol=24.0, max_colours=12):
+    def _part_like(pool, inner, pk, share=0.03, tol=24.0, max_colours=12, blend_colours=6):
         """Which candidates (pk) have an inner colour that belongs to the
         part: near one of its MAJOR colours near the outline (bins of 16
         levels holding at least `share` of the pool), or near the blend of
         two of them - a narrow strip of one colour beside another (the
         cube's yellow beside its blue patch) reads as their blend."""
         q = np.clip(pool // 16, 0, 15).astype(int)
-        hist = np.zeros((16,) * q.shape[1])
-        np.add.at(hist, tuple(q.T), 1.0)
-        hist = uniform_filter(hist, size=3, mode='constant') * 3 ** q.shape[1]
+        ch = q.shape[1]
+        flat = np.ravel_multi_index(tuple(q.T), (16,) * ch)
+        hist = np.bincount(flat, minlength=16 ** ch).reshape((16,) * ch).astype(np.float64)
+        hist = uniform_filter(hist, size=3, mode='constant') * 3 ** ch
+        # The part's colours: every well-filled bin, not just the peaks - a
+        # colour that varies (translucent tape over yellow) fills a spread of
+        # bins that one peak per colour would not cover.
         major = np.argwhere(hist >= max(3.0, share * len(pool)))
         out = np.zeros_like(pk)
         if not len(major):
@@ -802,15 +812,19 @@ class ObjectPoseEstimator:
         C = (major + 0.5) * 16.0                                        # (Kc, ch)
         rows, cols = np.nonzero(pk)
         c = inner[rows, cols]                                           # (P, ch)
-        d = np.linalg.norm(c[:, None, :] - C[None], axis=2).min(axis=1)
-        i, j = np.triu_indices(len(C), 1)
-        if len(i):
-            a, ab = C[i], C[j] - C[i]                                   # segments a -> a + ab
-            tt = np.clip(np.einsum('pkc,kc->pk', c[:, None, :] - a[None], ab)
+        ok = (((c[:, None, :] - C[None]) ** 2).sum(axis=2) <= tol * tol).any(axis=1)
+        # blends only between the main colours, and only for what is left
+        B = C[:blend_colours]
+        i, j = np.triu_indices(len(B), 1)
+        rest = np.flatnonzero(~ok)
+        if len(i) and len(rest):
+            cr = c[rest]
+            a, ab = B[i], B[j] - B[i]                                   # segments a -> a + ab
+            tt = np.clip(np.einsum('pkc,kc->pk', cr[:, None, :] - a[None], ab)
                          / np.maximum((ab ** 2).sum(1), 1e-9), 0.0, 1.0)
-            ds = np.linalg.norm(c[:, None, :] - (a[None] + tt[..., None] * ab[None]), axis=2)
-            d = np.minimum(d, ds.min(axis=1))
-        out[rows, cols] = d <= tol
+            e = cr[:, None, :] - (a[None] + tt[..., None] * ab[None])
+            ok[rest] = ((e ** 2).sum(axis=2) <= tol * tol).any(axis=1)
+        out[rows, cols] = ok
         return out
 
     def _edge_obs_rows(self, X, obs, R, t, ctx, c_px):
@@ -836,20 +850,22 @@ class ObjectPoseEstimator:
         return (np.vstack([Js, Jo]), np.concatenate([rs, ro]),
                 np.concatenate([_tukey(rs, 0.003), self.outline_weight * wo]))
 
-    def _rows(self, ctx, R, t, gate_s, gate_o, q, rim=None, edges=None, final=False):
+    def _rows(self, ctx, R, t, gate_s, gate_o, q, rim=None, edges=None, obs=None,
+              final=False, outline=True):
         """Stacked Jacobian rows, residuals (m) and robust weights of both
         terms at pose R, t, in the parameters of an update A applied to the
         scene in the object frame (T <- T A^-1), as icp.py does; and the
         silhouette points used, (X, edge ids) (rim: use these instead of
         finding them; edges: (image, window) - the outline from colour
-        edges found from this pose)."""
+        edges found from this pose, or obs: those edges already found;
+        outline False: the surface alone)."""
         S = ctx['S']
         pairs = self._surface_pairs(ctx, R, t, gate_s)
         Js, rs = self._surface_rows(ctx, R, t, pairs)
 
         # Outline: model silhouette points against the depth outline, or
         # against colour edges.
-        if not self.use_outline:
+        if not (self.use_outline and outline):
             X, eid = np.zeros((0, 3)), np.zeros(0, int)
             Jo, ro, wo = np.zeros((0, 6)), np.zeros(0), np.zeros(0)
         else:
@@ -862,7 +878,8 @@ class ObjectPoseEstimator:
                 Jo, ro, wo = np.zeros((0, 6)), np.zeros(0), np.zeros(0)
             elif edges is not None:
                 img, win = edges
-                obs = self._find_edges(X, eid, R, t, ctx, img, win)
+                if obs is None:
+                    obs = self._find_edges(X, eid, R, t, ctx, img, win)
                 Jo, ro, wo = self._edge_obs_rows(X, obs, R, t, ctx, max(win) + 1.0)
             else:
                 Jo, ro, wo = self._depth_outline_rows(X, P, R, ctx, gate_o)
