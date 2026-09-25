@@ -61,7 +61,7 @@ from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 
 from roscam.plane_normal import (disambiguate_by_normal, fuse_orientation,
-                                 marker_plane_normal, solve_square_by_depth)
+                                 marker_plane_normal, range_scale, solve_square_by_depth)
 from roscam.pose_kf import PoseKF, compose_pose
 from roscam.rs_capture import RsCapture
 
@@ -120,6 +120,16 @@ class ArucoPosePublisher(Node):
         # while the depth fit is unbiased at 0.11 mm rms. 'aruco' keeps the
         # IPPE orientation as-is (previous behaviour).
         self.declare_parameter('tilt_source', 'depth')
+        # Where the marker's DISTANCE comes from. 'depth': keep the ArUco ray
+        # and slide the position along it onto the depth plane that
+        # tilt_disambiguation 'depth' fits around the marker (see
+        # plane_normal.range_scale: ArUco read ~1 mm long at 100 mm, ~10 mm
+        # at 300 mm on this cell). No plane this frame, or one that disagrees
+        # by more than range_depth_max_rel (a finger, an edge, not the
+        # marker's plane): the ArUco distance is kept. 'aruco' = previous
+        # behaviour.
+        self.declare_parameter('range_source', 'aruco')
+        self.declare_parameter('range_depth_max_rel', 0.08)
         # Multi-marker grid board (occlusion robustness + accuracy):
         # board_markers_x*y > 1 switches from the single marker to a grid of
         # ids marker_id..marker_id+N-1. Pose = board centre, so taught
@@ -159,6 +169,12 @@ class ArucoPosePublisher(Node):
         self.declare_parameter('capture_width', 640)
         self.declare_parameter('capture_height', 480)
         self.declare_parameter('capture_fps', 15)
+        # In-process depth settings (realsense here, and vision_standalone):
+        # the D405 visual preset by name ('' = the device's), the SDK spatial
+        # filter, and a locked exposure in microseconds (-1 = auto).
+        self.declare_parameter('capture_preset', '')
+        self.declare_parameter('capture_spatial_filter', False)
+        self.declare_parameter('capture_exposure_us', -1)
         # Self-stamped frames: node time minus this capture latency estimate.
         self.declare_parameter('capture_latency_s', 0.02)
         # Debug-image rate cap outside topic mode (it exists for humans;
@@ -244,6 +260,10 @@ class ArucoPosePublisher(Node):
         self.tilt_depth_scale = float(
             self.get_parameter('tilt_depth_scale').value)
         self.tilt_source = str(self.get_parameter('tilt_source').value).lower()
+        self.range_source = str(self.get_parameter('range_source').value).lower()
+        if self.range_source not in ('aruco', 'depth'):
+            raise RuntimeError(f"range_source must be aruco|depth, got '{self.range_source}'")
+        self.range_depth_max_rel = float(self.get_parameter('range_depth_max_rel').value)
         self._last_normal = None       # last accepted marker normal (cam)
         self._depth_fit = None         # last depth plane fit, for diagnostics
         # Depth-fused rotation, or None. Must exist before any frame: the
@@ -292,7 +312,10 @@ class ArucoPosePublisher(Node):
                 height=int(self.get_parameter('capture_height').value),
                 fps=int(self.get_parameter('capture_fps').value),
                 # depth is needed to resolve the IPPE mirror ambiguity
-                enable_depth=(self.tilt_disambiguation == 'depth'))
+                enable_depth=(self.tilt_disambiguation == 'depth'),
+                preset=str(self.get_parameter('capture_preset').value),
+                spatial_filter=bool(self.get_parameter('capture_spatial_filter').value),
+                exposure_us=int(self.get_parameter('capture_exposure_us').value))
             self._capture.on_event = lambda m: self.get_logger().warn(m)
             intr = self._capture.start()
             self.set_intrinsics(intr.fx, intr.fy, intr.cx, intr.cy, intr.coeffs)
@@ -376,6 +399,10 @@ class ArucoPosePublisher(Node):
         normal: the depth-fitted plane (unambiguous) when available, else the
         last accepted normal (temporal lock-in).
         """
+        # Per-frame results: an early return below must not leave the last
+        # frame's plane or fused rotation to be applied to this one.
+        self._depth_fit = None
+        self._fused_R = None
         n_sol, rvecs, tvecs, _ = cv2.solvePnPGeneric(
             self.obj_points, img_pts, self.camera_matrix, self.dist_coeffs,
             flags=cv2.SOLVEPNP_IPPE_SQUARE)
@@ -390,7 +417,6 @@ class ArucoPosePublisher(Node):
         normals = [cv2.Rodrigues(r)[0][:, 2] for r in rvecs]
 
         ref, src = None, 'none'
-        self._depth_fit = None
         if self.tilt_disambiguation == 'depth' and depth_m is not None:
             fit = marker_plane_normal(
                 depth_m, img_pts, self.camera_matrix[0, 0],
@@ -425,7 +451,6 @@ class ArucoPosePublisher(Node):
         # orientation first shifts them ~1.8 px at 2.6 deg on a 21 mm marker
         # at 100 mm - right against the 2.0 px gate, so the good detection
         # would be thrown away. process_frame applies it after the gate.
-        self._fused_R = None
         if self.tilt_source == 'depth' and self._depth_fit is not None:
             R = cv2.Rodrigues(rvecs[pick])[0]
             fused = fuse_orientation(R, self._depth_fit['normal'])
@@ -489,9 +514,9 @@ class ArucoPosePublisher(Node):
     def process_frame(self, color_image, header, depth_m=None):
         """Full detection/filter/publish pipeline for one BGR frame.
 
-        depth_m (HxW metres, aligned to colour) is optional and used only to
-        resolve the IPPE mirror ambiguity; everything else is unchanged when
-        it is absent.
+        depth_m (HxW metres, aligned to colour) is optional. It resolves the
+        IPPE mirror ambiguity, and gives the out-of-plane tilt (tilt_source)
+        and the distance (range_source); without it the pose is ArUco's.
         """
         if self.camera_matrix is None:
             return
@@ -516,6 +541,12 @@ class ArucoPosePublisher(Node):
                 raw_optical = (raw_optical[0],
                                rotation_matrix_to_quaternion(self._fused_R))
                 rvec = cv2.Rodrigues(self._fused_R)[0]   # debug axes too
+            if (raw_optical is not None and self.range_source == 'depth'
+                    and depth_m is not None):
+                fit = self._depth_fit or {}
+                raw_optical = (self._depth_range(raw_optical[0], fit.get('normal'),
+                                                 fit.get('centroid'), 'marker'),
+                               raw_optical[1])
             measurement = raw_optical
             if raw_optical is not None and self.filter_frame:
                 # Filter where the marker is static: re-express the
@@ -600,10 +631,27 @@ class ArucoPosePublisher(Node):
         fused = fuse_orientation(cv2.Rodrigues(sol[0])[0], sol[2])
         if fused is None:
             return
-        self._publish(self.target_raw_pub, header, raw[0], rotation_matrix_to_quaternion(fused))
+        t = (self._depth_range(raw[0], sol[2], sol[3], 'target')
+             if self.range_source == 'depth' else raw[0])
+        self._publish(self.target_raw_pub, header, t, rotation_matrix_to_quaternion(fused))
         if self.publish_debug:
             cv2.drawFrameAxes(color_image, self.camera_matrix, self.dist_coeffs, sol[0], sol[1],
                               float(self.target_obj_points[1, 0] * 2))
+
+    def _depth_range(self, t, normal, centroid, which):
+        """t slid along its ray onto the depth plane (range_source 'depth');
+        t itself when there is no plane or it disagrees by more than
+        range_depth_max_rel. Called after the reprojection gate: the gate
+        judges the ArUco fit the corners gave."""
+        s = None if normal is None else range_scale(t, normal, centroid)
+        if s is None or abs(s - 1.0) > self.range_depth_max_rel:
+            self.get_logger().warn(
+                f'{which}: ArUco distance kept - '
+                + ('no depth plane' if s is None else
+                   f'the depth plane is {100.0 * (s - 1.0):+.1f}% off'),
+                throttle_duration_sec=5.0)
+            return t
+        return t * s
 
     def _validate(self, rvec, tvec, img_points, obj_points):
         """Gate a raw solvePnP result on reprojection error.

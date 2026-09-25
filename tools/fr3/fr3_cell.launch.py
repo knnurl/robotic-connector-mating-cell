@@ -73,13 +73,18 @@ def generate_launch_description():
                                           'separate camera driver publishes colour only'),
         DeclareLaunchArgument('capture_width', default_value='640'),
         DeclareLaunchArgument('capture_height', default_value='480'),
-        DeclareLaunchArgument('capture_preset', default_value='',
-                              description="standalone only: D405 visual preset name, e.g. "
-                                          "'High Accuracy' ('' = device default)"),
-        DeclareLaunchArgument('capture_spatial_filter', default_value='false',
-                              description='standalone only: SDK spatial filter on the depth'),
+        # High Accuracy + spatial filter: half the top-face depth noise of the
+        # device default up to 200 mm, same fill (runs/2026-09-25/analysis).
+        DeclareLaunchArgument('capture_preset', default_value='High Accuracy',
+                              description="D405 visual preset name ('' = device default)"),
+        DeclareLaunchArgument('capture_spatial_filter', default_value='true',
+                              description='SDK spatial filter on the depth'),
         DeclareLaunchArgument('capture_exposure_us', default_value='-1',
-                              description='standalone only: locked exposure in us (-1 = auto)'),
+                              description='locked exposure in us (-1 = auto)'),
+        DeclareLaunchArgument('range_source', default_value='depth',
+                              description='marker distance: depth = the ArUco ray onto the '
+                                          'depth plane around the marker; aruco = ArUco alone '
+                                          '(the rollback)'),
         DeclareLaunchArgument('capture_fps', default_value='15',
                               description='D405 capture rate in realsense mode; '
                                           '/aruco/pose is published at this rate'),
@@ -151,6 +156,15 @@ def _static_tf(handeye, condition):
             source = (f"calib/handeye.yaml ({handeye['method']}, "
                       f"{handeye['calibrated']}, residual "
                       f"{handeye['residual_mm']} mm / {handeye['residual_deg']} deg)")
+            aruco_range = (LaunchConfiguration('range_source').perform(context) == 'aruco'
+                           # topic mode gets colour only: cam_pub keeps the ArUco distance
+                           or LaunchConfiguration('vision_source').perform(context) == 'topic')
+            if aruco_range and 'xyz_aruco_range' in handeye:
+                # xyz is solved for depth-ranged marker poses; the raw ArUco
+                # distance needs the solve from the same raw samples.
+                xyz = [str(v) for v in handeye['xyz_aruco_range']]
+                source = (f"calib/handeye.yaml xyz_aruco_range for the ArUco distance "
+                          f"({handeye['method']}, {handeye['calibrated']})")
         else:
             source = 'the handeye_xyz/handeye_quat OVERRIDE, not calib/handeye.yaml'
         return [LogInfo(msg=f'fr3_cell: hand-eye TF from {source}'),
@@ -188,14 +202,18 @@ def _vision(context):
         'capture_fps': int(arg('capture_fps')),
         'capture_width': int(arg('capture_width')),
         'capture_height': int(arg('capture_height')),
+        'capture_preset': arg('capture_preset'),
+        'capture_spatial_filter': arg('capture_spatial_filter') == 'true',
+        'capture_exposure_us': int(arg('capture_exposure_us')),
+        # Measured 2026-09-25 (latency_fit, 640x480 @ 15 fps, High Accuracy +
+        # spatial filter): 24 ms, 95% CI 23-25.
+        'capture_latency_s': 0.024,
+        'range_source': arg('range_source'),
         # Debug image is only encoded/published while something
         # subscribes - keep GUI subscriptions off the robot NIC.
         'publish_debug_image': True,
     }
     if source == 'standalone':
-        params.update(capture_preset=arg('capture_preset'),
-                      capture_spatial_filter=arg('capture_spatial_filter') == 'true',
-                      capture_exposure_us=int(arg('capture_exposure_us')))
         executable = 'vision_standalone'
     else:
         params['source'] = source

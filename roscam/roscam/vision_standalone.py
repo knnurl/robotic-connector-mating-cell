@@ -137,9 +137,6 @@ def main(args=None):
     want_depth = (icp_node is not None
                   or str(aruco.get_parameter('tilt_disambiguation').value
                          ).lower() == 'depth')
-    aruco.declare_parameter('capture_preset', '')
-    aruco.declare_parameter('capture_spatial_filter', False)
-    aruco.declare_parameter('capture_exposure_us', -1)
     capture = RsCapture(
         width=int(aruco.get_parameter('capture_width').value),
         height=int(aruco.get_parameter('capture_height').value),
