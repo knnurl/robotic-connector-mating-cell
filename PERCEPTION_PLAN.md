@@ -1,6 +1,6 @@
 # Marker-free object pose for the FR3 cell: plan
 
-> **Status: plan, 2026-09-25 - not implemented.** Written by a 4-agent research workflow (a codebase reader, a state-of-the-art researcher, a planner that drafted three approaches and synthesised them, and a completeness critic that checked every cited file, topic and parameter against the code with graphify). Research inputs: [PERCEPTION_RESEARCH.md](PERCEPTION_RESEARCH.md). How the approach was chosen, and the critic's corrections, are in the appendices.
+> **Status: plan, 2026-09-25.** Implemented so far, offline and not yet confirmed on the arm: Phase 0 in part, then Phases 1, 2 and 3 (what is done, and what waits for the arm: TODO.md and ARM_CHECKLIST.md). Where the build departed from this plan, an **[AS BUILT]** block says so. Written by a 4-agent research workflow (a codebase reader, a state-of-the-art researcher, a planner that drafted three approaches and synthesised them, and a completeness critic that checked every cited file, topic and parameter against the code with graphify). Research inputs: [PERCEPTION_RESEARCH.md](PERCEPTION_RESEARCH.md). How the approach was chosen, and the critic's corrections, are in the appendices.
 
 Repo: `/home/local/ISDADS/ses634/fabling/Robotic Connector Handling/src`. Checked:
 - TRACK reads `pose_topic` and `tracking_raw_pose_topic` (`tracking_node.cpp:382-383`).
@@ -240,6 +240,15 @@ The vision process that owns the camera (`vision_standalone`) publishes:
 
 **Risks:** CPU contention, yaw jitter, and TF waits stacking into latency. All are measured before motion depends on depth.
 
+> **[AS BUILT 2026-09-25, offline]** `roscam/object_shadow.py`, the `Shadow` class in `vision_standalone.py` (since Phase 4 `DepthRunner`), and `tools/fr3/vision/loop_replay.py` (then `shadow_replay.py`). It departs from the plan above in five ways:
+> - **The object KF moves to Phase 4,** where it first drives anything. In shadow mode its only output would be a quality field nobody reads. The shadow bags carry `cand_pose` and TF, so the same filter can be run, and its per-axis noise tuned, offline on them. The quality keys therefore have no filtered depth pose yet.
+> - **The estimate is seeded only from the marker,** from the same frame, taken as good to 1.5 mm; with no marker there is no estimate. That puts it on the estimator's fast path from about 100 mm out.
+> - **A frame-budget guard.** The loop stamps a frame when it picks it up, so a frame that overruns the camera's period stamps the next one late. A frame is skipped when the last estimate would not fit in what is left of its period, never two in a row. The estimator's pixel grid is also built at start-up, not in the first frame.
+> - **Shadow mode is off by default** (`object_shadow:=true`, live), so marker-only baselines are measured without it.
+> - **`T_marker_object` is applied by both camera owners' contract** (cam_pub too), from `object_part`. Identity passes through untouched, so the Phase 1 bit-identical check still holds.
+>
+> The depth candidate's keys are `depth_valid`, `depth_reason` and `depth_ms` (`valid` stays the published source's). The panel chip reads `<ms> ms · MARKER · depth Δ0.4 mm 0.3°`.
+
 ### Phase 4: `depth_checked` mode (depth drives, the marker can veto)
 
 **What is built:**
@@ -262,6 +271,28 @@ The vision process that owns the camera (`vision_standalone`) publishes:
 - Veto rate < 5%.
 
 **Risks:** depth jitter makes the integrator hunt. The fix is the depth KF's measurement noise, not the gains.
+
+> **[AS BUILT 2026-09-26, offline]** Three pieces:
+> - `roscam/depth_checked.py`, the per-frame rules, ROS-free;
+> - `DepthRunner` in `vision_standalone.py`;
+> - the contract's second source, and the panel's option and chip.
+>
+> It departs from or fills in the plan in these ways:
+> - **The object KF** (moved here from Phase 3) takes the marker filter's settings, so `/object/pose` behaves as it did with the marker and only the measurement changes. Per-axis noise waits for evidence of jitter on the arm.
+> - **Acquisition:** 5 accepted estimates on one track after any start, source switch, hold or lost track (no accepted estimate for `max_prediction_s`). A frame without one (no marker, vetoed, invalid, skipped for the time budget) pauses the count; only the lost-track limit restarts it. A KF gate rejection before the track is acquired restarts the track from that estimate. The first version required 5 in a row; in hand-guided motion that lost about a quarter of the marker frames to re-acquisition. Changed 2026-09-26 with the user's OK.
+> - **The veto bounds tilt separately:** position 3 mm, in-plane 2°, tilt 4°, where the plan had one 2° angle. The marker's tilt, from the depth ring around its small square, is the noisier of the two, so at 2° the veto took over from ~250 mm. Changed 2026-09-26 with the user's OK.
+> - **The estimator runs in C++** (`object_pose_cpp`, `object_pose_impl:=cpp`), with the Python version as the reference. They give the same poses to rounding, checked on 91 recorded and 11 synthetic cases. On an E-core the estimator takes p95 8.5 ms instead of 30.7, and the depth raw goes out at p95 23 ms after frame pickup instead of 47 ms (the TRACK row asks for 40).
+> - **Veto accounting:** an estimate that fails its own gates while also disagreeing beyond 3 mm / 2° still counts as a veto in the rate. The rate restarts on a source switch.
+> - **The switch gap** is at least 5 frames and at least 0.34 s by image stamp after the last raw pose, so the consumers' 0.25 s raw timeout holds across a switch at any frame rate.
+> - **The depth measurement** goes into `fr3_link0` through cam_pub's own TF lookup for the same frame's marker: one lookup per frame.
+> - **Only `vision_standalone` with a part file offers it;** cam_pub refuses it and names the remedy. `depth_check_mm`, `depth_check_tilt_deg` and `depth_check_inplane_deg` are set at launch only. Non-finite estimates are refused.
+> - **The debug outline** is drawn through cam_pub's `debug_hooks`, just before the debug image goes out and after that frame's markers were detected. Drawn earlier, a line across a marker (target B beside a placed cube) would change its detection whenever someone watched.
+>
+> Two adversarial reviews (the per-frame rules, and the consumers) found no blocker. Every should-fix finding is fixed, and all the minor ones but two:
+> - both camera owners still need a readable part file, a deliberate fail-loud;
+> - the mock cell still has no vision parameter service, so the source dropdown is not exercised in mock mode.
+>
+> Replay results are in `runs/2026-09-25/analysis/phase4_*`.
 
 ### Phase 5: the marker is only a seed; the tracked prior carries the pose
 

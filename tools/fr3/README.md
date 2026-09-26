@@ -162,15 +162,70 @@ publishes the part's pose on topics that do not depend on where it came from
 |---|---|
 | `/object/pose_raw` | a measurement that passed every gate, optical frame, image stamp; never a prediction |
 | `/object/pose` | filtered, `fr3_link0`; may coast for `max_prediction_s` |
-| `/object/pose_quality` | one DiagnosticArray per processed frame: `source`, `valid`, `compute_ms` |
+| `/object/pose_quality` | one DiagnosticArray per processed frame: `source`, `valid`, `compute_ms`, `tf_wait_ms`, and in shadow mode the depth estimate's keys (below) |
 
 `fr3_params.yaml` points `tracking_node`, `grip_node` and the panel at them.
 The vision node's `object_source` picks the source; the panel's `source`
-dropdown sets it, only while nothing reads the pose for motion. Today the only
-source is `marker`: the ArUco poses, mirrored unchanged. The marker-free
-estimator (`roscam/object_pose.py`) becomes further sources in the later
-phases. `/aruco/*` stays for hand-eye calibration, `teach_offsets`, target B
-and as ground truth.
+dropdown sets it, only while nothing reads the pose for motion.
+- **`marker`** (the default): the ArUco poses, composed with
+  `T_marker_object` from the part file (`object_part`,
+  `tools/fr3/parts/cube55.yaml`). While that is identity (the sticker taken
+  as centred until the calipers say otherwise), `/object/*` is bit-identical
+  to `/aruco/*`.
+- **`depth_checked`** (PERCEPTION_PLAN Phase 4, `roscam/depth_checked.py`,
+  `vision_source:=standalone` only; cam_pub refuses it): the depth estimate
+  drives, and the marker in the same frame can veto it.
+  - **When a raw pose goes out:** only when the estimate passed its own
+    gates, agreed with the marker, passed the object filter's jump gate, and
+    the track is acquired. All three agreement limits are set at launch:
+    - position: `depth_check_mm`, 3 mm;
+    - in-plane angle: `depth_check_inplane_deg`, 2°;
+    - tilt: `depth_check_tilt_deg`, 4°. It is looser because the marker's own
+      tilt is the noisier of the two.
+  - **Acquired** means 5 accepted estimates on one track. A frame without one
+    pauses the count; only the lost-track limit (0.3 s without an accepted
+    estimate) restarts it.
+  - **`/object/pose`:** the object filter in `fr3_link0`, with the marker
+    filter's settings. It coasts for at most 0.3 s.
+  - **On the panel:** the chip reads `DEPTH✓MARKER · veto <n>%`, and a
+    missing pose's banner says why (vetoed, acquiring 3/5, HELD, ...).
+- **Switching source** leaves 5 frames (0.33 s) with nothing on `/object/*`,
+  so TRACK holds across it.
+- **The later phases** make the marker a seed only, then remove it.
+- **`/aruco/*` stays** for hand-eye calibration, `teach_offsets`, target B
+  and as ground truth.
+
+**Shadow mode** (PERCEPTION_PLAN Phase 3, `roscam/object_shadow.py`):
+`fr3_cell vision_source:=standalone object_shadow:=true`.
+- **What it does:** the depth estimator runs on every frame that gave a
+  marker pose, seeded from it, and only reports. The marker still drives.
+- **What each frame's quality status gains:**
+  - `seeded_from`, `depth_valid`, `depth_reason`, `depth_ms`;
+  - `cand_pose` (the estimate, optical frame: x y z qx qy qz qw);
+  - `agree_mm` and `agree_deg` against marker ∘ `T_marker_object`;
+  - `rms_mm`, `inlier_frac`, `n_pts`, `weak_dof`, `edge_source`,
+    `sym_index`, `holding`.
+- **What you see:** the panel's VISION chip adds `depth Δ<mm> <deg>`, and the
+  debug image shows the estimated outline (one frame stale).
+- **When it rests:** while GRIP holds the cube, and on any frame where it
+  would overrun the camera's frame period (never two frames in a row).
+- **Switching it:** it is live, for an estimator on/off A/B:
+  `ros2 param set /aruco_pose_publisher object_shadow false`.
+- **Replaying a session offline:**
+  `taskset -c 13 python3 tools/fr3/vision/loop_replay.py <session>
+  [--source depth_checked]` replays a recorded session through the same
+  loop.
+
+**The estimator** runs in C++ (`object_pose_cpp`, built with colcon;
+`object_pose_impl:=cpp`, the default). It gives the Python reference's poses
+(`roscam/object_pose.py`, `object_pose_impl:=python`) to rounding, about 4x
+faster. Without the package built, the node says so and uses the Python
+estimator.
+
+**Exposure:** `capture_exposure_us` (-1 = auto) and `capture_gain` change
+live (`ros2 param set /aruco_pose_publisher capture_exposure_us 4000`), and
+every recorded frame carries the exposure and gain it was shot with. For a
+blur test see ARM_CHECKLIST.md.
 
 Placement: the vision process runs with one BLAS thread, pinned to the
 E-cores (`vision_cpus:=12-19`, `''` to unpin), away from the 1 kHz loop.

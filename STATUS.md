@@ -1,6 +1,8 @@
 # Project Status — Robotic Connector Mating Cell
 
-*Written 2026-07-12, capability inventory refreshed 2026-09-22. What exists
+*Written 2026-07-12, capability inventory refreshed 2026-09-22, verification
+matrix refreshed 2026-09-25 (section 2 predates the panel, GRIP and the
+perception work; PROJECT_STATE.md "Where things live" is current). What exists
 and what is proven. Companion docs: [DOCS.md](DOCS.md) (index of every
 document and which copy to believe),
 [SETUP_AND_CALIBRATION.md](SETUP_AND_CALIBRATION.md) (reference manual),
@@ -159,36 +161,39 @@ Retract), rqt recipe. All bind the state topics + Trigger services.
 
 ## 3. Verification matrix — what is and isn't proven
 
-*Refreshed 2026-09-22.*
+*Refreshed 2026-09-25. What the next arm session must still confirm is in
+[ARM_CHECKLIST.md](ARM_CHECKLIST.md).*
 
 | Component | Status |
 |---|---|
-| C++ build, `-Wall -Wextra -Wpedantic` | ✅ clean (`mating_node` needs `-DBUILD_MATING_NODE=ON` and a working MoveIt — see below) |
-| Geometry + phase-machine + tracking-law logic | ✅ **52 gtests** (`mating_controller`: 16 + 14 + 22) |
-| Impedance safety logic (gain/config limits, setpoint handoff, slew) | ✅ **17 gtests** (`fr3_mating_controllers`) |
-| Operator-panel and servo logic | ✅ **170 pytests** (`tools/fr3`) |
-| Vision KF, fixed-frame, auto-teach, plane-normal math | ✅ **47 pytests** (`roscam`) |
-| Vision end-to-end (synthetic marker → pose) | ✅ 0.3 mm; board incl. half-occluded |
-| Out-of-ROS capture on real hardware | ✅ 2026-09-11: D405 at 89.9 fps, 640×480 colour+depth |
+| C++ build, `-Wall -Wextra -Wpedantic` | ✅ clean. Release is the default since 2026-09-24, because an unoptimised build caused comm reflexes (TODO lesson 12) |
+| Unit tests (`tools/run_tests.sh`) | ✅ **159 colcon tests** (`fr3_mating_controllers`, `mating_controller`, `roscam`) and **354 pytest** (panel, grip logic, vision including the estimator, shadow mode, depth_checked and the C++ parity tests) |
+| Tracking smoke test: the real `tracking_node` in a fake cell | ✅ 29/29, on DDS domain 87 |
+| Out-of-ROS capture on real hardware | ✅ 2026-09-11: D405 at 89.9 fps, 640×480 colour+depth. The cell runs 15 fps |
 | **Controller vs live move_group on real hardware** | ✅ 2026-09-11 — closed; the arm moved under closed-loop vision |
 | Marker orientation measurement | ✅ 2026-09-11 — two stacked defects fixed (TODO lesson 1) |
-| Hand-eye on the real cell | ✅ 2026-09-15 — Tsai, 21 poses, 3.17 mm / 1.57° |
-| Camera→marker alignment | ✅ ~1 mm, all 6 DOF (cartesian backend) |
+| Marker distance | ⚠️ The ArUco distance reads +1 to +10 mm long at 100-300 mm (measured 2026-09-25). The range from depth is built: within 1.4 mm of the kinematics on replay. ❌ Not yet on the arm |
+| Hand-eye on the real cell | ✅ 2026-09-15 — Tsai, 21 poses. ⚠️ Re-solved 2026-09-25 for the depth distance (xyz +3.9 mm on the optical axis), not yet on the arm |
+| Camera→marker alignment (ALIGN) | ✅ On the arm 2026-09-23: 239.6 mm → 1.6 mm, 9.7° → 0.49° |
 | **Impedance controller on hardware** | ✅ 2026-09-16 and 09-22 — ladder rungs 0–3 passed |
 | Friction deadband characterised | ✅ 2026-09-22 — `F/k`, ~3.5–6.5 N, both stiffness ceilings found (TODO lesson 10) |
-| Tracking law | ⚠️ 22 gtests pass, but review found two load-bearing behaviours that survive mutation; ❌ never run |
-| Tracking node | ❌ **reviewed 2026-09-22: NOT safe to run** - 5 blockers in the start/stop path (see TODO) |
-| Connector offsets | ❌ **all zero** — must be taught |
+| Tracking (TRACK) | ✅ **On the arm 2026-09-24**, after the 09-23 segfault fix: glide, joint-limit and box holds, buzz stop. ⚠️ The formal V1-V6 table is not recorded yet |
+| GRIP | ✅ On the arm 2026-09-25: 3 cycles on the 55 mm cube |
+| PLACE AT B | ⚠️ Mock only |
+| `/object/*` pose contract | ⚠️ Built and mock-tested. ❌ Not on the arm |
+| Marker-free estimator (`object_pose.py`) | ⚠️ Offline only: within ±0.45 mm of the marker on replay, p95 23-27 ms when tracking. ❌ Never live |
+| Connector offsets | ❌ **all zero** — the connector is not chosen yet |
 | Force-guard thresholds | ❌ need one manual mate to tune |
-| Impedance stroke (rung 4), servo align | ❌ not attempted |
+| Impedance stroke (rung 4) | ❌ not attempted. Servo alignment is archived |
 | Full mate | ❌ not attempted |
-| `communication_constraints_violation` avoided end-to-end | ❌ **no** — killed the stack three times; twice traced to running on battery |
+| `communication_constraints_violation` avoided end-to-end | ⚠️ None since the Release build (2026-09-24), but no full mating cycle has run |
 
-**Bottom line:** the arm now moves under this stack, and the compliant
-controller has been commissioned as far as it can be without a connector.
-What remains unproven is *mating itself* — the taught geometry, the force
-thresholds, and the dispatched stroke — plus everything about tracking
-beyond its unit tests.
+**Bottom line:** the arm aligns to, tracks and grips a marked part under this
+stack. Still unproven:
+- *mating itself:* the connector, the taught geometry, the force thresholds
+  and the dispatched stroke;
+- PLACE AT B;
+- everything built offline on 2026-09-25 (ARM_CHECKLIST.md).
 
 **Known environment breakage:** this machine's MoveIt install raises CMake
 errors from its own config files (missing `tl::expected` and

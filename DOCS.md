@@ -2,7 +2,7 @@
 
 Every document in this repo, what it is for, and whether to trust it. Written
 2026-09-22 during the workspace restructure, because the docs had grown to
-twelve files with real overlap between them.
+twelve files with real overlap between them. Updated 2026-09-25.
 
 **Nothing listed here has been deleted.** The redundancy section below says
 what duplicates what, so the next person knows which copy to believe.
@@ -13,8 +13,10 @@ what duplicates what, so the next person knows which copy to believe.
 |---|---|---|
 | [GUIDE.md](GUIDE.md) | **Start here to operate the cell.** What changed, bring-up, the ladder, live tuning, shutdown, troubleshooting. Task-oriented; points at the authorities rather than repeating them. | **Current** - the operating authority |
 | [PROJECT_STATE.md](PROJECT_STATE.md) | Where the project stands, what is next, open risks. The short current answer. | **Current** |
-| [TODO.md](TODO.md) | Prioritised task list, plus lessons 1-11 that must not be re-learned. | **Current** |
+| [TODO.md](TODO.md) | Prioritised task list, plus lessons 1-20 that must not be re-learned. | **Current** |
+| [ARM_CHECKLIST.md](ARM_CHECKLIST.md) | What the next arm session must check: everything built offline since 2026-09-25, in order, with pass criteria. | **Current** - tick it off at the arm |
 | [TRACKING_SPEC.md](TRACKING_SPEC.md) | Implementation spec for continuous marker tracking, written against measured numbers. | **Current**, and amended in place where implementation proved it wrong — the **[AMENDED]** blocks are the parts to read |
+| [PERCEPTION_PLAN.md](PERCEPTION_PLAN.md) | The marker-free perception plan: the `/object/*` contract and phases 0-7. | **Current** plan. Phases 0-2 are partly implemented; what is done is in TODO.md |
 
 ## Reference manuals
 
@@ -23,7 +25,9 @@ what duplicates what, so the next person knows which copy to believe.
 | [SETUP_AND_CALIBRATION.md](SETUP_AND_CALIBRATION.md) | Calibration procedure, parameter reference, porting checklist, troubleshooting. | Current, but its launch sequence (section 4) is the MELFA one - for the FR3 use `tools/fr3/README.md` |
 | [tools/fr3/README.md](tools/fr3/README.md) | FR3 cell: bandwidth/RT hardening, launch order, FR3-specific calibration. | **Current** - the FR3 bring-up authority |
 | [fr3_mating_controllers/README.md](fr3_mating_controllers/README.md) | The Cartesian-impedance controller and its commissioning ladder. | **Current** - the ladder authority |
-| [tools/gui/README.md](tools/gui/README.md) | Operator front-ends: Foxglove layout, tkinter panel, rqt recipe. | Current |
+| [tools/fr3/cell/README.md](tools/fr3/cell/README.md) | The operator panel, and the controller-side TODOs C1-C10. | **Current** |
+| [PERCEPTION_RESEARCH.md](PERCEPTION_RESEARCH.md) | The research behind PERCEPTION_PLAN.md: methods, sensors, benchmarks. | Current, as background |
+| [melfa/parked/gui/README.md](melfa/parked/gui/README.md) | The old operator front-ends: Foxglove layout, tkinter panel, rqt recipe. | **Parked** 2026-09-23 with `mating_node` |
 | [hardware/camera_mount/README.md](hardware/camera_mount/README.md) | The D405 bracket, its attribution, and the hand-eye numbers it produced. | Current |
 | [CLAUDE.md](CLAUDE.md) | Instructions for AI assistants working in this repo. | Current |
 
@@ -48,10 +52,10 @@ These overlap. Where two copies disagree, the one marked authority wins.
    `HANDOFF.md` section 7. Both predate the impedance commissioning, so both
    understate what has run. *Authority: STATUS.md section 3*, now updated.
 
-3. **The launch order appears five times.** `GUIDE.md` section 2,
+3. **The launch order appears four times.** `GUIDE.md` section 2,
    `tools/fr3/README.md` ("Launch order"), `fr3_mating_controllers/README.md`
-   ("Bring-up"), `PROJECT_STATE.md` ("Next actions"), and
-   `SETUP_AND_CALIBRATION.md` section 4 (the MELFA variant).
+   ("Bring-up"), and `SETUP_AND_CALIBRATION.md` section 4 (the MELFA
+   variant).
    *Authority: GUIDE.md section 2* - it is the only copy that states the
    `fr3_env.sh`-last rule, which is what actually broke a bring-up on
    2026-09-22. `tools/fr3/README.md` remains the authority for the *why*
