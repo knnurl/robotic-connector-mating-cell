@@ -310,6 +310,8 @@ class Cell:
         s.marker_age = n.marker_age()
         s.raw_age = n.raw_age()
         s.pose_source = n.pose_source()
+        s.depth_agree = n.depth_agree()
+        s.veto_pct, s.pose_check = n.veto()
         if m is not None:
             s.marker = logic.marker_errors(m[0], m[1], p.target_m, p.inplane_target,
                                            p.tol_m, st)
@@ -1437,7 +1439,7 @@ class Cell:
         checked again here: the view's greyed control is a hint, not a lock."""
         if source not in core.POSE_SOURCES:
             return False, f'unknown pose source {source!r}'
-        if self.tracking:
+        if self.tracking or self._track_state() in logic.TRACK_LIVE_STATES:
             return False, 'tracking - end TRACK first'
         g = self.n.grip_status() or {}
         if g.get('state') == 'busy' or g.get('holding') == 'true':

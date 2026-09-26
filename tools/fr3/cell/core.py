@@ -167,12 +167,15 @@ VISION_PARAMS_SRV = '/aruco_pose_publisher/set_parameters'
 POSE_TOPIC = '/object/pose'
 RAW_POSE_TOPIC = '/object/pose_raw'
 POSE_QUALITY_TOPIC = '/object/pose_quality'
-POSE_SOURCES = ('marker',)
+POSE_SOURCES = ('marker', 'depth_checked')   # depth_checked: vision_standalone only
 # Predictions never drive committed motion (TRACKING_SPEC Decision 5): ALIGN,
 # like TRACK (tracking_raw_timeout_s), moves only on a raw detection at most
 # this old.
 RAW_MAX_AGE_S = 0.25
 TRACK_STATUS_STALE_S = 1.0
+# The vision node's per-frame quality keys (shadow mode, depth_checked)
+# describe the current frame for this long, then are not shown at all.
+QUALITY_STALE_S = 1.0
 # Every state but idle: the node drives the arm, is about to, or is still
 # putting back its gain snapshot.
 TRACK_LIVE_STATES = ('starting', 'tracking', 'holding', 'stopping')

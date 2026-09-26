@@ -332,6 +332,14 @@ def test_no_colour_contrast_falls_back_to_the_depth_outline():
     check(T_c, T)
 
 
+def test_without_the_depth_fallback_a_missing_colour_outline_is_reported():
+    T = pose([0.003, 0.0, 0.150], yaw=8.0)
+    depth, bgr = colour_scene(T, plain=True)
+    est = ObjectPoseEstimator(PART, depth_fallback=False)
+    T_c, valid, q = est.process(depth, bgr, K, None, perturbed(T, 3.0, 1.5))
+    assert T_c is None and not valid and q['reason'].startswith('no colour outline')
+
+
 def test_a_dark_band_beside_the_outline_is_not_the_part():
     """A dark band just outside the -x edge (the stand and its shadow, seen
     from further up) and the blue patch just inside the +x edge: the

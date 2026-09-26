@@ -51,6 +51,7 @@ import numpy as np
 import rclpy
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped
+from rcl_interfaces.msg import SetParametersResult
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.time import Time
@@ -172,10 +173,13 @@ class ArucoPosePublisher(Node):
         self.declare_parameter('capture_fps', 15)
         # In-process depth settings (realsense here, and vision_standalone):
         # the D405 visual preset by name ('' = the device's), the SDK spatial
-        # filter, and a locked exposure in microseconds (-1 = auto).
+        # filter, and a locked exposure in microseconds (-1 = auto) with its
+        # sensor gain (-1 = the device's). Exposure and gain also change
+        # while streaming (ros2 param set), for a blur test in one session.
         self.declare_parameter('capture_preset', '')
         self.declare_parameter('capture_spatial_filter', False)
         self.declare_parameter('capture_exposure_us', -1)
+        self.declare_parameter('capture_gain', -1)
         # Self-stamped frames: node time minus this capture latency estimate.
         self.declare_parameter('capture_latency_s', 0.02)
         # Debug-image rate cap outside topic mode (it exists for humans;
@@ -200,6 +204,8 @@ class ArucoPosePublisher(Node):
         self._last_debug_t = 0.0
 
         self.tf_buffer = None
+        self.last_tf_wait_ms = None    # this frame's TF lookup wait (object contract)
+        self.last_tf = None            # this frame's (p, q) of optical in filter_frame
         if self.filter_frame:
             self.tf_buffer = Buffer()
             # Own spin thread so a blocking lookup inside frame processing
@@ -285,6 +291,10 @@ class ArucoPosePublisher(Node):
         # contract (object_contract.py) mirrors and reports through these.
         self.publish_hooks = []
         self.frame_hooks = []
+        # Called with the debug image just before it is published (only then,
+        # and after this frame's detection): overlays that must never reach
+        # the image the markers are detected on.
+        self.debug_hooks = []
         self.target_id = int(self.get_parameter('target_marker_id').value)
         if self.target_id >= 0 and self.target_id in self.board_ids:
             # An optional feature must never take the tracked marker down.
@@ -321,7 +331,8 @@ class ArucoPosePublisher(Node):
                 enable_depth=(self.tilt_disambiguation == 'depth'),
                 preset=str(self.get_parameter('capture_preset').value),
                 spatial_filter=bool(self.get_parameter('capture_spatial_filter').value),
-                exposure_us=int(self.get_parameter('capture_exposure_us').value))
+                exposure_us=int(self.get_parameter('capture_exposure_us').value),
+                gain=int(self.get_parameter('capture_gain').value))
             self._capture.on_event = lambda m: self.get_logger().warn(m)
             intr = self._capture.start()
             self.set_intrinsics(intr.fx, intr.fy, intr.cx, intr.cy, intr.coeffs)
@@ -336,6 +347,27 @@ class ArucoPosePublisher(Node):
         self.get_logger().info(
             f'Tracking ArUco id {self.marker_id} ({self.marker_size * 1000:.0f} mm), '
             f'{waiting}')
+        # The in-process camera, when this process owns one (vision_standalone
+        # sets it for its own): capture_exposure_us / capture_gain apply live.
+        self.live_capture = self._capture
+        self.add_on_set_parameters_callback(self._on_set_capture)
+
+    def _on_set_capture(self, params):
+        for prm in params:
+            if prm.name not in ('capture_exposure_us', 'capture_gain'):
+                continue
+            if self.live_capture is None:
+                return SetParametersResult(successful=False,
+                                           reason='this process owns no camera')
+            try:
+                if prm.name == 'capture_exposure_us':
+                    self.live_capture.set_exposure(int(prm.value))
+                else:
+                    self.live_capture.set_gain(int(prm.value))
+            except Exception as e:                          # noqa: BLE001
+                return SetParametersResult(successful=False, reason=f'{prm.name}: {e}')
+            self.get_logger().info(f'{prm.name} -> {prm.value}')
+        return SetParametersResult(successful=True)
 
     def _resolve_dictionary(self, dictionary_name):
         try:
@@ -527,6 +559,7 @@ class ArucoPosePublisher(Node):
         if self.camera_matrix is None:
             return
         t_frame = time.perf_counter()
+        self.last_tf_wait_ms = self.last_tf = None
 
         stamp = header.stamp.sec + header.stamp.nanosec * 1e-9
         dt = 0.0 if self.last_frame_stamp is None else stamp - self.last_frame_stamp
@@ -615,6 +648,11 @@ class ArucoPosePublisher(Node):
         if (self.publish_debug and self.debug_pub.get_subscription_count() > 0
                 and now_mono - self._last_debug_t >= self._debug_period):
             self._last_debug_t = now_mono
+            for hook in self.debug_hooks:
+                try:
+                    hook(color_image)
+                except Exception as e:                      # noqa: BLE001
+                    self.get_logger().warn(f'debug hook failed: {e}', throttle_duration_sec=5.0)
             debug_msg = self.bridge.cv2_to_imgmsg(color_image, encoding='bgr8')
             debug_msg.header = header
             self.debug_pub.publish(debug_msg)
@@ -691,20 +729,24 @@ class ArucoPosePublisher(Node):
         (the frame is then treated as having no detection: the filter
         predicts briefly, then goes silent and the controller holds)."""
         t, q = measurement
+        t0 = time.perf_counter()
         try:
             tf = self.tf_buffer.lookup_transform(
                 self.filter_frame, header.frame_id,
                 Time.from_msg(header.stamp), timeout=Duration(seconds=0.05))
         except TransformException as e:
+            self.last_tf_wait_ms = (time.perf_counter() - t0) * 1e3
             self.get_logger().warn(
                 f'TF {header.frame_id} -> {self.filter_frame} unavailable '
                 f'({e}); dropping detection',
                 throttle_duration_sec=2.0)
             return None
+        self.last_tf_wait_ms = (time.perf_counter() - t0) * 1e3
         tr = tf.transform.translation
         ro = tf.transform.rotation
         p_ft = np.array([tr.x, tr.y, tr.z])
         q_ft = np.array([ro.x, ro.y, ro.z, ro.w])
+        self.last_tf = (p_ft, q_ft)    # one lookup per frame: the depth estimate reuses it
         return compose_pose(p_ft, q_ft, t, q)
 
     def _pose_header(self, image_header):

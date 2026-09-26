@@ -485,7 +485,8 @@ class GripNode(Node):
         with self._lock:
             raw = [r for r, t in self._raw if now - t < 0.5]
         if not raw or now - max(t for _, t in self._raw) > self.p('grip_raw_timeout_s'):
-            raise Failed('the marker is not in view - GRIP reads the cube from it')
+            raise Failed('no fresh object pose (the marker not in view, or depth_checked not '
+                         'agreeing - see the VISION chip) - GRIP reads the cube from it')
         if len(raw) < 3:
             raise Failed(f'only {len(raw)} fresh detection(s) - hold still and try again')
         return self.base_pose_of(raw, 'marker')

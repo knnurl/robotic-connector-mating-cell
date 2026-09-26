@@ -28,7 +28,6 @@ import time
 import cv2
 import numpy as np
 import yaml
-from scipy.ndimage import uniform_filter
 from scipy.spatial import cKDTree
 
 from roscam.icp import load_stl, sample_mesh
@@ -123,6 +122,18 @@ def _to_pose7(T):
     return [float(v) for v in T[:3, 3]] + [float(v) for v in _quat(T[:3, :3])]
 
 
+def _box3(h):
+    """Exact 3 x 3 x ... box sum of an integer array, zero outside: every
+    tie between bins stays a tie (object_pose_cpp matches it bit for bit)."""
+    for ax in range(h.ndim):
+        pad = [(1, 1) if a == ax else (0, 0) for a in range(h.ndim)]
+        p = np.pad(h, pad)
+        cut = lambda a, b: tuple(slice(a, b) if i == ax else slice(None)    # noqa: E731
+                                 for i in range(h.ndim))
+        h = p[cut(0, -2)] + p[cut(1, -1)] + p[cut(2, None)]
+    return h
+
+
 def pose_error(T_est, T_ref, sym_order=1):
     """(dxyz in the reference object frame (m), tilt (deg), in-plane (deg))
     of T_est against T_ref, the in-plane angle taken modulo the symmetry."""
@@ -150,9 +161,15 @@ class ObjectPoseEstimator:
                  max_iter=30, min_points=200, max_rms_m=0.0015, min_inlier_frac=0.8,
                  min_outline_frac=0.6, max_shift_m=0.010, max_shift_deg=10.0,
                  size_ratio=(0.5, 1.6), weak_rel=1e-3, use_outline=True,
-                 outline_weight=0.1, colour_edges=True, edge_min_step=6.0, edge_rel=0.3):
+                 outline_weight=0.1, colour_edges=True, edge_min_step=6.0, edge_rel=0.3,
+                 depth_fallback=True):
         self.part = part
         self.use_outline = use_outline            # False: the surface term alone
+        # When the colour outline is not found (motion blur, no contrast):
+        # True = finish with the depth outline (stage A, 30-65 ms more on an
+        # E-core); False = report the frame invalid instead (shadow mode,
+        # where that time would make the frame loop overrun its period).
+        self.depth_fallback = depth_fallback
         # Stage B: the outline from colour edges instead of the depth region.
         # The D405 is passive stereo: plain untextured plastic returns no
         # depth, so the depth region's edge is missing wherever the part is
@@ -230,6 +247,12 @@ class ObjectPoseEstimator:
         self._norm = None
 
     # ------------------------------------------------------------ geometry
+
+    def warm(self, K, dist, shape):
+        """Build the per-camera pixel grid now, not in the first frame."""
+        self._norm_grid(np.asarray(K, dtype=np.float64),
+                        np.zeros(5) if dist is None else np.asarray(dist, np.float64).ravel(),
+                        tuple(shape))
 
     def _norm_grid(self, K, dist, shape):
         """(h, w, 2) undistorted normalised coordinates of every pixel."""
@@ -500,10 +523,7 @@ class ObjectPoseEstimator:
         K = np.asarray(K, dtype=np.float64)
         dist = np.zeros(5) if dist is None else np.asarray(dist, dtype=np.float64).ravel()
         prior = np.asarray(prior, dtype=np.float64)
-        q = {'source': 'depth', 'valid': False, 'reason': '', 'n_pts': 0,
-             'rms_mm': None, 'inlier_frac': None, 'outline_frac': None, 'weak_dof': [],
-             'agree_mm': None, 'agree_deg': None, 'sym_index': 0, 'iterations': 0,
-             'edge_source': None, 'support': None, 'cand_pose': None}
+        q = self._new_q()
         depth = np.asarray(depth_m)
         seg = self._segment(depth, K, dist, prior, q, err)
         if seg is None:
@@ -539,6 +559,10 @@ class ObjectPoseEstimator:
                 if T_b is not None and frac >= self.gates['min_outline_frac']:
                     T, rim, edges, obs = T_b, (X, eid), (img, (3, 4)), obs_b
                     q['edge_source'] = 'colour'
+            if edges is None and not self.depth_fallback:
+                q['reason'] = 'no colour outline (depth fallback off)'
+                q['compute_ms'] = (time.perf_counter() - t_start) * 1e3
+                return None, False, q
             if edges is None:                               # finish stage A properly
                 T, rim = self._solve(T, ctx, q, err=0.0015 if not near else err)
                 if T is None:
@@ -577,7 +601,24 @@ class ObjectPoseEstimator:
         q['agree_mm'] = float(np.linalg.norm(D[:3, 3]) * 1e3)
         q['agree_deg'] = float(np.degrees(np.arccos(np.clip((np.trace(D[:3, :3]) - 1) / 2,
                                                             -1, 1))))
+        # The same, split: the tilt of Z, and the turn about it.
+        q['agree_tilt_deg'] = float(np.degrees(np.arccos(np.clip(D[2, 2], -1.0, 1.0))))
+        q['agree_inplane_deg'] = float(np.degrees(np.arctan2(D[1, 0], D[0, 0])))
         q['cand_pose'] = _to_pose7(T)
+        q['valid'], q['reason'] = self._judge(q)
+        q['compute_ms'] = (time.perf_counter() - t_start) * 1e3
+        return T, q['valid'], q
+
+    @staticmethod
+    def _new_q():
+        return {'source': 'depth', 'valid': False, 'reason': '', 'n_pts': 0,
+                'rms_mm': None, 'inlier_frac': None, 'outline_frac': None, 'weak_dof': [],
+                'agree_mm': None, 'agree_deg': None, 'agree_tilt_deg': None,
+                'agree_inplane_deg': None, 'sym_index': 0, 'iterations': 0,
+                'edge_source': None, 'support': None, 'cand_pose': None}
+
+    def _judge(self, q):
+        """(valid, reason) of a finished estimate: the gates."""
         g = self.gates
         reasons = []
         if q['n_pts'] < g['min_points']:
@@ -592,10 +633,7 @@ class ObjectPoseEstimator:
             reasons.append(f"shift {q['agree_mm']:.1f} mm / {q['agree_deg']:.1f} deg")
         if q['weak_dof']:
             reasons.append('weak ' + ','.join(q['weak_dof']))
-        q['valid'] = not reasons
-        q['reason'] = '; '.join(reasons)
-        q['compute_ms'] = (time.perf_counter() - t_start) * 1e3
-        return T, q['valid'], q
+        return not reasons, '; '.join(reasons)
 
     def _solve(self, T0, ctx, q, coarse=False, err=0.005, outline=True):
         """Stage A: Gauss-Newton from T0 against the depth outline, gates
@@ -799,8 +837,7 @@ class ObjectPoseEstimator:
         q = np.clip(pool // 16, 0, 15).astype(int)
         ch = q.shape[1]
         flat = np.ravel_multi_index(tuple(q.T), (16,) * ch)
-        hist = np.bincount(flat, minlength=16 ** ch).reshape((16,) * ch).astype(np.float64)
-        hist = uniform_filter(hist, size=3, mode='constant') * 3 ** ch
+        hist = _box3(np.bincount(flat, minlength=16 ** ch).reshape((16,) * ch))
         # The part's colours: every well-filled bin, not just the peaks - a
         # colour that varies (translucent tape over yellow) fills a spread of
         # bins that one peak per colour would not cover.
@@ -808,7 +845,7 @@ class ObjectPoseEstimator:
         out = np.zeros_like(pk)
         if not len(major):
             return out
-        major = major[np.argsort(-hist[tuple(major.T)])[:max_colours]]
+        major = major[np.argsort(-hist[tuple(major.T)], kind='stable')[:max_colours]]
         C = (major + 0.5) * 16.0                                        # (Kc, ch)
         rows, cols = np.nonzero(pk)
         c = inner[rows, cols]                                           # (P, ch)
@@ -895,3 +932,66 @@ class ObjectPoseEstimator:
         r = np.concatenate([rs, ro])
         wts = np.concatenate([_tukey(rs, gate_s), self.outline_weight * wo])
         return J, r, wts, (X, eid)
+
+
+class CppObjectPoseEstimator(ObjectPoseEstimator):
+    """ObjectPoseEstimator with process() in C++ (the object_pose_cpp package,
+    built with colcon): the same algorithm, several times faster. The model
+    (mesh samples, silhouette edges) is prepared here, by the Python class,
+    and handed over, so both run on identical data and give the same
+    answers (roscam/test/test_object_pose_cpp.py). The gates and the quality
+    dict are assembled here too, by the same code as the Python version."""
+
+    def __init__(self, part, **kwargs):
+        super().__init__(part, **kwargs)
+        from object_pose_cpp import Estimator
+        g = self.gates
+        model = {'V': self.V, 'F': self.F.astype(np.int32), 'face_n': self.face_n,
+                 'face_c': self.face_c, 'samples': self.samples, 'sample_n': self.sample_n,
+                 'edge_faces': self.edge_faces.astype(np.int32), 'edge_dir': self.edge_dir,
+                 'edge_pts': self.edge_pts, 'edge_id': self.edge_id.astype(np.int32),
+                 'sym_order': self.sym_order, 'size_m': self.size_m}
+        params = {'search_m': self.search_m, 'prior_err_m': self.prior_err_m,
+                  'depth_band_m': self.depth_band_m, 'support_band_m': self.support_band_m,
+                  'jump_ratio': self.jump_ratio, 'rim_min_cos': self.rim_min_cos,
+                  'outline_offset_px': self.outline_offset_px, 'max_iter': self.max_iter,
+                  'max_points': self.max_points, 'outline_weight': self.outline_weight,
+                  'use_outline': self.use_outline, 'colour_edges': self.colour_edges,
+                  'depth_fallback': self.depth_fallback, 'edge_min_step': self.edge_min_step,
+                  'edge_rel': self.edge_rel, 'min_points': g['min_points'],
+                  'size_lo': g['size_ratio'][0], 'size_hi': g['size_ratio'][1],
+                  'weak_rel': g['weak_rel'], 'min_outline_frac': g['min_outline_frac']}
+        self._core = Estimator(model, params)
+
+    def warm(self, K, dist, shape):
+        self._core.warm(np.asarray(K, dtype=np.float64),
+                        np.zeros(5) if dist is None else np.asarray(dist, np.float64).ravel(),
+                        int(shape[0]), int(shape[1]))
+
+    def process(self, depth_m, bgr_clean, K, dist, prior, prior_err_m=None):
+        t_start = time.perf_counter()
+        err = self.prior_err_m if prior_err_m is None else float(prior_err_m)
+        K = np.asarray(K, dtype=np.float64)
+        dist = np.zeros(5) if dist is None else np.asarray(dist, dtype=np.float64).ravel()
+        prior = np.asarray(prior, dtype=np.float64)
+        r = self._core.process(np.asarray(depth_m), bgr_clean, K, dist, prior, err)
+        q = self._new_q()
+        for k in ('n_pts', 'rms_mm', 'inlier_frac', 'outline_frac', 'sym_index',
+                  'iterations', 'edge_source', 'support'):
+            q[k] = r[k]
+        if r['support'] is not None:
+            q['support'] = (list(r['support'][0]), float(r['support'][1]))
+        if r['size_ratio'] is not None:
+            q['size_ratio'] = r['size_ratio']
+        q['weak_dof'] = [DOF_NAMES[i] for i in r['weak_dof']]
+        q['reason'] = r['reason']
+        T = r['T']
+        if T is None or not r['finished']:
+            q['compute_ms'] = (time.perf_counter() - t_start) * 1e3
+            return None, False, q
+        for k in ('agree_mm', 'agree_deg', 'agree_tilt_deg', 'agree_inplane_deg'):
+            q[k] = r[k]
+        q['cand_pose'] = _to_pose7(T)
+        q['valid'], q['reason'] = self._judge(q)
+        q['compute_ms'] = (time.perf_counter() - t_start) * 1e3
+        return T, q['valid'], q

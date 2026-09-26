@@ -23,6 +23,7 @@ import pytest
 
 import actions
 import core
+import logic
 
 MOVE, IDLE, REFLEX, USER_STOPPED = 2, 1, 4, 5
 
@@ -452,12 +453,17 @@ def test_the_pose_source_is_refused_while_tracking_or_gripping():
     set_to = []
     n = types.SimpleNamespace(grip_status=lambda: {'state': 'idle'},
                               set_pose_source=lambda s: (set_to.append(s) or (True, 'ok')))
-    cell = types.SimpleNamespace(n=n, tracking=False, say=lambda m: None, trace=lambda r: None)
+    node_state = [None]                             # the tracking node's own status
+    cell = types.SimpleNamespace(n=n, tracking=False, say=lambda m: None, trace=lambda r: None,
+                                 _track_state=lambda: node_state[0])
     assert actions.Cell.set_pose_source(cell, 'marker')[0] and set_to == ['marker']
     assert not actions.Cell.set_pose_source(cell, 'nonsense')[0]
     cell.tracking = True
     assert not actions.Cell.set_pose_source(cell, 'marker')[0]
     cell.tracking = False
+    node_state[0] = sorted(logic.TRACK_LIVE_STATES)[0]   # a panel restarted mid-TRACK
+    assert not actions.Cell.set_pose_source(cell, 'marker')[0]
+    node_state[0] = None
     n.grip_status = lambda: {'state': 'idle', 'holding': 'true'}
     assert not actions.Cell.set_pose_source(cell, 'marker')[0]
     assert set_to == ['marker']                       # nothing sent after the first

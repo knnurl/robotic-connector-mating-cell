@@ -34,6 +34,8 @@ from launch_ros.actions import Node
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 HANDEYE_FILE = os.path.join(THIS_DIR, 'calib', 'handeye.yaml')
+# The part the vision node reports (T_marker_object; the mesh for shadow mode).
+PART_FILE = os.path.join(THIS_DIR, 'parts', 'cube55.yaml')
 # The SOURCE copy, like fr3_params.yaml: no rebuild between an edit and the
 # next spawn.
 IMPEDANCE_PARAMS = os.path.normpath(os.path.join(
@@ -80,7 +82,12 @@ def generate_launch_description():
         DeclareLaunchArgument('capture_spatial_filter', default_value='true',
                               description='SDK spatial filter on the depth'),
         DeclareLaunchArgument('capture_exposure_us', default_value='-1',
-                              description='locked exposure in us (-1 = auto)'),
+                              description='locked exposure in us (-1 = auto); also live: '
+                                          'ros2 param set /aruco_pose_publisher '
+                                          'capture_exposure_us <us>'),
+        DeclareLaunchArgument('capture_gain', default_value='-1',
+                              description="sensor gain with a locked exposure (-1 = the "
+                                          "device's); also live"),
         # The vision process on the E-cores (PERCEPTION_PLAN section 4): the
         # 1 kHz control loop and its driver keep the P-cores to themselves.
         DeclareLaunchArgument('vision_cpus', default_value='12-19',
@@ -90,6 +97,15 @@ def generate_launch_description():
                               description='marker distance: depth = the ArUco ray onto the '
                                           'depth plane around the marker; aruco = ArUco alone '
                                           '(the rollback)'),
+        # PERCEPTION_PLAN Phase 3: the depth estimator beside the marker,
+        # reporting only (/object/pose_quality); standalone only. Off by
+        # default so marker-only baselines are measured without it.
+        DeclareLaunchArgument('object_shadow', default_value='false',
+                              description='true = run the depth estimator in shadow mode '
+                                          '(vision_source:=standalone only)'),
+        DeclareLaunchArgument('object_pose_impl', default_value='cpp',
+                              description='the depth estimator: cpp (object_pose_cpp, colcon-'
+                                          'built) or python (the reference); same poses'),
         DeclareLaunchArgument('capture_fps', default_value='15',
                               description='D405 capture rate in realsense mode; '
                                           '/aruco/pose is published at this rate'),
@@ -210,19 +226,27 @@ def _vision(context):
         'capture_preset': arg('capture_preset'),
         'capture_spatial_filter': arg('capture_spatial_filter') == 'true',
         'capture_exposure_us': int(arg('capture_exposure_us')),
+        'capture_gain': int(arg('capture_gain')),
         # Measured 2026-09-25 (latency_fit, 640x480 @ 15 fps, High Accuracy +
         # spatial filter): 24 ms, 95% CI 23-25.
         'capture_latency_s': 0.024,
         'range_source': arg('range_source'),
+        'object_part': PART_FILE,
         # Debug image is only encoded/published while something
         # subscribes - keep GUI subscriptions off the robot NIC.
         'publish_debug_image': True,
     }
+    notes = []
     if source == 'standalone':
         executable = 'vision_standalone'
+        params['object_shadow'] = arg('object_shadow') == 'true'
+        params['object_pose_impl'] = arg('object_pose_impl')
     else:
         params['source'] = source
         executable = 'cam_pub'
+        if arg('object_shadow') == 'true':
+            notes.append(LogInfo(msg='fr3_cell: object_shadow needs vision_source:=standalone '
+                                     '- ignored'))
     # One BLAS thread: the per-frame plane fits are tiny SVDs, and OpenBLAS
     # spreads each over every core, next to the 1 kHz control loop
     # (measured on recorded frames: cam_pub kept 4.7 cores busy, 2.5 with
@@ -230,9 +254,9 @@ def _vision(context):
     one_thread = {v: '1' for v in ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS',
                                    'MKL_NUM_THREADS')}
     cpus = arg('vision_cpus').strip()
-    return [Node(package='roscam', executable=executable, output='screen',
-                 parameters=[params], additional_env=one_thread,
-                 prefix=f'taskset -c {cpus}' if cpus else None)]
+    return notes + [Node(package='roscam', executable=executable, output='screen',
+                         parameters=[params], additional_env=one_thread,
+                         prefix=f'taskset -c {cpus}' if cpus else None)]
 
 
 def _tracking(params_file):

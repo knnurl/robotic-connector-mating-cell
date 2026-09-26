@@ -772,6 +772,9 @@ class CellNode(CellNodeBase):
         self._marker_at = None      # monotonic arrival of /object/pose
         self._raw_at = None
         self._pose_source = None    # object_source, as /object/pose_quality says
+        self._depth_agree = None    # shadow mode: (mm, deg), False (no estimate), None (off)
+        self._veto = None           # depth_checked: (veto %, why no pose or None)
+        self._quality_at = None     # monotonic arrival of the last /object/pose_quality
         self._image_at = None
         self._last_marker = None    # (pos, frame) for the jump check
         self._jumps = collections.deque(maxlen=64)   # (monotonic, mm)
@@ -833,10 +836,24 @@ class CellNode(CellNodeBase):
             self._raw_at = time.monotonic()
 
     def _quality_cb(self, m):
-        src = next((kv.value for st in m.status for kv in st.values if kv.key == 'source'),
-                   None)
+        kv = {k.key: k.value for st in m.status for k in st.values}
+        agree = None
+        if 'depth_valid' in kv:                     # shadow mode reports
+            try:
+                agree = ((float(kv['agree_mm']), float(kv['agree_deg']))
+                         if kv['depth_valid'] == 'true' else False)
+            except (KeyError, ValueError):
+                agree = False
+        try:
+            veto_pct = float(kv['veto_pct']) if 'veto_pct' in kv else None
+        except ValueError:
+            veto_pct = None
+        check = kv.get('check')
         with self._lock:
-            self._pose_source = src
+            self._pose_source = kv.get('source')
+            self._depth_agree = agree
+            self._veto = (veto_pct, None if check in (None, 'ok') else check)
+            self._quality_at = time.monotonic()
 
     def _image_cb(self, m):
         super()._image_cb(m)
@@ -931,6 +948,20 @@ class CellNode(CellNodeBase):
     def pose_source(self):
         with self._lock:
             return self._pose_source
+
+    def _quality_fresh(self):
+        age = self._age(self._quality_at)
+        return age is not None and age <= core.QUALITY_STALE_S
+
+    def depth_agree(self):
+        with self._lock:
+            return self._depth_agree if self._quality_fresh() else None
+
+    def veto(self):
+        """(veto %, why the last frame gave no pose) in depth_checked; both
+        None once the vision node has gone quiet."""
+        with self._lock:
+            return (self._veto or (None, None)) if self._quality_fresh() else (None, None)
 
     def image_age(self):
         with self._lock:

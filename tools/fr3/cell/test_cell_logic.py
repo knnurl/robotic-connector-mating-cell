@@ -437,3 +437,55 @@ def test_the_vision_chip_and_banners_name_the_pose_source():
     b = L.banner(torque(marker_age=None, marker=None), ST)
     assert b.title == 'NO POSE' and '(marker)' in b.detail
     assert L.banner(torque(marker_age=0.9, marker=None), ST).title == 'POSE STALE'
+
+
+def test_the_vision_chip_shows_the_shadow_estimate_against_the_marker():
+    chip = lambda s: {c.label: c for c in L.chips(s, ST)}['VISION'].value   # noqa: E731
+    assert chip(position(depth_agree=(0.44, 0.31))) == '50 ms · MARKER · depth Δ0.4 mm 0.3°'
+    assert chip(position(depth_agree=False)) == '50 ms · MARKER · depth —'
+    assert chip(position(depth_agree=None)) == '50 ms · MARKER'
+
+
+def test_depth_checked_shows_its_veto_rate_and_why_a_pose_is_missing():
+    chip = lambda s: {c.label: c for c in L.chips(s, ST)}['VISION'].value   # noqa: E731
+    s = position(pose_source='depth_checked', veto_pct=2.4, depth_agree=(0.4, 0.3))
+    assert chip(s) == '50 ms · DEPTH✓MARKER · veto 2%'
+    assert chip(position(pose_source='depth_checked')) == '50 ms · DEPTH✓MARKER'
+    why = 'vetoed by the marker: 3.4 mm, 0.8 deg'
+    b = L.banner(torque(marker_age=0.9, marker=None, pose_source='depth_checked',
+                        pose_check=why), ST)
+    assert b.title == 'POSE STALE' and b.detail.endswith(why) and '(depth_checked)' in b.detail
+    b = L.banner(torque(marker_age=None, marker=None, pose_check='acquiring 3/5'), ST)
+    assert b.title == 'NO POSE' and b.detail == 'acquiring 3/5'
+
+
+def test_held_is_not_an_alarm_and_a_high_veto_rate_is_a_warning():
+    s = torque(marker_age=0.9, marker=None, pose_source='depth_checked', pose_check='HELD')
+    b = L.banner(s, ST)
+    assert b is None or b.title not in ('POSE STALE', 'NO POSE')
+    vis = lambda s: {c.label: c for c in L.chips(s, ST)}['VISION']                 # noqa: E731
+    assert vis(position(pose_source='depth_checked', veto_pct=4.0)).level == L.NORMAL
+    assert vis(position(pose_source='depth_checked', veto_pct=5.0)).level == L.WARN
+
+
+def test_the_quality_keys_go_stale_with_the_vision_node():
+    import threading
+    import types
+
+    import core
+    import ros_node
+    from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
+    n = types.SimpleNamespace(_lock=threading.Lock(), _pose_source=None, _depth_agree=None,
+                              _veto=None, _quality_at=None)
+    n._age = lambda t: ros_node.CellNode._age(n, t)
+    n._quality_fresh = lambda: ros_node.CellNode._quality_fresh(n)
+    kv = {'source': 'depth_checked', 'veto_pct': '2.5', 'check': 'acquiring 3/5',
+          'depth_valid': 'true', 'agree_mm': '0.40', 'agree_deg': '0.30'}
+    msg = DiagnosticArray(status=[DiagnosticStatus(
+        values=[KeyValue(key=k, value=v) for k, v in kv.items()])])
+    ros_node.CellNode._quality_cb(n, msg)
+    assert ros_node.CellNode.veto(n) == (2.5, 'acquiring 3/5')
+    assert ros_node.CellNode.depth_agree(n) == (0.40, 0.30)
+    n._quality_at -= core.QUALITY_STALE_S + 0.1              # the vision node went quiet
+    assert ros_node.CellNode.veto(n) == (None, None)
+    assert ros_node.CellNode.depth_agree(n) is None

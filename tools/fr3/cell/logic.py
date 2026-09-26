@@ -58,6 +58,7 @@ class Settings:
     raw_max_age_s: float = 0.25         # core.RAW_MAX_AGE_S (ALIGN needs a raw pose)
     image_stale_s: float = 1.5
     track_status_stale_s: float = 1.0   # core.TRACK_STATUS_STALE_S
+    veto_warn_pct: float = 5.0          # depth_checked: PERCEPTION_PLAN Phase 4's exit bound
     rt_ok: float = 0.99
     rt_down: float = 0.95
     stationary_rad_s: float = 0.02
@@ -92,6 +93,8 @@ class Settings:
 
 
 MARKER_LOSS_POLICIES = ('hold', 'stop', 'release')
+# object_source as the VISION chip names it
+SOURCE_LABELS = {'marker': 'MARKER', 'depth_checked': 'DEPTH✓MARKER'}
 
 
 def load_settings(path):
@@ -138,6 +141,13 @@ class Snap:
     marker_age: float = None            # s since /object/pose; None = never
     raw_age: float = None               # s since /object/pose_raw; None = never
     pose_source: str = None             # the vision node's object_source (/object/pose_quality)
+    # shadow mode (PERCEPTION_PLAN Phase 3): the depth estimate against the
+    # marker, (mm, deg); False = the estimate failed; None = no shadow
+    depth_agree: object = None
+    # depth_checked (Phase 4): the marker's veto rate over the recent valid
+    # estimates (%), and why the last frame gave no pose (None: it did)
+    veto_pct: float = None
+    pose_check: str = None
     marker: dict = None                 # marker_errors(), when fresh
     marker_why: str = None
     image_age: float = None
@@ -533,14 +543,16 @@ def banner(s, st):
         return Banner('gate', WARN, 'ROBOT NOT IN MOVE',
                       f'robot is {ROBOT_MODES.get(s.robot_mode, s.robot_mode)}')
     vision_needed = ctl == 'arm' or tracking(s, st) or holding(s)
-    if vision_needed and not marker_fresh(s, st):
+    # depth_checked publishes nothing while GRIP holds the part: by design
+    if vision_needed and not marker_fresh(s, st) and s.pose_check != 'HELD':
         src = f' ({s.pose_source})' if s.pose_source else ''
+        why = s.marker_why or s.pose_check
         if s.marker_age is None:
-            text = s.marker_why or f'no object pose{src} yet - is the vision node running?'
+            text = why or f'no object pose{src} yet - is the vision node running?'
             return Banner('vision', WARN, 'NO POSE', text)
         return Banner('vision', WARN, 'POSE STALE',
                       f'last object pose{src} {s.marker_age*1000:.0f} ms ago'
-                      + (f' - {s.marker_why}' if s.marker_why else ''))
+                      + (f' - {why}' if why else ''))
     tr = s.track if track_live(s, st) else {}
     if tr.get('state') == 'holding' and tr.get('reason'):
         hint = ('  -  ALIGN closer, or set over lead to clamp'
@@ -639,13 +651,22 @@ def chips(s, st):
     relevant = ctl == 'impedance' or s.torque_attempted
     pre = Chip('PRE-FLIGHT', s.preflight,
                NORMAL if s.preflight == 'done' or not relevant else WARN)
-    src = f' · {s.pose_source.upper()}' if s.pose_source else ''
+    src = f' · {SOURCE_LABELS.get(s.pose_source, s.pose_source.upper())}' if s.pose_source else ''
+    if s.pose_source == 'depth_checked':
+        if s.veto_pct is not None:
+            src += f' · veto {s.veto_pct:.0f}%'
+    elif s.depth_agree:
+        src += f' · depth Δ{s.depth_agree[0]:.1f} mm {s.depth_agree[1]:.1f}°'
+    elif s.depth_agree is False:
+        src += ' · depth —'
     if not s.camera_on and s.marker_age is None:
         vis = Chip('VISION', 'off', NORMAL)
     elif s.marker_age is None:
         vis = Chip('VISION', f'no pose{src}', WARN)
     elif marker_fresh(s, st):
-        vis = Chip('VISION', f'{s.marker_age*1000:.0f} ms{src}', NORMAL)
+        vetoing = (s.pose_source == 'depth_checked' and s.veto_pct is not None
+                   and s.veto_pct >= st.veto_warn_pct)
+        vis = Chip('VISION', f'{s.marker_age*1000:.0f} ms{src}', WARN if vetoing else NORMAL)
     else:
         vis = Chip('VISION', f'stale {s.marker_age*1000:.0f} ms{src}', WARN)
     blk = gate_block(s, st)
