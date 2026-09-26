@@ -31,8 +31,9 @@ import numpy as np
 # (hardware clock, or the host's when the firmware cannot stamp).
 # depth_raw / depth_scale: the aligned depth as the uint16 the camera sent,
 # and metres per unit - what a lossless recording keeps.
-Frame = namedtuple('Frame', 'bgr depth_m t_host t_hw t_domain depth_raw depth_scale',
-                   defaults=(None, '', None, 1.0))
+Frame = namedtuple('Frame',
+                   'bgr depth_m t_host t_hw t_domain depth_raw depth_scale exposure_us gain',
+                   defaults=(None, '', None, 1.0, None, None))
 
 Intrinsics = namedtuple('Intrinsics', 'fx fy cx cy coeffs width height')
 
@@ -44,7 +45,7 @@ class RsCapture:
     def __init__(self, width=640, height=480, fps=15, enable_depth=False,
                  serial='', auto_recover=True, timeouts_before_reset=8,
                  max_resets=5, frames_to_forgive=200, preset='',
-                 spatial_filter=False, exposure_us=-1):
+                 spatial_filter=False, exposure_us=-1, gain=-1):
         self.width = int(width)
         self.height = int(height)
         self.fps = int(fps)
@@ -53,10 +54,14 @@ class RsCapture:
         # Depth-quality settings (PERCEPTION_PLAN Phase 0): the D405 visual
         # preset by name ('' = leave the device's), the SDK spatial filter on
         # the aligned depth (no temporal filter: it adds lag), and a locked
-        # exposure in microseconds (-1 = auto).
+        # exposure in microseconds (-1 = auto), and with it a sensor gain (-1 =
+        # leave the device's). On the D405 colour and depth come from the
+        # same sensor: both change together. set_exposure() / set_gain()
+        # change them while streaming.
         self.preset = str(preset)
         self.spatial_filter = bool(spatial_filter)
         self.exposure_us = int(exposure_us)
+        self.gain = int(gain)
         self._spatial = None
         self._rs = None
         self._pipeline = None
@@ -133,13 +138,46 @@ class RsCapture:
                                    f'{sorted(names)}')
             ds.set_option(rs.option.visual_preset, names[self.preset.lower()])
         if self.exposure_us > 0:
-            for sensor in device.query_sensors():
-                if sensor.supports(rs.option.exposure):
-                    if sensor.supports(rs.option.enable_auto_exposure):
-                        sensor.set_option(rs.option.enable_auto_exposure, 0)
-                    sensor.set_option(rs.option.exposure, float(self.exposure_us))
+            self._set_exposure(device, self.exposure_us)
+        if self.gain >= 0:
+            self._set_gain(device, self.gain)
         self._spatial = rs.spatial_filter() if (self.spatial_filter and self.enable_depth) \
             else None
+
+    def _sensors(self, device, option):
+        return [s for s in device.query_sensors() if s.supports(option)]
+
+    def _set_exposure(self, device, exposure_us):
+        rs = self._rs
+        sensors = self._sensors(device, rs.option.exposure)
+        if not sensors:
+            raise RuntimeError('this camera has no settable exposure')
+        for sensor in sensors:
+            if exposure_us > 0:
+                if sensor.supports(rs.option.enable_auto_exposure):
+                    sensor.set_option(rs.option.enable_auto_exposure, 0)
+                sensor.set_option(rs.option.exposure, float(exposure_us))
+            elif sensor.supports(rs.option.enable_auto_exposure):
+                sensor.set_option(rs.option.enable_auto_exposure, 1)
+
+    def _set_gain(self, device, gain):
+        sensors = self._sensors(device, self._rs.option.gain)
+        if not sensors:
+            raise RuntimeError('this camera has no settable gain')
+        for sensor in sensors:
+            sensor.set_option(self._rs.option.gain, float(gain))
+
+    def set_exposure(self, exposure_us):
+        """While streaming: a locked exposure in us, or <= 0 for auto."""
+        self.exposure_us = int(exposure_us) if exposure_us > 0 else -1
+        if self._pipeline is not None:
+            self._set_exposure(self._pipeline.get_active_profile().get_device(), exposure_us)
+
+    def set_gain(self, gain):
+        """While streaming: the sensor gain (a locked exposure keeps it)."""
+        self.gain = int(gain)
+        if self._pipeline is not None and gain >= 0:
+            self._set_gain(self._pipeline.get_active_profile().get_device(), gain)
 
     def settings(self):
         """What this capture runs with - for a recording's session.json."""
@@ -147,6 +185,7 @@ class RsCapture:
                 'depth': self.enable_depth, 'preset': self.preset or 'device default',
                 'spatial_filter': self.spatial_filter,
                 'exposure_us': self.exposure_us if self.exposure_us > 0 else 'auto',
+                'gain': self.gain if self.gain >= 0 else 'device',
                 'depth_scale': self._depth_scale}
 
     def _emit(self, msg):
@@ -236,6 +275,12 @@ class RsCapture:
         bgr = np.asanyarray(color.get_data()).copy()
         t_hw = float(color.get_timestamp())
         t_domain = str(color.get_frame_timestamp_domain())
+        # What this frame was actually shot with (auto exposure changes it).
+        md = self._rs.frame_metadata_value
+        exposure_us = (float(color.get_frame_metadata(md.actual_exposure))
+                       if color.supports_frame_metadata(md.actual_exposure) else None)
+        gain = (float(color.get_frame_metadata(md.gain_level))
+                if color.supports_frame_metadata(md.gain_level) else None)
         depth_m = depth_raw = None
         if self.enable_depth:
             depth = frames.get_depth_frame()
@@ -244,7 +289,8 @@ class RsCapture:
             if depth:
                 depth_raw = np.asanyarray(depth.get_data()).copy()
                 depth_m = depth_raw.astype(np.float32) * self._depth_scale
-        return Frame(bgr, depth_m, t_host, t_hw, t_domain, depth_raw, self._depth_scale)
+        return Frame(bgr, depth_m, t_host, t_hw, t_domain, depth_raw, self._depth_scale,
+                     exposure_us, gain)
 
     def stop(self):
         if self._pipeline is not None:

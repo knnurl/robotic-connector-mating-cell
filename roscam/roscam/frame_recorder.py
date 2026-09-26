@@ -12,8 +12,9 @@ A session directory holds:
     session.json     capture settings, intrinsics, marker ids and sizes;
                      frames_written / frames_dropped added at stop
     frames.jsonl     one line per frame: i, t_host (s), t_hw (ms, SDK),
-                     t_domain, stamp (s, the image header stamp), and the
-                     poses published for that frame as {topic: {stamp, t, q}}
+                     t_domain, stamp (s, the image header stamp), the actual
+                     exposure_us and gain when the camera reports them, and
+                     the poses published for that frame as {topic: {stamp, t, q}}
     color/NNNNNN.png lossless BGR
     depth/NNNNNN.png uint16 depth exactly as the camera sent it; metres =
                      value * depth_scale (session.json)
@@ -134,6 +135,8 @@ class FrameRecorder:
                     raise OSError('depth PNG not written')
                 line = {'i': i, 't_host': frame.t_host, 't_hw': frame.t_hw,
                         't_domain': frame.t_domain, 'stamp': stamp, 'depth': has_depth,
+                        'exposure_us': getattr(frame, 'exposure_us', None),
+                        'gain': getattr(frame, 'gain', None),
                         'poses': {topic: {'stamp': p[0], 't': list(map(float, p[1])),
                                           'q': list(map(float, p[2]))}
                                   for topic, p in poses.items()}}

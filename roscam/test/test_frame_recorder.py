@@ -92,3 +92,14 @@ def test_a_frame_that_raced_stop_never_lands_in_the_next_session(tmp_path):
     rec.stop()
     _, frames = load_session(tmp_path / 'b')
     assert [g.i for g in frames] == [0]
+
+
+def test_each_frame_line_carries_its_exposure_and_gain(tmp_path):
+    rec = FrameRecorder()
+    rec.start(tmp_path / 's', {'capture': {'depth_scale': 1e-4}})
+    rec.record(frame(0)._replace(exposure_us=4000.0, gain=16.0), 1.0, {})
+    rec.record(frame(1), 2.0, {})
+    rec.stop()
+    got = list(load_session(tmp_path / 's')[1])
+    assert got[0].line['exposure_us'] == 4000.0 and got[0].line['gain'] == 16.0
+    assert got[1].line['exposure_us'] is None
