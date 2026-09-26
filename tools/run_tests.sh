@@ -28,7 +28,7 @@ else
 fi
 cd "$ROOT" || exit 1
 
-PKGS=(fr3_mating_controllers mating_controller roscam)
+PKGS=(fr3_mating_controllers mating_controller roscam object_pose_cpp)
 FAILED=()
 OUT="$(mktemp)"
 trap 'rm -f "$OUT"' EXIT
@@ -48,6 +48,9 @@ colcon test-result --all --verbose | tee "$OUT"
 COLCON="$(grep '^Summary:' "$OUT" | tail -n 1)"
 
 echo "== pytest (${ROOT}) =="
+# the workspace install for object_pose_cpp (the C++ estimator); pytest.ini
+# puts roscam's source first, so the tests still run the source
+source "$ROOT/install/local_setup.bash"
 python3 -m pytest -q 2>&1 | tee "$OUT"
 [ "${PIPESTATUS[0]}" -eq 0 ] || FAILED+=("pytest")
 PYTEST="$(tail -n 1 "$OUT")"

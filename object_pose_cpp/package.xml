@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>object_pose_cpp</name>
+  <version>0.1.0</version>
+  <description>The marker-free object pose estimator of roscam/object_pose.py (depth and colour edges against a mesh), ported to C++ for speed, as a Python extension. roscam's CppObjectPoseEstimator uses it; the Python version stays the reference.</description>
+  <maintainer email="k.ural1@salford.ac.uk">Kaan Ural</maintainer>
+  <license>Apache License 2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
+
+  <build_depend>eigen</build_depend>
+  <build_depend>pybind11-dev</build_depend>
+  <depend>libopencv-dev</depend>
+  <exec_depend>python3-numpy</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
