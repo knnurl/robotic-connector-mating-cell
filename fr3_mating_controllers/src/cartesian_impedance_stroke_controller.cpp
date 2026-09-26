@@ -10,11 +10,11 @@ namespace fr3_mating_controllers
 
 namespace
 {
-// Read at configure time only. Accepting them while configured would leave
-// the node reporting values the loop is not using.
-constexpr std::array<const char *, 7> kConfigureOnlyParams{
-    "arm_id", "max_force_n", "max_torque_nm", "tau_max_nm", "tau_rate_limit",
-    "setpoint_slew_mps", "setpoint_slew_rps"};
+// The five read at configure time only. Accepting them while configured
+// would leave the node reporting values the loop is not using. The gains and
+// the slew pair are NOT here: both are live (see adopt_pending_params).
+constexpr std::array kConfigureOnlyParams{
+    "arm_id", "max_force_n", "max_torque_nm", "tau_max_nm", "tau_rate_limit"};
 }  // namespace
 
 controller_interface::InterfaceConfiguration
@@ -123,6 +123,8 @@ CartesianImpedanceStrokeController::on_configure(const rclcpp_lifecycle::State &
     pending_k_rot_tool_ = k_rot_tool_;
     pending_damping_ratio_ = damping_ratio_;
     pending_nullspace_stiffness_ = nullspace_stiffness_;
+    pending_setpoint_slew_mps_ = setpoint_slew_mps_;
+    pending_setpoint_slew_rps_ = setpoint_slew_rps_;
     params_dirty_ = false;
 
     // Live tuning: the ladder adjusts stiffness by +/-50 N/m and toggles
@@ -141,7 +143,10 @@ CartesianImpedanceStrokeController::on_configure(const rclcpp_lifecycle::State &
             Eigen::Vector3d kr_new = pending_k_rot_tool_;
             double zeta_new = pending_damping_ratio_;
             double ns_new = pending_nullspace_stiffness_;
+            double slew_mps_new = pending_setpoint_slew_mps_;
+            double slew_rps_new = pending_setpoint_slew_rps_;
             bool gains_touched = false;
+            bool slew_touched = false;
             int float_request = -1;  // -1 untouched, 0 off, 1 on
 
             for (const auto &p : params) {
@@ -171,9 +176,18 @@ CartesianImpedanceStrokeController::on_configure(const rclcpp_lifecycle::State &
                     }
                     (name == "k_pos_tool" ? kp_new : kr_new) = Eigen::Vector3d(v[0], v[1], v[2]);
                     gains_touched = true;
+                } else if (name == "setpoint_slew_mps") {
+                    slew_mps_new = p.as_double();
+                    slew_touched = true;
+                } else if (name == "setpoint_slew_rps") {
+                    slew_rps_new = p.as_double();
+                    slew_touched = true;
                 }
             }
 
+            // Both validations run before either staging block: a rejected set
+            // must leave pending_* exactly as it found them, or the next valid
+            // set adopts a value this one was told had been refused.
             if (gains_touched) {
                 const std::string err = detail::validate_gains(kp_new, kr_new, zeta_new, ns_new);
                 if (!err.empty()) {
@@ -181,10 +195,26 @@ CartesianImpedanceStrokeController::on_configure(const rclcpp_lifecycle::State &
                     result.reason = err;
                     return result;
                 }
+            }
+            if (slew_touched) {
+                const std::string err = detail::validate_slew(slew_mps_new, slew_rps_new);
+                if (!err.empty()) {
+                    result.successful = false;
+                    result.reason = err;
+                    return result;
+                }
+            }
+            if (gains_touched) {
                 pending_k_pos_tool_ = kp_new;
                 pending_k_rot_tool_ = kr_new;
                 pending_damping_ratio_ = zeta_new;
                 pending_nullspace_stiffness_ = ns_new;
+            }
+            if (slew_touched) {
+                pending_setpoint_slew_mps_ = slew_mps_new;
+                pending_setpoint_slew_rps_ = slew_rps_new;
+            }
+            if (gains_touched || slew_touched) {
                 params_dirty_ = true;
             }
             if (float_request >= 0) {
@@ -310,6 +340,8 @@ void CartesianImpedanceStrokeController::adopt_pending_params()
     k_rot_tool_ = pending_k_rot_tool_;
     damping_ratio_ = pending_damping_ratio_;
     nullspace_stiffness_ = pending_nullspace_stiffness_;
+    setpoint_slew_mps_ = pending_setpoint_slew_mps_;
+    setpoint_slew_rps_ = pending_setpoint_slew_rps_;
     params_dirty_ = false;
 }
 

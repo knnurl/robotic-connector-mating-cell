@@ -1,0 +1,67 @@
+# FR3 Cell Control - thresholds (logic.Settings; an unknown key is an error).
+# PLACEHOLDER = a first guess, not measured on the cell. Tune it there.
+# Everything else is copied from core.py or the controller and is pinned to
+# its source by test_cell_pins.py.
+
+# --- freshness -------------------------------------------------------------
+state_stale_s: 0.3          # core.ROBOT_STATE_STALE_S
+driver_down_s: 2.0          # core.DRIVER_DOWN_S; a robot-state gap this long voids PRE-FLIGHT
+pose_stale_s: 0.5           # core.POSE_STALE_S
+raw_max_age_s: 0.25         # core.RAW_MAX_AGE_S: ALIGN moves only on a raw pose this fresh
+image_stale_s: 1.5          # debug image is capped at 5 Hz by cam_pub
+track_status_stale_s: 1.0   # core.TRACK_STATUS_STALE_S
+
+# --- RT link (control_command_success_rate) --------------------------------
+rt_ok: 0.99                 # core.RT pill: green at 99 %
+rt_down: 0.95               # core.RT pill: red below 95 %; banner "RT DEGRADED"
+
+# --- PRE-FLIGHT --------------------------------------------------------------
+stationary_rad_s: 0.02      # PLACEHOLDER: largest |joint velocity| that counts as stationary
+
+# --- ALIGN ----------------------------------------------------------------------
+rot_tol_deg: 1.0            # core.ROT_TOL_DEG
+inplane_tol_deg: 0.5        # core.INPLANE_TOL_DEG
+
+# --- TRACK -------------------------------------------------------------------
+track_entry_mm: 30.0        # PLACEHOLDER: TRACK only starts with |e| under this (align is optional)
+track_entry_deg: 5.0        # PLACEHOLDER: ... and tilt under this
+track_max_lead_mm: 60.0     # tracking_node's lead cap (fr3_params tracking_max_lead_m); TRACK
+                            # beyond it only with over lead = clamp
+marker_loss_policy: hold    # hold (tracking_node's own) | stop | release (GUI-side, TODO C2)
+marker_loss_ms: 1000.0      # PLACEHOLDER: stale this long before stop/release acts
+
+# --- camera ------------------------------------------------------------------
+pose_jump_mm: 10.0          # PLACEHOLDER: frame-to-frame jump that enlarges the camera view
+
+# --- speed slider ------------------------------------------------------------
+speed_default_pct: 20.0     # every launch starts here; never restored from a session
+track_speed_default_pct: 10.0   # PLACEHOLDER: TRACK's slew (10 % = 25 mm/s, 5.7 deg/s); the node's own profile is 100 mm/s
+speed_confirm_pct: 25.0     # torque mode above this needs a confirm click
+track_fast_pct: 40.0        # the FAST switch while tracking (100 mm/s, 22.9 deg/s); on 2026-09-24 a
+                            # hand-moved marker outran it 1 % / 3 % of the time (vs 45 % / 52 % at 10 %)
+grip_cube_mm: 55.0          # GRIP: the drawer's cube size at launch (Franka Hand strokes 80 mm)
+grip_force_n: 20.0          # GRIP: the drawer's grasp force at launch
+grip_target_max_age_s: 600.0  # PLACE AT B: target B must have been seen this recently (= fr3_params)
+position_ceiling_pct: 20.0  # core.CEIL_SPEED_PCT: slider 100 % = 20 % of MoveIt's planned speed
+slew_max_mps: 0.25          # impedance_detail.hpp ConfigLimits::slewMpsMax
+slew_max_rps: 1.0           # impedance_detail.hpp ConfigLimits::slewRpsMax
+
+# --- gain presets switch only in free space ----------------------------------
+preset_max_force_n: 5.0     # PLACEHOLDER: |F| ext above this blocks a gain change
+preset_max_lead_mm: 5.0     # PLACEHOLDER: spring lead above this blocks a gain change
+
+# --- force bar ---------------------------------------------------------------
+push_limit_n: 10.0          # core.PUSH_LIMIT_N (what the ladder asks you to stay under)
+controller_max_force_n: 30.0   # max_force_n in cartesian_impedance_stroke.yaml
+lead_warn_mm: 20.0          # spring-lead tile turns amber above this
+
+# --- joints ------------------------------------------------------------------
+joint_warn_pct: 90.0        # PLACEHOLDER: worst joint this far from centre to limit turns amber
+
+# --- workspace box, fr3_link0, metres (the Z floor is separate: one floor) ---
+box_x: [0.20, 0.80]         # PLACEHOLDER
+box_y: [-0.45, 0.45]        # PLACEHOLDER
+box_z_max: 0.80             # PLACEHOLDER
+
+# --- saved poses -------------------------------------------------------------
+pose_confirm_mm: 50.0       # a saved-pose move longer than this needs a confirm click

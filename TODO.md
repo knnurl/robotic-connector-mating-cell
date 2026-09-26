@@ -1,71 +1,52 @@
 # TODO — Connector Mating Cell
 
-Full state of the project: [STATUS.md](STATUS.md). Setup/usage reference:
-[SETUP_AND_CALIBRATION.md](SETUP_AND_CALIBRATION.md). Original audit
-handoff: [HANDOFF.md](HANDOFF.md) (2026-07-05, historical).
+Where the project stands: [PROJECT_STATE.md](PROJECT_STATE.md). What exists
+and what is proven: [STATUS.md](STATUS.md). Setup/usage reference:
+[SETUP_AND_CALIBRATION.md](SETUP_AND_CALIBRATION.md). Which document to
+believe when two disagree: [DOCS.md](DOCS.md).
 
-## ► Critical path — the single next action
+## ► Critical path (2026-09-25)
 
-**Superseded 2026-09-11: the robot HAS now run.** The FR3 moved under
-closed-loop vision control (vision → MoveIt Cartesian → real FCI), so the
-"first live controller run" gate is closed. Camera-relative alignment works
-and the marker-orientation measurement is now trustworthy.
+1. **The next arm session: [ARM_CHECKLIST.md](ARM_CHECKLIST.md).**
+   Everything after `401cf24` was built offline and needs the arm:
+   - the marker distance from depth;
+   - the re-solved hand-eye;
+   - the `/object/*` contract (the Phase 1 exit);
+   - PLACE AT B.
 
-**Hand-eye is now CALIBRATED (2026-09-15).** 21 poses, Tsai, residual
-3.17 mm / 1.57 deg; all four solvers agreed to 0.05 mm / 0.01 deg. Samples
-archived in `tools/fr3/handeye_samples_20260915.yaml`; the result is the
-default in `tools/fr3/fr3_mating.launch.py`.
+   Rebuild roscam first: the installed copy publishes no `/object/*`.
+2. **Perception Phase 3 (shadow mode) is built offline** and replay-tested
+   ([PERCEPTION_PLAN.md](PERCEPTION_PLAN.md)). Its arm sessions come after
+   step 1: ARM_CHECKLIST section 6.
+3. **Perception Phase 4 (`depth_checked`) is built offline** as well: depth
+   drives and the marker vetoes. Its arm runs come after Phase 3's
+   (ARM_CHECKLIST section 7).
 
-The big finding: the old `handeye_quat` default was identity, and the true
-rotation is **89.94 deg about Z** — the camera is mounted rotated ~90 deg,
-so camera X/Y were effectively swapped for anything trusting that transform.
-The translation guess was only 13 mm out; the rotation was the real bug.
+Resolved blockers:
+- The 09-11 FCI packet loss was Desk's browser tab on the robot link.
+- The 09-24 comm reflexes were an unoptimised controller build (C10, lesson
+  12).
 
-Re-run `handeye_calib` if the bracket is reprinted or reseated
+### Hand-eye
+
+Calibrated 2026-09-15 (Tsai, 21 poses; the samples are in
+`tools/fr3/handeye_samples_20260915.yaml`). The true rotation is 89.94° about
+Z: the camera is mounted rotated, and the old identity default had swapped
+camera X and Y.
+
+**Re-solved 2026-09-25 for the depth distance** (lesson 17). The xyz moved
+3.9 mm along the optical axis, and the old solve is kept as `xyz_aruco_range`.
+Both are in `tools/fr3/calib/handeye.yaml`, the one copy, and the launch picks
+the xyz that matches `range_source`.
+
+A fresh calibration with the depth distance supersedes both. Also re-run it if
+the bracket is reprinted or reseated
 ([hardware/camera_mount/](hardware/camera_mount/)):
 
     python3 -m roscam.handeye_calib --ros-args \
         -p base_frame:=fr3_link0 -p tcp_frame:=fr3_hand_tcp
 
-(`ros2 run roscam ...` does not work — roscam is not colcon-installed here —
-and the frame defaults are the MELFA ones, so the overrides are mandatory.)
-
-**The single next action is now the validation ladder**: confirm tilt
-converges end-to-end with `align_gui` AUTO-CONVERGE (this also validates the
-new hand-eye in the loop), then teach connector offsets, then the ladder in
-the FR3 section below.
-
-Residual caveat: 1.57 deg rotational residual is above the "well under
-1 deg" the tool asks for. Usable, and vastly better than the identity it
-replaced, but more rotational diversity would tighten it if alignment ever
-looks systematically off.
-
-**Superseded 2026-09-15 (evening): the next action is the IMPEDANCE
-commissioning ladder.** Camera alignment works through the cartesian backend
-(~1 mm), so the open risk is the insertion backend, which has never run on
-hardware and commands torque. Run the ladder with
-`tools/fr3/impedance_panel.py` — steps 1-3 need no connector, no vision and
-no force thresholds, so they can be done any time the cell is up.
-
-The servo alignment backend is **parked**, not abandoned: it works in
-simulation and unit tests, but it needs a controller swap on every run and
-was never validated after the position-controller fix. Alignment stays on
-the cartesian backend meanwhile.
-
-### ⚠ Blocker before any further robot motion
-
-**Packet loss on the FCI link: 4.7% measured 2026-09-11** (was 10.5%; it
-improved but is not clean). libfranka tolerates almost none, and this has
-already killed the stack twice mid-run — once as
-`Connection reset by peer`, once as `libfranka: Timeout` while idle. NIC
-counters are clean (0 errors/dropped/carrier) and RTT is 0.13 ms when
-packets arrive, so they are being dropped at the robot end or on the wire,
-not locally. Suspects, in order: the browser holding ~37 persistent HTTPS
-connections to Desk on the same link, then cabling, then the robot's own
-controller. `fr3_preflight.sh` only pings 20 packets and reports avg/max,
-so it can miss this — check loss over a few hundred packets:
-
-    ping -c 300 -i 0.01 -q 172.16.0.2      # want ~0% loss
+The frame overrides are mandatory, because the defaults are the MELFA ones.
 
 ## MELFA path — blocking real-world use (only if deploying on the RV-5AS)
 
@@ -107,38 +88,30 @@ so it can miss this — check loss over a few hundred packets:
       "lessons" section at the end of this file.
 - [x] First live controller run — done 2026-09-11 on REAL hardware (not
       fake): FCI activated in Desk, MoveIt + ros2_control up, arm driven
-      by closed-loop vision through `tools/fr3/align_gui.py`. Supersedes
+      by closed-loop vision through `tools/fr3/cell_panel.py`. Supersedes
       both the fake-hardware run and the parked mock dry run.
 - [x] Marker-orientation measurement made trustworthy — done 2026-09-11.
       Was unusable: two separate defects (see lessons). Now 0% flips and
       unbiased. This blocked all orientation alignment.
-- [ ] Verify tilt now converges to ~0 in a full `align_gui` AUTO-CONVERGE
-      run (`tilt_change_deg` should be consistently negative in the trace);
-      the previous run stalled on the measurement, not the controller
-- [ ] Hand-eye calibrate on the FR3 (`base_frame:=fr3_link0`,
-      `tcp_frame:=fr3_hand_tcp`, `filter_frame:=''` during collection),
-      pass result via `handeye_xyz`/`handeye_quat` launch args
+- [x] Verify tilt converges in a full ALIGN run — done 2026-09-23 on the
+      arm: 239.6 mm → 1.6 mm and 9.7° → 0.49° from 100 mm. ALIGN now lives in
+      the panel, `tools/fr3/cell/`
+- [x] Hand-eye calibrate on the FR3 — done 2026-09-15, and re-solved
+      2026-09-25 for the depth distance (see "Hand-eye" above). The launch
+      reads `tools/fr3/calib/handeye.yaml`
 - [ ] Teach connector offsets in `tools/fr3/fr3_params.yaml`, then enable
       insertion and run the validation ladder at `insert_speed: 0.02`
 - [ ] Tune force-guard thresholds on the real cell: watch
       `/franka_robot_state_broadcaster/external_wrench_in_base_frame`
       during one manual mate, set `contact_force_n` above the estimate's
       bias, verify contact→MATED and early-contact→FAULT behaviours
-- [x] `moveit_servo` installed and wired into `align_gui` as the "servo"
+- [x] `moveit_servo` installed and wired into `cell_panel` as the "servo"
       backend — done 2026-09-15. Continuous 6-DOF streaming with command
       shaping, an oscillation watchdog and a stall watchdog; signs pinned
       by `tools/fr3/test_servo_signs.py`.
-- [ ] **Re-validate the servo backend on hardware after the controller
-      change.** It now streams joint POSITIONS to
-      `fr3_servo_position_controller` (loaded inactive by
-      `tools/fr3/fr3_servo.launch.py`; `align_gui` swaps controllers around
-      each run) instead of trajectories into the effort-mode
-      `fr3_arm_controller`, which stalled the arm outright — lessons 6-7.
-      Ladder: conservative until converged, then moderate, then brisk.
-      Watch for audible buzz, check `outcome` in the trace, and confirm
-      `fr3_arm_controller` is active again afterwards
-      (`ros2 control list_controllers`) — the GUI says "NOT RESTORED" and
-      the SERVO pill reads `CTRL STUCK` if the hand-back ever fails.
+- [x] ~~Re-validate the servo backend on hardware~~ — **dropped
+      2026-09-23: servo is archived** (tag `pre-cleanup-2026-09-23`).
+      Impedance is the path; lessons 6-7 say why
 - [x] Out-of-ROS camera capture ("camera outside ROS, only end-data in"):
       `roscam/rs_capture.py` (SDK wrapper + self-test CLI),
       `source:=topic|realsense|external` on cam_pub/connector_pose,
@@ -161,13 +134,79 @@ so it can miss this — check loss over a few hundred packets:
       rule prevents it rather than papering over it.
 - [ ] Verify no `communication_constraints_violation` across a full mating
       cycle with the camera live (then once more with Foxglove attached
-      over WiFi); prefer `vision_source:=realsense` if it ever recurs
+      over WiFi). The five reflexes of 2026-09-24 were the unoptimised
+      controller build (C10, lesson 12). None has occurred since the Release
+      build, but no full mating cycle has run yet
+- [x] Continuous tracking (TRACK) on the arm — done 2026-09-23/24.
+      `tracking_node` runs behind the panel's TRACK button. It is:
+      - camera-centred, with an over-lead policy (hold / clamp / stop);
+      - glides the goal between camera frames;
+      - holds at the joint limits and at the workspace box;
+      - stops itself on buzz (3.5 Nm);
+      - keeps the operator's gains, and has a FAST switch.
+
+      `tools/fr3/sim/tracking_smoke.py` runs the real node in a fake cell;
+      run it before any arm session
+- [ ] TRACKING_SPEC V1-V3 as a recorded table → [ARM_CHECKLIST.md](ARM_CHECKLIST.md)
+      section 2 (V4-V6 later)
+- [x] One-page PySide6 panel, `tools/fr3/cell/` — done 2026-09-24, replacing
+      the Tk `cell_panel.py`
+- [x] GRIP the 55 mm cube — done 2026-09-25: 3 cycles on the arm, under
+      impedance
+- [ ] PLACE AT B on the arm. It is built and mock-tested (`75df4d1`)
+      → ARM_CHECKLIST section 1
+- [ ] Controller-side items C1-C5 and C7-C9
+      ([tools/fr3/cell/README.md](tools/fr3/cell/README.md)). Suggested
+      order: C8 with C1, C9, C2/C3, C7. C4 and C5 need franka_ros2 changes
+- Marker-free perception ([PERCEPTION_PLAN.md](PERCEPTION_PLAN.md)):
+  - [ ] **Phase 0, measure the sensor.** Done: the range bias, latency
+        24 ms and the depth settings (`ba26387`, `8345442`). The missing
+        recordings, the sticker and the tilt reference → ARM_CHECKLIST
+        sections 3-4
+  - [ ] **Phase 1, the `/object/*` contract.** Built offline (`a8809d7`);
+        the on-arm exit → ARM_CHECKLIST section 2
+  - [ ] **Phase 2, the estimator.** `roscam/object_pose.py` (`c8991e6`,
+        `c75a878`) is scored on the recordings that exist
+        (`runs/2026-09-25/analysis/`). Two exits wait on missing
+        recordings: the bare cube, and no false accepts on junk and hand
+        frames. The tilt offset against the marker (0.5-0.7° at 100 mm,
+        1.3-2.1° at 300 mm, systematic) is open: which one is right?
+  - [ ] **Phase 3, shadow mode.** Built offline 2026-09-25 (`1cce687`):
+        `roscam/object_shadow.py` and `vision_standalone.Shadow`, run with
+        `fr3_cell vision_source:=standalone object_shadow:=true`. Replayed
+        through the real frame loop (`tools/fr3/vision/loop_replay.py`,
+        `runs/2026-09-25/analysis/phase3_*`):
+        - 3,181 of 3,183 static marker frames valid, within ±0.51 mm of the
+          marker;
+        - the whole frame p95 44.8 ms on one E-core, against the 66.7 ms
+          period, with 1 overrun in 3,655 frames.
+
+        The on-arm sessions and the estimator on/off A/B → ARM_CHECKLIST
+        section 6. The object KF moved to Phase 4 (PERCEPTION_PLAN
+        [AS BUILT])
+  - [ ] **Phase 4, `depth_checked`.** Built offline 2026-09-26 (`1cce687`,
+        the C++ estimator `8fb0abd`):
+        `roscam/depth_checked.py` and `vision_standalone.DepthRunner`,
+        chosen from the panel's source dropdown. Two adversarial reviews
+        found no blocker; their findings are fixed. On the replayed static
+        sessions (`runs/2026-09-25/analysis/phase4b_rules_*`), with the
+        2026-09-26 rules (veto tilt 4°, a drop pauses acquisition) and the
+        C++ estimator:
+        - a raw pose on 98-99 % of marker frames out to 275 mm and 94.5 % at
+          275-350 mm, still;
+        - 79.5 % in hand-guided motion;
+        - the depth raw goes out at p95 23 ms after frame pickup (the TRACK
+          row asks for 40).
+
+        The arm runs → ARM_CHECKLIST section 7
+  - [ ] Phases 5-7: the marker as a seed only, no marker, then the connector
 
 ## Improvements (not blocking)
 
-- [ ] Finish the FR3 mock dry-run harness (`tools/dryrun_fr3/`) — pipeline
-      config already fixed, never re-run; success = MATED in the log
-      (HANDOFF §6). Lower priority now that `tools/fr3/` targets real HW
+- [x] ~~Finish the FR3 mock dry-run harness (`tools/dryrun_fr3/`)~~ —
+      **dropped 2026-09-23**: it was parked in `melfa/parked/` with
+      `mating_node`. The no-robot checks are now `tools/fr3/cell/mock_cell.py`
+      and `tools/fr3/sim/tracking_smoke.py`
 - [x] `computeCartesianPath` stroke planner (`insert_planner: cartesian`) —
       path-guaranteed INSERT/retract without Pilz; on by default in the FR3
       profile — done 2026-07-12
@@ -183,18 +222,18 @@ so it can miss this — check loss over a few hundred packets:
       ControllerInterface plugin, tau = J^T(K dx − D v) + nullspace +
       coriolis at 1 kHz, tool-frame K (soft lateral/rot, firm Z),
       slew-limited equilibrium, torque-rate saturation, float_mode
-      commissioning switch; `move_l` dispatch (`insert_backend: impedance`)
+      commissioning switch; `mating_node` dispatch (`insert_backend: impedance`)
       with controller switching, 50 Hz equilibrium ramp + preload
       overdrive, wrench-judged outcomes — done 2026-07-12. Compiled clean
       against franka_ros2; **never run on hardware** (fake HW cannot
       integrate torques)
 - [x] Commissioning rig for that ladder — done 2026-09-15:
-      `tools/fr3/impedance_panel.py`, one button per rung (FLOAT / HOLD /
+      `tools/fr3/cell_panel.py`, one button per rung (FLOAT / HOLD /
       SETPOINT / RELEASE) with the arm's pose, external wrench and
       `control_command_success_rate` live, a JSONL trace per session, and
       RELEASE one click away whenever no other action is running (close,
       Ctrl+C and exit also hand the arm back). Logic
-      covered by `tools/fr3/test_impedance_panel.py`.
+      covered by `tools/fr3/test_cell_panel.py`.
 - [x] Pre-contact guards in the controller — done 2026-09-15, before it
       ever commanded torque: a Cartesian force/moment ceiling
       (`max_force_n` 30 N, `max_torque_nm` 10 Nm — stiffness × error alone
@@ -237,7 +276,7 @@ so it can miss this — check loss over a few hundred packets:
       change; gtests build without franka and cannot hang; the spawner path is
       quoted. The review confirmed against the franka sources that releasing
       the arm controller does put the robot in IDLE, so PRE-FLIGHT can work.
-- [ ] **Run the ladder on the real FR3** with `tools/fr3/impedance_panel.py`
+- [ ] **Run the ladder on the real FR3** with the panel, `tools/fr3/cell/`
       (`fr3_mating_controllers/README.md`). **Rungs 0-3 PASSED 2026-09-16**
       (payload via Desk, rest bias 1.0 N, RT 100%, float smooth, hold solid,
       setpoints tracking with the friction deadband of lesson 10). Rung 4
@@ -254,27 +293,18 @@ so it can miss this — check loss over a few hundred packets:
          few mm.
       4. Dispatched stroke — AFTER the force-guarded MoveIt stroke works,
          since it shares the thresholds still being tuned there.
-- [ ] **Write the spec for continuous marker tracking on the impedance
-      backend** - design first, then code. Lesson 10 is why one gain set
-      cannot serve both tracking and mating:
-      - **named gain profiles** in the controller yaml (`track`: stiff and
-        well damped; `mate`: today's soft set), applied atomically on phase
-        transitions. Tracking to ~1 mm needs k around 3000 N/m (deadband
-        `3.5/k`); mating needs 150 for self-alignment
-      - **make `setpoint_slew_mps` / `setpoint_slew_rps` live**, not
-        configure-time: tracking wants 0.1-0.25 m/s, the stroke 0.005. Keep
-        the range checks
-      - **`damping_ratio` toward 2.0 for tracking.** `D = 2*zeta*sqrt(K)` is
-        critical for 1 kg, so effective zeta is `zeta / sqrt(apparent mass)`
-        - about 0.5 on this arm at zeta 1.0
-      - **orientation target must come from VISION, not the measured pose.**
-        The panel republishes the measured quaternion, which is fine for
-        stepping but would ratchet the 3.4 deg angular deadband when tracking
-      - **bench tests before closed loop**: static (steady error vs k, expect
-        `3.5/k`), step (bandwidth + overshoot), sine at 0.1/0.2/0.5 Hz (phase
-        lag gives end-to-end latency, closing that open item too)
-      - stays on impedance, NOT moveit_servo: effort-to-effort needs no
-        command-mode swap, so lessons 6 and 7 do not apply
+- [x] **Spec for continuous marker tracking on the impedance backend** -
+      written 2026-09-22 against measured numbers:
+      [TRACKING_SPEC.md](TRACKING_SPEC.md). Supersedes the bullet list that
+      used to live here; two of its guesses were wrong and the spec says so.
+- [x] **Implement the tracking loop per [TRACKING_SPEC.md](TRACKING_SPEC.md)**
+      — done 2026-09-22/24; it runs on the arm (see the FR3 section).
+      - C2, the live `setpoint_slew_mps/rps`: done.
+      - C1, named gain profiles: superseded. TRACK keeps the operator's
+        gains (`tracking_use_operator_gains`).
+      - The damping ratio did change: the 40 Hz wrist buzz of 2026-09-23 was
+        the rotational damping, so `track_damping_ratio` went from 1.0 to 0.5.
+      - Still open: the V1-V6 table.
 - [ ] `fr3_backend` (~/fr3_backend, joint-impedance WebSocket testbed):
       keep as a hands-on stiffness-feel/tuning rig; do NOT run alongside
       franka_ros2 (both need the exclusive FCI connection)
@@ -286,7 +316,10 @@ so it can miss this — check loss over a few hundred packets:
       dropout prediction) — done 2026-07-06
 - [x] Connector-level 6-DOF pose via depth ICP against CAD STL
       (`connector_pose` node; marker = prior, gated fallback) — done
-      2026-07-06; needs real-data tuning + STL export of the real connector
+      2026-07-06; needs real-data tuning + STL export of the real connector.
+      For the marked cube it is superseded by `roscam/object_pose.py`
+      (depth plus colour edges, perception Phase 2). Plain ICP was biased
+      where the D405 returns no depth (lesson 16)
 - [x] Multi-marker / ArUco-board support in `cam_pub`
       (`board_markers_x/y`): grid board, pose = board centre, any visible
       subset suffices (occlusion-robust) — done 2026-07-12; verified in
@@ -312,11 +345,28 @@ so it can miss this — check loss over a few hundred packets:
       (`mating_phase_machine.hpp`): the whole transition matrix — raw-vision
       arming, interrupted-insert latch, retract recovery, drift-back,
       plan-failure accounting, force outcomes — is now 14 gtests instead of
-      untested node code; `move_l.cpp` drives it — done 2026-07-12 (32
+      untested node code; `mating_node.cpp` drives it — done 2026-07-12 (32
       C++ tests total)
-- [ ] Split `melfa_rv5as_masterclass` into `mating_controller` (portable) +
-      a `melfa_cell` package (PLC/HMI/bringup); the name misleads and the
-      graph flags low cohesion in the controller community
+- [x] **Workspace restructured 2026-09-22** (the FR3 is the only target):
+      - `move_l` -> `mating_node`. The old name was MELFA's "MoveL" and
+        described a linear move, not a mating controller. The ROS node name
+        `connector_mating_node` is UNCHANGED - it keys the params files and
+        every `/connector_mating_node/*` service the GUIs call.
+      - MELFA packages grouped under `melfa/` (`melfa_cell`,
+        `melfa_masterclass_msgs`, `BRINGUP.txt`), parked but intact.
+      - `mating_node` put behind `option(BUILD_MATING_NODE ON)` so this
+        machine's broken MoveIt install cannot take the whole package -
+        gtests included - down with it. Build the testable core with
+        `--cmake-args -DBUILD_MATING_NODE=OFF`.
+      - [DOCS.md](DOCS.md) added: an index of all twelve documents with the
+        redundant content named. Nothing was deleted.
+- [x] Split `melfa_rv5as_masterclass` into `mating_controller` (portable:
+      phase machine, pose maths, tracking law, mating_node, tracking_node) +
+      `melfa_cell` (plc_/hmi_/legacy demo) - done 2026-09-22 when the
+      tracking work needed a home and the FR3 became the only target. The
+      namespaces (`mating_geometry`, `mating_phase_machine`, `tracking_law`)
+      were already package-agnostic, so only include paths and launch
+      package names moved.
 - [ ] Automated end-to-end regression: wrap the FR3 mock dry run in
       `launch_testing`, assert MATED is reached headless
 - [ ] CI (GitHub Actions on `ros:humble`: build + gtest + pytest + flake8)
@@ -413,14 +463,14 @@ pass: asked for effort in and position out, it starts torque control and
 with no active control — `std::runtime_error`, ros2_control_node dead, whole
 launch down. Verified twice with the arm stationary. Always **deactivate the
 old controller, pause, then activate the new one** (`switch_controllers` in
-`align_gui.py` does this). Switching *to* position is fine; it is the way
+`cell_panel.py` (ALIGN tab) does this). Switching *to* position is fine; it is the way
 back that bites. Test mode switches with the arm stopped and nothing
 commanded — that is how this was caught instead of mid-motion.
 
 **8. The enabling device is invisible over FCI.** Holding and releasing the
 cell's enabling device changes *no* field of `FrankaRobotState` — not
 `robot_mode`, not the error flags. There is no libfranka signal for it, so
-software cannot gate on it. `align_gui`'s gate is therefore a **robot-state**
+software cannot gate on it. `cell_panel`'s gate is therefore a **robot-state**
 gate (pauses whenever the robot leaves MOVE, e.g. a real user stop, and ends
 the run on REFLEX), plus a PAUSE/RESUME button. If a held-to-run interlock
 is ever required, it has to come from the robot's own safety configuration
@@ -430,7 +480,7 @@ or from separate hardware.
 `FrankaRobotState` at 1000 Hz costs **86% of a CPU core**; taking the
 messages raw and decoding a few costs 31% (rclpy still dispatches every
 callback). A C++ `topic_tools throttle` child relaying at 50 Hz costs 5%,
-which is what `align_gui` starts. Subscribe **best-effort, depth 1** so a
+which is what `cell_panel` starts. Subscribe **best-effort, depth 1** so a
 slow reader can never back-pressure the realtime publisher.
 
 ## Lessons from the 2026-09-16 impedance commissioning (do not re-learn these)
@@ -479,7 +529,7 @@ Raw data: `tools/fr3/logs/impedance_20260916_162613.jsonl` (40 MB, three gain
 regimes).
 
 **11. A daemon spin thread outliving rclpy's context ABORTS the process.**
-`impedance_panel.py` exited 1 with `terminate called without an active
+`cell_panel.py` (IMPEDANCE & TRACK tab) exited 1 with `terminate called without an active
 exception` on an ordinary window close: `rclpy.shutdown()` ran while a daemon
 thread was still inside `rclpy.spin()`, taking a DDS thread down with the
 context. The abort landed *after* the arm was handed back - by luck of the
@@ -490,11 +540,116 @@ handoff. Fixed by owning the executor and tearing down in order
 GUI exit status as evidence the arm was released** - ask the controller
 manager (`ros2 control list_controllers`).
 
+## Lessons from 2026-09-23 to 09-25 (do not re-learn these)
+
+**12. Split the RT success rate by controller mode before blaming the
+network.**
+- *What happened:* five comm reflexes on 09-24, all in HOLD or TRACK and
+  never in FLOAT.
+- *The cause:* since the 09-23 rebuild the controllers had had no
+  `CMAKE_BUILD_TYPE` (no `-O2`), so the 1 kHz impedance law ran unoptimised
+  Eigen.
+- *Measured:* 8.7-28.7 % of HOLD samples were below 97 % RT success
+  unoptimised, and 0.0 % after a Release build.
+- *The rule:* an RT failure that depends on the mode points at the
+  controller's compute. Check the build flags before the network, the
+  scheduler or the GUI.
+- Both CMakeLists now default to Release (C10).
+
+**13. Cartesian tracking can drive a joint into its end stop.**
+- *What happened:* two `joint_velocity_violation` reflexes on 09-24.
+- *The cause:* J2 was at -103.7° and -104.6°, past its -102.2° limit. There
+  the FR3's position-dependent velocity limit toward the stop is zero, so a
+  slow drift of 0.06-0.16 rad/s trips it.
+- *Misleading sign:* "the robot state froze first" was the reflex itself.
+- *The rule:* check q against the joint limits (libfranka
+  `rate_limiting.h`) before suspecting the driver.
+- `tracking_node` now holds within 0.14 rad of a stop.
+
+**14. Test node-level ROS plumbing before the arm.**
+- *What happened:* the first hardware TRACK segfaulted in code no unit test
+  reached: a range-for over a temporary from `future.get()`.
+- *The fix:* `tools/fr3/sim/tracking_smoke.py` runs the real node in a fake
+  cell. Since then it has caught a fake robot state with no joint positions,
+  and a glide regression in the lead cap.
+- *The rule:* run it before asking anyone to press TRACK.
+
+**15. `PR_SET_PDEATHSIG` fires when the forking THREAD exits.**
+- *What happened:* for a day, the panel's REC said "recording" and recorded
+  nothing.
+- *The cause:* the panel forked `ros2 bag record` from a short-lived worker
+  thread with PDEATHSIG set to SIGINT. The bag got SIGINT as soon as that
+  thread ended, before it had made its folder.
+- *The rule:* fork long-lived children from a thread that lives as long as
+  they should.
+- *Related gotcha:* rosbag2 writes nothing under a path that contains a
+  backslash, such as pytest's `tmp_path` on this domain account.
+
+**16. The D405 is passive stereo: plain plastic returns no depth.**
+- *What happened:* the cube's bare yellow faces leave bites in the depth
+  region, so a depth-only outline, or plain ICP, is biased by millimetres.
+- *Misleading sign:* the bias looked like depth erosion, then like a sticker
+  offset.
+- *Why:* the sticker and the blue patch are textured, so they do return
+  depth.
+- *The rule:* take the in-plane pose from colour edges, and z and tilt from
+  depth (`roscam/object_pose.py`).
+
+**17. The ArUco distance reads long with distance squared, and the hand-eye
+absorbs it.**
+- *Measured:* +1, +3.5 and +10 mm at 100, 200 and 300 mm. The marker reads
+  about 0.7 px narrow, but the ray direction is right, so the range now
+  comes from depth along the ArUco ray.
+- *The trap:* the 09-15 hand-eye had been solved on the biased ranges and
+  carried 3.9 mm of the error along the optical axis. Fixing the range alone
+  would have moved the cube up by about 3.5 mm, and GRIP with it.
+- *The rule:* change a measurement and its calibration together.
+
+**18. numpy's OpenBLAS spreads tiny solves over every core.**
+- *What happened:* a replay ran at 1744 % CPU for 6x6 solves and small SVDs,
+  slower than on one thread.
+- *The rule:* any numpy process on the cell PC gets
+  `OPENBLAS_NUM_THREADS`, `OMP_NUM_THREADS` and `MKL_NUM_THREADS` set to 1.
+  The `fr3_cell` launch sets them for vision, and vision runs on E-cores
+  12-19.
+
+**19. A quaternion from a rotation matrix via `copysign` of the off-diagonal
+terms is wrong at 180°.**
+- *Why it matters:* every straight-down TCP pose is a 180° rotation, so GRIP
+  got the wrong yaw in testing.
+- *The rule:* use Shepperd's method (`grip_logic.R2q`), and test the
+  half-turns explicitly.
+
+**20. ROS callbacks never touch widgets, least of all under a lock.**
+- *What happened:* the Tk panel froze whenever tracking changed state, and
+  STOP TRACKING was unreachable.
+- *The cause:* the spin thread called Tk inside `trace()` while holding a
+  lock that the Tk thread was waiting on.
+- *The rule:* in the PySide6 panel, the modules that host ROS callbacks cannot
+  even import Qt, and the window hears from them only through `post()`
+  (`test_cell_pins.py::test_ros_side_never_touches_qt`).
+
 ## Housekeeping
 
 - [ ] Rename the workspace directory to remove spaces + trailing space
       (breaks colcon's `install/setup.sh`; workarounds in HANDOFF §2)
+- [ ] **This machine's MoveIt install is broken** - `moveit_core` and
+      `geometric_shapes` export imported targets (`tl::expected`,
+      `random_numbers::random_numbers`) that are not found, so any
+      `find_package(moveit_ros_planning_interface)` fails at configure.
+      `mating_node` therefore cannot be built here, and the previously built
+      binary went with the old install tree. Needed before the next full
+      cell run; suspect a partial/mismatched ROS install (try
+      `sudo apt install --reinstall ros-humble-moveit-core ros-humble-geometric-shapes ros-humble-random-numbers`)
+- [ ] Consider making `tools/fr3/` a real package. It is a de-facto one
+      (launch, params, operator GUIs, tests, testdata) but is reached by
+      path, which is why `cell_panel.py` (IMPEDANCE & TRACK tab) needs `sys.path` surgery to
+      import `tools/gui/mating_panel.py`. Deferred 2026-09-22: the churn
+      would touch every doc, the env script and the test paths, for no
+      functional gain today
 - [ ] Modernize or delete `pick_n_place_` (legacy demo, still old patterns)
-- [ ] Push the repo to a remote (currently local-only git)
+- [x] Push the repo to a remote — done: GitHub, branch `fr3-cell-panel`
+- [ ] Merge the PR from `fr3-cell-panel` into `main`. It was opened
+      2026-09-25, and the branch has moved on since
 - [ ] Set a global git identity on this machine (commits currently use
       per-command `-c user.name/email`)

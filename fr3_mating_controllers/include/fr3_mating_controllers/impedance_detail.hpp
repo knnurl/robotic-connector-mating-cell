@@ -1,7 +1,8 @@
 // Pure, ROS-free pieces of the impedance controller that decide safety: the
-// limits on live gains, and the setpoint handoff between the subscription
-// thread and the 1 kHz loop. Header-only and dependent on nothing but Eigen,
-// so they are unit-tested without a robot (test/test_impedance_detail.cpp).
+// limits on the gains and the slew caps, and the setpoint handoff between the
+// subscription thread and the 1 kHz loop. Header-only and dependent on
+// nothing but Eigen, so they are unit-tested without a robot
+// (test/test_impedance_detail.cpp).
 #pragma once
 
 #include <array>
@@ -22,8 +23,8 @@ namespace detail
 // The force ceiling bounds HOW HARD the arm can push, not whether the loop is
 // stable: damping_ratio 0 is an undamped spring and a negative value injects
 // energy, so an out-of-range value is rejected outright, never clamped.
-// tools/fr3/impedance_panel.py GAIN_LIMITS mirrors these; a test there fails
-// if the two drift apart.
+// tools/fr3/cell/core.py GAIN_LIMITS mirrors these; a test in
+// tools/fr3/cell/test_cell_pins.py fails if the two drift apart.
 struct GainLimits
 {
     static constexpr double kPosMax = 3000.0;       // N/m
@@ -36,11 +37,12 @@ struct GainLimits
 // FR3 joint torque limits (datasheet). tau_max_nm may be lower, never higher.
 inline constexpr std::array<double, 7> kTauSpecNm{87.0, 87.0, 87.0, 87.0, 12.0, 12.0, 12.0};
 
-// Bounds on the configure-time safety parameters. A ceiling of 0 or NaN would
-// silently disable the task law, and a torque rate above 1 Nm per cycle
-// exceeds what FCI tolerates. tools/fr3/test_impedance_panel.py checks the
-// shipped yaml against these numbers, so an edit there cannot quietly make
-// configure fail on the day.
+// Bounds on the safety parameters, and the hard bound on the slew caps
+// whether they are set at configure time or live (validate_slew is the live
+// path). A ceiling of 0 or NaN would silently disable the task law, and a
+// torque rate above 1 Nm per cycle exceeds what FCI tolerates.
+// tools/fr3/cell/test_cell_pins.py checks the shipped yaml against these
+// numbers, so an edit there cannot quietly make configure fail on the day.
 struct ConfigLimits
 {
     static constexpr double maxForceMin = 1.0;      // N
@@ -61,6 +63,20 @@ inline bool finite_in(double v, double lo, double hi)
     return std::isfinite(v) && v >= lo && v <= hi;
 }
 
+// Empty if the equilibrium slew caps are acceptable, otherwise why they are
+// not. Split out of validate_limits so the live parameter callback can reach
+// the same bound without re-checking the four ceilings it cannot change.
+inline std::string validate_slew(double slew_mps, double slew_rps)
+{
+    if (!finite_in(slew_mps, ConfigLimits::slewMpsMin, ConfigLimits::slewMpsMax)) {
+        return "setpoint_slew_mps must be within [0.001, 0.25] m/s";
+    }
+    if (!finite_in(slew_rps, ConfigLimits::slewRpsMin, ConfigLimits::slewRpsMax)) {
+        return "setpoint_slew_rps must be within [0.001, 1.0] rad/s";
+    }
+    return {};
+}
+
 // Empty if the configure-time safety parameters are acceptable, otherwise why
 // they are not.
 inline std::string validate_limits(double max_force_n, double max_torque_nm,
@@ -76,11 +92,9 @@ inline std::string validate_limits(double max_force_n, double max_torque_nm,
     if (!finite_in(tau_rate_limit, ConfigLimits::tauRateMin, ConfigLimits::tauRateMax)) {
         return "tau_rate_limit must be within [0.01, 1.0] Nm per cycle (1.0 is the FCI limit)";
     }
-    if (!finite_in(slew_mps, ConfigLimits::slewMpsMin, ConfigLimits::slewMpsMax)) {
-        return "setpoint_slew_mps must be within [0.001, 0.25] m/s";
-    }
-    if (!finite_in(slew_rps, ConfigLimits::slewRpsMin, ConfigLimits::slewRpsMax)) {
-        return "setpoint_slew_rps must be within [0.001, 1.0] rad/s";
+    const std::string slew_error = validate_slew(slew_mps, slew_rps);
+    if (!slew_error.empty()) {
+        return slew_error;
     }
     for (std::size_t i = 0; i < tau_max_nm.size(); ++i) {
         if (!finite_in(tau_max_nm[i], ConfigLimits::tauMaxMin, kTauSpecNm[i])) {

@@ -6,7 +6,7 @@ knows nothing about the robot, and the controller talks only to MoveIt and
 TF. Everything robot-specific is a parameter or a launch argument.
 
 ```
- camera driver ──image/camera_info──▶ roscam cam_pub ──/aruco/pose──▶ move_l controller
+ camera driver ──image/camera_info──▶ roscam cam_pub ──/aruco/pose──▶ mating_node controller
                                       (ArUco 6-DOF pose,              (phase machine,
                                        optical frame)                 6-DOF servo via MoveIt)
                                                                           │
@@ -163,7 +163,7 @@ relative to the marker.
 
 1. **Bringup**: launch your robot's driver + MoveIt (`move_group`) instead of
    the MELFA ones. No code changes.
-2. **Params file**: copy `melfa_rv5as_masterclass/config/rv5as_params.yaml`
+2. **Params file**: copy `mating_controller/config/rv5as_params.yaml`
    to `<myrobot>_params.yaml` and set:
    - `planning_group` — your MoveIt group name
    - `EEF_FRAME_ID` — your TCP link (empty = MoveIt group default)
@@ -172,7 +172,7 @@ relative to the marker.
 4. **Launch**:
 
 ```bash
-ros2 launch melfa_rv5as_masterclass move_l.launch.py \
+ros2 launch mating_controller mating_node.launch.py \
   robot_name:=<name> \
   moveit_config_package:=<name>_moveit_config \
   params_file:=/abs/path/<myrobot>_params.yaml
@@ -188,7 +188,7 @@ two topic parameters and the hand-eye TF.
 
 ## 4. Launch sequence (MELFA RV-5AS reference)
 
-One command per terminal, in order (see `melfa_ros2_bringup.txt`):
+One command per terminal, in order (see `melfa/BRINGUP.txt`):
 
 ```bash
 # 1. Robot driver (set use_fake_hardware:=true for a dry run)
@@ -207,7 +207,7 @@ ros2 run tf2_ros static_transform_publisher --x ... --frame-id rv5as_default_tcp
 ros2 run roscam cam_pub
 
 # 6. Controller
-ros2 launch melfa_rv5as_masterclass move_l.launch.py
+ros2 launch mating_controller mating_node.launch.py
 ```
 
 **Shortcut — terminals 4–6 in one:** the consolidated cell launch starts
@@ -215,10 +215,10 @@ the hand-eye TF, vision, and controller together (the robot side, 1–2,
 stays separate):
 
 ```bash
-ros2 launch melfa_rv5as_masterclass cell.launch.py \
+ros2 launch mating_controller cell.launch.py \
   handeye_xyz:="<x> <y> <z>" handeye_quat:="<qx> <qy> <qz> <qw>"
 # in-process capture (no image topics) + fixed-frame KF + depth-ICP:
-ros2 launch melfa_rv5as_masterclass cell.launch.py \
+ros2 launch mating_controller cell.launch.py \
   vision_source:=realsense filter_frame:=rv5as_base \
   template_stl:=/path/connector.stl
 ```

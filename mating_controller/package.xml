@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>mating_controller</name>
+  <version>1.2.0</version>
+  <description>Robot-agnostic vision-guided connector mating: phase machine, pose maths, tracking law, and the mating_node and tracking_node drivers. Active target is the Franka FR3.</description>
+  <maintainer email="k.ural1@salford.ac.uk">Kaan Ural</maintainer>
+  <license>Apache License 2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <!-- MoveIt is only for mating_node, which is parked and not built unless
+       -DBUILD_MATING_NODE=ON -->
+  <depend>moveit_ros_planning_interface</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>lifecycle_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>diagnostic_msgs</depend>
+  <depend>controller_manager_msgs</depend>
+
+  <!-- franka_msgs is only present where the FR3 is commissioned;
+       tracking_node is built conditionally when it is found -->
+  <exec_depend>franka_msgs</exec_depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -33,13 +33,15 @@
 // somewhere else and holding to it would snap the arm back.
 //
 // The gains are live-tunable too, within detail::GainLimits
-// (impedance_detail.hpp); a set with any value out of range is rejected
-// whole. Configure-time parameters cannot be changed while the controller is
-// configured - clean it up, set them, configure again. Nothing in
+// (impedance_detail.hpp), as is the setpoint slew pair within
+// detail::ConfigLimits; a set with any value out of range is rejected whole.
+// The five configure-time parameters - arm_id, max_force_n, max_torque_nm,
+// tau_max_nm, tau_rate_limit - cannot be changed while the controller is
+// configured: clean it up, set them, configure again. Nothing in
 // update() blocks on a lock a non-RT thread holds, and nothing in it logs
 // outside fault paths.
 //
-// The phase machine in move_l stays the brain: it activates this
+// The phase machine in mating_node stays the brain: it activates this
 // controller for INSERT (insert_backend: impedance), ramps the setpoint
 // along the tool axis, watches the external wrench, and switches back to
 // the trajectory controller afterwards. This controller knows nothing
@@ -95,8 +97,8 @@ private:
     // discard every setpoint published before this moment. Used on
     // activation and whenever float mode is switched off.
     void seed_equilibrium_here();
-    // Adopt live gain changes, RT-safely: try_lock, and simply keep the
-    // previous values for one cycle if the writer holds the lock.
+    // Adopt live gain and slew changes, RT-safely: try_lock, and simply keep
+    // the previous values for one cycle if the writer holds the lock.
     void adopt_pending_params();
     void write_torque(const Vector7d &tau);
     Vector7d clamp_joint_torque(const Vector7d &tau) const;
@@ -133,6 +135,8 @@ private:
     Eigen::Vector3d pending_k_rot_tool_{k_rot_tool_};
     double pending_damping_ratio_{damping_ratio_};
     double pending_nullspace_stiffness_{nullspace_stiffness_};
+    double pending_setpoint_slew_mps_{setpoint_slew_mps_};
+    double pending_setpoint_slew_rps_{setpoint_slew_rps_};
     rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_;
 
     std::unique_ptr<franka_semantic_components::FrankaRobotModel> franka_robot_model_;

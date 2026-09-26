@@ -65,7 +65,7 @@
            default is 9 - far too few here. One moveit.launch.py is already
            ~9 participants (rviz2, robot_state_publisher, move_group,
            ros2_control_node, joint_state_publisher, 3 spawners, gripper)
-           before vision_standalone and align_gui are counted. Participants
+           before cam_pub, tracking_node and cell_panel are counted. Participants
            landing above the cap are simply never discovered, which surfaces
            as move_group never receiving /joint_states - i.e. "no current
            robot state" - with no error message anywhere.

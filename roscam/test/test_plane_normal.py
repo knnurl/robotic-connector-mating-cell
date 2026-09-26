@@ -4,7 +4,7 @@
 import numpy as np
 from roscam.plane_normal import (disambiguate_by_normal, fit_plane,
                                  fit_plane_robust, marker_plane_normal,
-                                 quad_mask)
+                                 quad_mask, range_scale, solve_square_by_depth)
 
 FX = FY = 389.0
 CX, CY = 316.1, 236.1        # measured D405 intrinsics at 640x480
@@ -263,3 +263,73 @@ def test_inplane_correction_converges_when_iterated():
             break
         cur = wrap_deg(cur - d)
     assert abs(wrap_deg(cur - target)) < 1e-6, cur
+
+
+def test_a_static_target_marker_is_solved_on_the_depth_side_of_the_mirror():
+    """The place target: IPPE's two mirrored tilts, decided by depth alone."""
+    import cv2
+    K = np.array([[FX, 0, CX], [0, FY, CY], [0, 0, 1]], dtype=np.float64)
+    half = 0.0105
+    obj = np.array([[-half, half, 0], [half, half, 0], [half, -half, 0], [-half, -half, 0]],
+                   dtype=np.float32)
+    for tilt_deg in (8.0, -8.0, 15.0):
+        R = cv2.Rodrigues(np.array([np.radians(tilt_deg), 0.0, 0.0]))[0] @ np.diag([1, -1, -1])
+        t = np.array([0.01, -0.005, 0.22])
+        img, _ = cv2.projectPoints(obj, cv2.Rodrigues(R)[0], t, K, None)
+        n_cam = R[:, 2]                                  # marker z, toward the camera
+        depth = synth_depth(-n_cam, float(-n_cam @ t))   # the plane the marker lies on
+        sol = solve_square_by_depth(obj, img.reshape(-1, 2).astype(np.float32), K, None, depth)
+        assert sol is not None
+        R_got = cv2.Rodrigues(sol[0])[0]
+        assert float(R_got[:, 2] @ n_cam) > np.cos(np.radians(1.0)), tilt_deg
+        assert np.allclose(sol[1].reshape(3), t, atol=2e-3)
+        assert float(np.asarray(sol[2]) @ n_cam) > np.cos(np.radians(1.0))   # the depth normal
+        # the returned plane puts a 5% long ArUco distance back on the truth
+        s_ = range_scale(1.05 * sol[1].reshape(3), sol[2], sol[3])
+        assert np.allclose(1.05 * s_ * sol[1].reshape(3), t, atol=2e-4), tilt_deg
+    assert solve_square_by_depth(obj, img.reshape(-1, 2).astype(np.float32), K, None,
+                                 None) is None          # no depth: never guess
+
+
+def test_the_target_solve_follows_depth_not_opencvs_order():
+    """With noise-free corners OpenCV's first IPPE branch is the true one, so
+    a solver that ignored depth would still pass the test above. Here the
+    depth plane is built from the MIRROR branch: the solve must follow it."""
+    import cv2
+    K = np.array([[FX, 0, CX], [0, FY, CY], [0, 0, 1]], dtype=np.float64)
+    half = 0.0105
+    obj = np.array([[-half, half, 0], [half, half, 0], [half, -half, 0], [-half, -half, 0]],
+                   dtype=np.float32)
+    R = cv2.Rodrigues(np.array([np.radians(10.0), 0.0, 0.0]))[0] @ np.diag([1, -1, -1])
+    t = np.array([0.0, 0.0, 0.22])
+    img = cv2.projectPoints(obj, cv2.Rodrigues(R)[0], t, K, None)[0].reshape(-1, 2)
+    img = img.astype(np.float32)
+    n_sol, rvecs, tvecs, _ = cv2.solvePnPGeneric(obj, img, K, None,
+                                                 flags=cv2.SOLVEPNP_IPPE_SQUARE)
+    assert n_sol == 2
+    first, mirror = (cv2.Rodrigues(r)[0][:, 2] for r in rvecs)
+    assert float(first @ mirror) < np.cos(np.radians(5.0))      # the branches really differ
+    depth = synth_depth(-mirror, float(-mirror @ tvecs[1].reshape(3)))
+    sol = solve_square_by_depth(obj, img, K, None, depth)
+    assert sol is not None
+    assert float(cv2.Rodrigues(sol[0])[0][:, 2] @ mirror) > np.cos(np.radians(1.0))
+
+
+def test_range_scale_puts_the_ray_on_the_plane():
+    n = np.array([0.0, 0.0, -1.0])                      # facing the camera, 100 mm away
+    t_true = np.array([0.012, -0.020, 0.100])
+    s = range_scale(1.04 * t_true, n, [0.3, -0.2, 0.100])   # any point on the plane
+    assert np.allclose(s * 1.04 * t_true, t_true)
+    tilt = np.radians(30.0)                             # a tilted plane through t_true
+    n = np.array([0.0, np.sin(tilt), -np.cos(tilt)])
+    s = range_scale(0.97 * t_true, n, t_true)
+    assert np.allclose(s * 0.97 * t_true, t_true)
+    assert np.isclose(range_scale(t_true, -n, t_true), 1.0)  # the normal's sign is irrelevant
+
+
+def test_range_scale_refuses_a_grazing_ray_or_a_plane_behind():
+    t = np.array([0.0, 0.0, 0.1])
+    assert range_scale(t, [1.0, 0.0, 0.01], [0.0, 0.0, 0.1]) is None     # ray almost in-plane
+    assert range_scale(t, [0.0, 0.0, -1.0], [0.0, 0.0, -0.1]) is None    # behind the camera
+    assert range_scale(t, [0.0, 0.0, 0.0], [0.0, 0.0, 0.1]) is None      # no normal
+    assert range_scale([0.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 0.0, 0.1]) is None

@@ -51,6 +51,7 @@ import numpy as np
 import rclpy
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped
+from rcl_interfaces.msg import SetParametersResult
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.time import Time
@@ -60,8 +61,9 @@ from tf2_ros import TransformException
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 
+from roscam.object_contract import ObjectContract
 from roscam.plane_normal import (disambiguate_by_normal, fuse_orientation,
-                                 marker_plane_normal)
+                                 marker_plane_normal, range_scale, solve_square_by_depth)
 from roscam.pose_kf import PoseKF, compose_pose
 from roscam.rs_capture import RsCapture
 
@@ -120,11 +122,26 @@ class ArucoPosePublisher(Node):
         # while the depth fit is unbiased at 0.11 mm rms. 'aruco' keeps the
         # IPPE orientation as-is (previous behaviour).
         self.declare_parameter('tilt_source', 'depth')
+        # Where the marker's DISTANCE comes from. 'depth': keep the ArUco ray
+        # and slide the position along it onto the depth plane that
+        # tilt_disambiguation 'depth' fits around the marker (see
+        # plane_normal.range_scale: ArUco read ~1 mm long at 100 mm, ~10 mm
+        # at 300 mm on this cell). No plane this frame, or one that disagrees
+        # by more than range_depth_max_rel (a finger, an edge, not the
+        # marker's plane): the ArUco distance is kept. 'aruco' = previous
+        # behaviour.
+        self.declare_parameter('range_source', 'aruco')
+        self.declare_parameter('range_depth_max_rel', 0.08)
         # Multi-marker grid board (occlusion robustness + accuracy):
         # board_markers_x*y > 1 switches from the single marker to a grid of
         # ids marker_id..marker_id+N-1. Pose = board centre, so taught
         # offsets keep their meaning. Print with `cv2.aruco.GridBoard(...)
         # .generateImage()` using the same geometry.
+        # A second, STATIC marker (a place target on the table), published
+        # raw on /aruco/target_pose_raw: its own IPPE solve resolved by depth
+        # only, no filter, no state shared with marker_id. -1 = off.
+        self.declare_parameter('target_marker_id', -1)
+        self.declare_parameter('target_marker_size_m', -1.0)   # -1 = marker_size_m
         self.declare_parameter('board_markers_x', 1)
         self.declare_parameter('board_markers_y', 1)
         self.declare_parameter('board_marker_separation_m', 0.005)
@@ -154,6 +171,15 @@ class ArucoPosePublisher(Node):
         self.declare_parameter('capture_width', 640)
         self.declare_parameter('capture_height', 480)
         self.declare_parameter('capture_fps', 15)
+        # In-process depth settings (realsense here, and vision_standalone):
+        # the D405 visual preset by name ('' = the device's), the SDK spatial
+        # filter, and a locked exposure in microseconds (-1 = auto) with its
+        # sensor gain (-1 = the device's). Exposure and gain also change
+        # while streaming (ros2 param set), for a blur test in one session.
+        self.declare_parameter('capture_preset', '')
+        self.declare_parameter('capture_spatial_filter', False)
+        self.declare_parameter('capture_exposure_us', -1)
+        self.declare_parameter('capture_gain', -1)
         # Self-stamped frames: node time minus this capture latency estimate.
         self.declare_parameter('capture_latency_s', 0.02)
         # Debug-image rate cap outside topic mode (it exists for humans;
@@ -178,6 +204,8 @@ class ArucoPosePublisher(Node):
         self._last_debug_t = 0.0
 
         self.tf_buffer = None
+        self.last_tf_wait_ms = None    # this frame's TF lookup wait (object contract)
+        self.last_tf = None            # this frame's (p, q) of optical in filter_frame
         if self.filter_frame:
             self.tf_buffer = Buffer()
             # Own spin thread so a blocking lookup inside frame processing
@@ -239,6 +267,10 @@ class ArucoPosePublisher(Node):
         self.tilt_depth_scale = float(
             self.get_parameter('tilt_depth_scale').value)
         self.tilt_source = str(self.get_parameter('tilt_source').value).lower()
+        self.range_source = str(self.get_parameter('range_source').value).lower()
+        if self.range_source not in ('aruco', 'depth'):
+            raise RuntimeError(f"range_source must be aruco|depth, got '{self.range_source}'")
+        self.range_depth_max_rel = float(self.get_parameter('range_depth_max_rel').value)
         self._last_normal = None       # last accepted marker normal (cam)
         self._depth_fit = None         # last depth plane fit, for diagnostics
         # Depth-fused rotation, or None. Must exist before any frame: the
@@ -250,6 +282,33 @@ class ArucoPosePublisher(Node):
 
         self.pose_pub = self.create_publisher(PoseStamped, '/aruco/pose', 10)
         self.pose_raw_pub = self.create_publisher(PoseStamped, '/aruco/pose_raw', 10)
+        # Called after every pose publish with (topic, header, t, q): an
+        # embedding process (vision_standalone's recorder) sees exactly what
+        # went out, per frame, without subscribing to itself.
+        self.on_publish = None
+        # Further listeners: on every pose publish (same arguments), and on
+        # every processed frame as (header, compute_ms) - the object pose
+        # contract (object_contract.py) mirrors and reports through these.
+        self.publish_hooks = []
+        self.frame_hooks = []
+        # Called with the debug image just before it is published (only then,
+        # and after this frame's detection): overlays that must never reach
+        # the image the markers are detected on.
+        self.debug_hooks = []
+        self.target_id = int(self.get_parameter('target_marker_id').value)
+        if self.target_id >= 0 and self.target_id in self.board_ids:
+            # An optional feature must never take the tracked marker down.
+            self.get_logger().error(
+                f'target_marker_id {self.target_id} is one of the tracked ids - target B is '
+                'OFF (pass target_marker_id:=<another id>)')
+            self.target_id = -1
+        size = float(self.get_parameter('target_marker_size_m').value)
+        half_t = (size if size > 0 else self.marker_size) / 2.0
+        self.target_obj_points = np.array([[-half_t, half_t, 0.0], [half_t, half_t, 0.0],
+                                           [half_t, -half_t, 0.0], [-half_t, -half_t, 0.0]],
+                                          dtype=np.float32)
+        self.target_raw_pub = (self.create_publisher(PoseStamped, '/aruco/target_pose_raw', 10)
+                               if self.target_id >= 0 else None)
         self.debug_pub = self.create_publisher(Image, '/aruco/debug_image', 2)
 
         self._capture = None
@@ -269,7 +328,11 @@ class ArucoPosePublisher(Node):
                 height=int(self.get_parameter('capture_height').value),
                 fps=int(self.get_parameter('capture_fps').value),
                 # depth is needed to resolve the IPPE mirror ambiguity
-                enable_depth=(self.tilt_disambiguation == 'depth'))
+                enable_depth=(self.tilt_disambiguation == 'depth'),
+                preset=str(self.get_parameter('capture_preset').value),
+                spatial_filter=bool(self.get_parameter('capture_spatial_filter').value),
+                exposure_us=int(self.get_parameter('capture_exposure_us').value),
+                gain=int(self.get_parameter('capture_gain').value))
             self._capture.on_event = lambda m: self.get_logger().warn(m)
             intr = self._capture.start()
             self.set_intrinsics(intr.fx, intr.fy, intr.cx, intr.cy, intr.coeffs)
@@ -284,6 +347,27 @@ class ArucoPosePublisher(Node):
         self.get_logger().info(
             f'Tracking ArUco id {self.marker_id} ({self.marker_size * 1000:.0f} mm), '
             f'{waiting}')
+        # The in-process camera, when this process owns one (vision_standalone
+        # sets it for its own): capture_exposure_us / capture_gain apply live.
+        self.live_capture = self._capture
+        self.add_on_set_parameters_callback(self._on_set_capture)
+
+    def _on_set_capture(self, params):
+        for prm in params:
+            if prm.name not in ('capture_exposure_us', 'capture_gain'):
+                continue
+            if self.live_capture is None:
+                return SetParametersResult(successful=False,
+                                           reason='this process owns no camera')
+            try:
+                if prm.name == 'capture_exposure_us':
+                    self.live_capture.set_exposure(int(prm.value))
+                else:
+                    self.live_capture.set_gain(int(prm.value))
+            except Exception as e:                          # noqa: BLE001
+                return SetParametersResult(successful=False, reason=f'{prm.name}: {e}')
+            self.get_logger().info(f'{prm.name} -> {prm.value}')
+        return SetParametersResult(successful=True)
 
     def _resolve_dictionary(self, dictionary_name):
         try:
@@ -353,6 +437,10 @@ class ArucoPosePublisher(Node):
         normal: the depth-fitted plane (unambiguous) when available, else the
         last accepted normal (temporal lock-in).
         """
+        # Per-frame results: an early return below must not leave the last
+        # frame's plane or fused rotation to be applied to this one.
+        self._depth_fit = None
+        self._fused_R = None
         n_sol, rvecs, tvecs, _ = cv2.solvePnPGeneric(
             self.obj_points, img_pts, self.camera_matrix, self.dist_coeffs,
             flags=cv2.SOLVEPNP_IPPE_SQUARE)
@@ -367,7 +455,6 @@ class ArucoPosePublisher(Node):
         normals = [cv2.Rodrigues(r)[0][:, 2] for r in rvecs]
 
         ref, src = None, 'none'
-        self._depth_fit = None
         if self.tilt_disambiguation == 'depth' and depth_m is not None:
             fit = marker_plane_normal(
                 depth_m, img_pts, self.camera_matrix[0, 0],
@@ -402,7 +489,6 @@ class ArucoPosePublisher(Node):
         # orientation first shifts them ~1.8 px at 2.6 deg on a 21 mm marker
         # at 100 mm - right against the 2.0 px gate, so the good detection
         # would be thrown away. process_frame applies it after the gate.
-        self._fused_R = None
         if self.tilt_source == 'depth' and self._depth_fit is not None:
             R = cv2.Rodrigues(rvecs[pick])[0]
             fused = fuse_orientation(R, self._depth_fit['normal'])
@@ -466,12 +552,14 @@ class ArucoPosePublisher(Node):
     def process_frame(self, color_image, header, depth_m=None):
         """Full detection/filter/publish pipeline for one BGR frame.
 
-        depth_m (HxW metres, aligned to colour) is optional and used only to
-        resolve the IPPE mirror ambiguity; everything else is unchanged when
-        it is absent.
+        depth_m (HxW metres, aligned to colour) is optional. It resolves the
+        IPPE mirror ambiguity, and gives the out-of-plane tilt (tilt_source)
+        and the distance (range_source); without it the pose is ArUco's.
         """
         if self.camera_matrix is None:
             return
+        t_frame = time.perf_counter()
+        self.last_tf_wait_ms = self.last_tf = None
 
         stamp = header.stamp.sec + header.stamp.nanosec * 1e-9
         dt = 0.0 if self.last_frame_stamp is None else stamp - self.last_frame_stamp
@@ -493,6 +581,12 @@ class ArucoPosePublisher(Node):
                 raw_optical = (raw_optical[0],
                                rotation_matrix_to_quaternion(self._fused_R))
                 rvec = cv2.Rodrigues(self._fused_R)[0]   # debug axes too
+            if (raw_optical is not None and self.range_source == 'depth'
+                    and depth_m is not None):
+                fit = self._depth_fit or {}
+                raw_optical = (self._depth_range(raw_optical[0], fit.get('normal'),
+                                                 fit.get('centroid'), 'marker'),
+                               raw_optical[1])
             measurement = raw_optical
             if raw_optical is not None and self.filter_frame:
                 # Filter where the marker is static: re-express the
@@ -545,15 +639,71 @@ class ArucoPosePublisher(Node):
             self.get_logger().warn('Publishing predicted pose (marker not detected).',
                                    throttle_duration_sec=1.0)
 
+        if self.target_raw_pub is not None and ids is not None:
+            self._publish_target(corners, ids, header, depth_m, color_image)
+
         # Debug image: only while subscribed, and rate-capped outside topic
         # mode - it exists for humans, full rate is bandwidth waste.
         now_mono = time.monotonic()
         if (self.publish_debug and self.debug_pub.get_subscription_count() > 0
                 and now_mono - self._last_debug_t >= self._debug_period):
             self._last_debug_t = now_mono
+            for hook in self.debug_hooks:
+                try:
+                    hook(color_image)
+                except Exception as e:                      # noqa: BLE001
+                    self.get_logger().warn(f'debug hook failed: {e}', throttle_duration_sec=5.0)
             debug_msg = self.bridge.cv2_to_imgmsg(color_image, encoding='bgr8')
             debug_msg.header = header
             self.debug_pub.publish(debug_msg)
+
+        compute_ms = (time.perf_counter() - t_frame) * 1e3
+        for hook in self.frame_hooks:
+            try:
+                hook(header, compute_ms)
+            except Exception as e:                          # noqa: BLE001
+                self.get_logger().warn(f'frame hook failed: {e}', throttle_duration_sec=5.0)
+
+    def _publish_target(self, corners, ids, header, depth_m, color_image):
+        flat = ids.flatten()
+        if self.target_id not in flat:
+            return
+        img_pts = corners[int(np.where(flat == self.target_id)[0][0])][0].astype(np.float32)
+        sol = solve_square_by_depth(self.target_obj_points, img_pts, self.camera_matrix,
+                                    self.dist_coeffs, depth_m, scale=self.tilt_depth_scale)
+        if sol is None:
+            self.get_logger().warn('Target marker seen but not solved (no depth to resolve '
+                                   'the IPPE mirror) - not published', throttle_duration_sec=5.0)
+            return
+        raw = self._validate(sol[0], sol[1], img_pts, self.target_obj_points)
+        if raw is None:
+            return
+        # Out-of-plane from depth, in-plane from ArUco - as for the tracked
+        # marker: IPPE's own tilt was 3-12 deg off for a 21 mm marker.
+        fused = fuse_orientation(cv2.Rodrigues(sol[0])[0], sol[2])
+        if fused is None:
+            return
+        t = (self._depth_range(raw[0], sol[2], sol[3], 'target')
+             if self.range_source == 'depth' else raw[0])
+        self._publish(self.target_raw_pub, header, t, rotation_matrix_to_quaternion(fused))
+        if self.publish_debug:
+            cv2.drawFrameAxes(color_image, self.camera_matrix, self.dist_coeffs, sol[0], sol[1],
+                              float(self.target_obj_points[1, 0] * 2))
+
+    def _depth_range(self, t, normal, centroid, which):
+        """t slid along its ray onto the depth plane (range_source 'depth');
+        t itself when there is no plane or it disagrees by more than
+        range_depth_max_rel. Called after the reprojection gate: the gate
+        judges the ArUco fit the corners gave."""
+        s = None if normal is None else range_scale(t, normal, centroid)
+        if s is None or abs(s - 1.0) > self.range_depth_max_rel:
+            self.get_logger().warn(
+                f'{which}: ArUco distance kept - '
+                + ('no depth plane' if s is None else
+                   f'the depth plane is {100.0 * (s - 1.0):+.1f}% off'),
+                throttle_duration_sec=5.0)
+            return t
+        return t * s
 
     def _validate(self, rvec, tvec, img_points, obj_points):
         """Gate a raw solvePnP result on reprojection error.
@@ -579,20 +729,24 @@ class ArucoPosePublisher(Node):
         (the frame is then treated as having no detection: the filter
         predicts briefly, then goes silent and the controller holds)."""
         t, q = measurement
+        t0 = time.perf_counter()
         try:
             tf = self.tf_buffer.lookup_transform(
                 self.filter_frame, header.frame_id,
                 Time.from_msg(header.stamp), timeout=Duration(seconds=0.05))
         except TransformException as e:
+            self.last_tf_wait_ms = (time.perf_counter() - t0) * 1e3
             self.get_logger().warn(
                 f'TF {header.frame_id} -> {self.filter_frame} unavailable '
                 f'({e}); dropping detection',
                 throttle_duration_sec=2.0)
             return None
+        self.last_tf_wait_ms = (time.perf_counter() - t0) * 1e3
         tr = tf.transform.translation
         ro = tf.transform.rotation
         p_ft = np.array([tr.x, tr.y, tr.z])
         q_ft = np.array([ro.x, ro.y, ro.z, ro.w])
+        self.last_tf = (p_ft, q_ft)    # one lookup per frame: the depth estimate reuses it
         return compose_pose(p_ft, q_ft, t, q)
 
     def _pose_header(self, image_header):
@@ -619,11 +773,19 @@ class ArucoPosePublisher(Node):
         out.header = header  # camera optical frame, image timestamp
         self._fill_pose(out, t, q)
         publisher.publish(out)
+        for hook in ([self.on_publish] if self.on_publish is not None else []) \
+                + self.publish_hooks:
+            try:
+                hook(publisher.topic_name, header, t, q)
+            except Exception as e:                          # noqa: BLE001
+                self.get_logger().warn(f'publish hook failed: {e}',
+                                       throttle_duration_sec=5.0)
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = ArucoPosePublisher()
+    ObjectContract(node)             # /object/* for the consumers (PERCEPTION_PLAN 2)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

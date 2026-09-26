@@ -7,7 +7,7 @@
 # (--inactive: the mating controller activates it only for the INSERT
 # stroke and hands back to the trajectory controller afterwards.)
 #
-# Commission it with tools/fr3/impedance_panel.py, which walks the README
+# Commission it with the cell panel (tools/fr3/cell/), which walks the README
 # ladder. Every value below is range-checked: out-of-range values make
 # configure fail, and a live change with any value out of range is rejected
 # (all-or-nothing when sent atomically, as the panel does).
@@ -29,8 +29,11 @@
 #  4. Tool-Z stiffness sets insertion drive: it must overcome mating
 #     friction at a lag of F/k (800 N/m at 8 N contact = 10 mm lag - the
 #     equilibrium leads the flange by that much at full preload).
-#  5. damping_ratio: raise toward 1.4 if the hold test rings; drop toward
-#     0.7 only if insertion feels sluggish.
+#  5. damping_ratio stays 1.0: 32 clean steps on 2026-09-22 showed zero
+#     overshoot, because friction is itself a damper (TRACKING_SPEC.md
+#     section 2 finding 3). D = 2*zeta*sqrt(K), per axis. The one open
+#     experiment is zeta 0.5 while walking k_rot above 90 (TRACKING_SPEC.md
+#     O1) - do not raise zeta above 1.0.
 
 cartesian_impedance_stroke_controller:
   ros__parameters:
@@ -47,11 +50,16 @@ cartesian_impedance_stroke_controller:
     damping_ratio: 1.0                  # 0.1-2.0; D = 2*zeta*sqrt(K), per axis
     nullspace_stiffness: 5.0            # Nm/rad, 0-50, toward the activation posture
 
-    # --- configure-time only: clean the controller up to change these ---
     # Equilibrium slew limits (fr3_backend pattern): topic jumps become
-    # bounded ramps. Also caps the effective stroke speed.
+    # bounded ramps. Also caps the effective stroke speed. Live, so tracking
+    # can raise the cap to 0.10-0.25 m/s without a cleanup and reconfigure
+    # cycle (TRACKING_SPEC.md section 4 C2); ConfigLimits 0.25 / 1.0 stays
+    # the hard bound either way.
     setpoint_slew_mps: 0.05             # 0.001-0.25
     setpoint_slew_rps: 0.5              # 0.001-1.0
+
+    # --- configure-time only - arm_id above, and the four ceilings below:
+    # --- clean the controller up to change these ---
 
     # Ceilings on the commanded wrench, whatever the pose error. The panel's
     # collision reflex threshold (40 N) sits ~10 N above max_force_n. The

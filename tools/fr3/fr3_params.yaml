@@ -1,7 +1,8 @@
 # Connector-mating controller parameters for a REAL Franka FR3
 # (franka_ros2 + franka_fr3_moveit_config, OMPL pipeline).
 #
-# Differences from the MELFA reference (rv5as_params.yaml), per
+# Differences from the MELFA reference (rv5as_params.yaml, parked in
+# melfa/parked/mating_controller/config/), per
 # SETUP_AND_CALIBRATION.md section 7: the FR3 MoveIt config has NO Pilz
 # pipeline, so the insertion stroke is not path-guaranteed. Depth, speeds
 # and tolerances are reduced accordingly. Validate in fake hardware first.
@@ -16,8 +17,11 @@
     BASE_FRAME_ID: fr3_link0
 
     # --- Vision input -------------------------------------------------------
-    pose_topic: /aruco/pose
-    raw_pose_topic: /aruco/pose_raw  # unpredicted detections; gates insertion arming
+    # The object pose contract (roscam/object_contract.py, PERCEPTION_PLAN
+    # section 2): the vision node's object_source picks where the pose comes
+    # from (only 'marker' so far, mirrored unchanged from /aruco/*).
+    pose_topic: /object/pose
+    raw_pose_topic: /object/pose_raw  # unpredicted detections; gates insertion arming
     control_period_s: 0.4
     vision_timeout_s: 0.6
     tf_lookup_timeout_s: 0.1
@@ -77,10 +81,10 @@
     cartesian_eef_step_m: 0.002
 
     # --- Alignment mode -------------------------------------------------------
-    # step (default). To try continuous tracking: install
-    # ros-humble-moveit-servo, run a servo node with tools/fr3/fr3_servo.yaml,
-    # then set align_mode: servo and control_period_s: 0.05 (must be shorter
-    # than the servo command timeout). INSERT stays a discrete stroke.
+    # step (default). mating_node still accepts align_mode: servo, but the
+    # moveit_servo node config it streamed to (tools/fr3/fr3_servo.yaml and
+    # its launch) was archived at tag pre-cleanup-2026-09-23; continuous
+    # tracking is tracking_node on the impedance controller instead.
     align_mode: step
     servo_twist_topic: /servo_node/delta_twist_cmds
     servo_pos_gain: 1.5
@@ -102,3 +106,128 @@
     impedance_stroke_mps: 0.005
     impedance_overdrive_m: 0.010   # preload lead: ~8 N at k_z=800 N/m
     impedance_settle_s: 1.0
+
+    # --- Continuous tracking (TRACKING_SPEC.md section 5) --------------------
+    # Off at startup. The operator starts it from cell_panel's
+    # START TRACKING button; the node publishes nothing until then.
+    tracking_period_s: 0.02             # s, 50 Hz (spec section 5)
+    tracking_ki: 0.5                    # 1/s; lead reaches lead_max in ~2 s at a 10 mm error (spec O2)
+    tracking_lead_max_m: 0.010          # m; 15 N at track_k_pos_tool 1500 N/m (spec section 6)
+    tracking_lead_max_rad: 0.017        # rad, ~1 deg; 1.5 Nm at k_rot 90, under max_torque_nm 10
+    tracking_deadband_m: 0.005          # m; F_breakaway 6.5 N / track_k_pos_tool 1500 N/m. NOT the 1.8 mm measured at k = 3000 - raise or lower it with the stiffness (pinned by a test)
+    tracking_deadband_rad: 0.007        # rad, ~0.4 deg; 0.6 Nm / k_rot 90, matches the 09-22 measurement
+    tracking_max_lead_m: 0.060          # m; same cap cell_panel enforces (MAX_LEAD_MM)
+    tracking_z_floor_m: 0.10            # m, ABSOLUTE in fr3_link0: the equilibrium never goes lower; = cell_panel FLOOR_Z_MM (pinned by a test)
+    tracking_state_topic: /franka_robot_state_broadcaster/robot_state
+    tracking_state_timeout_s: 0.1       # s; a frozen robot state must stop the integrator, not wind it
+    tracking_profile_timeout_s: 2.0     # s; bound on each set_parameters/get_parameters call
+    tracking_settle_s: 1.0              # s to let the equilibrium re-seed before the gain step at start
+    tracking_max_force_n: 30.0          # must equal max_force_n in cartesian_impedance_stroke.yaml (pinned by a test)
+    tracking_max_torque_nm: 10.0        # must equal max_torque_nm in that yaml (pinned by a test)
+    tracking_log_dir: ''                # '' = no log. fr3_cell.launch.py overrides it with $FR3_LOG_DIR/YYYY-MM-DD
+    tracking_gain_profile: track        # prefix of the <profile>_* keys below, applied atomically on start
+
+    # Camera-centred goal. TRACK holds the CAMERA where ALIGN leaves it:
+    # optical axis along the marker normal, the marker tracking_standoff_m
+    # ahead, marker X at tracking_inplane_deg in the image (cell_panel's
+    # INPLANE convention: 0 = right, +90 = down). cell_panel writes these
+    # from its ALIGN target and in-plane dropdowns before every START. The
+    # connector offset is NOT applied here - a later, separate approach step
+    # does that - so tracking ignores connector_offset_* and standoff_height_m.
+    tracking_camera_frame: camera_color_optical_frame
+    tracking_standoff_m: 0.10           # m; = cell_panel TARGET_MM_DEFAULT
+    tracking_inplane_deg: 90.0          # deg; = cell_panel INPLANE_TARGET_DEFAULT
+    tracking_inplane_hold: false        # true = keep the in-plane angle seen at START (panel 'off')
+    # While the equilibrium would sit beyond tracking_max_lead_m or
+    # tracking_max_lead_rad from the arm: hold (stay armed, resume once back
+    # inside), stop (end tracking, restore gains) or clamp (keep following
+    # with the lead limited to the caps). Live-settable; cell_panel's
+    # dropdown writes it. The Z floor and a non-finite pose hold under every
+    # policy, stop included; under clamp the floor judges the clamped pose.
+    tracking_over_lead_policy: hold
+    tracking_max_lead_rad: 0.26         # rad, ~15 deg; angular twin of tracking_max_lead_m. The node refuses above 0.35
+    # Predictions never drive committed motion (TRACKING_SPEC Decision 5):
+    # hold unless a RAW detection (optical frame, no KF) is this fresh.
+    tracking_raw_pose_topic: /object/pose_raw
+    tracking_raw_timeout_s: 0.25        # s; ~3 frames at 15 fps
+    # Buzz watchdog: tracking stops (gains restored) when any joint's measured
+    # torque above 20 Hz exceeds this rms. 2026-09-23 at 1 kHz: normal work
+    # peaked at 0.15 Nm over 24 min; the 40 Hz wrist buzz read 4-5 Nm (5.9 peak).
+    # 3.5, was 0.5, 1.0, 2.5 (2026-09-24, operator's call): fast TRACK reads
+    # 0.2-2.6 Nm without a sustained buzz, rising with the catch-up speed
+    # (~1 Nm at 125-160 mm/s, 2.55 Nm at 230 mm/s after marker dropouts; the
+    # frame glide did not remove it). Replaying the 09-23 recording, 3.5 catches
+    # the real buzz 0.76 s after 0.5 did (it grew 0.3 -> 3 Nm in 0.85 s, then
+    # sat above 3.5 for ~10 s at up to 5.9), still before the operator stopped it.
+    tracking_buzz_stop_nm: 3.5
+    # Each camera frame (~15 Hz) moves the goal; the 50 Hz loop glides between
+    # frames instead of stepping, so a fast slew no longer stop-starts the arm
+    # on every frame. Adds up to one frame of delay; false = the old steps.
+    tracking_goal_glide: true
+    # Workspace limits HOLD tracking, under every over-lead policy, and never
+    # stop it. The box is cell_panel's drawer box (it writes these before every
+    # START; these are its defaults, pinned by a test); tracking_z_floor_m is
+    # its bottom. The joint guard holds while a joint within the margin of its
+    # end stop is pulled (or drifts) further in, and lets go as soon as the
+    # marker pulls it back out: 2026-09-24, TRACK drove J2 past its stop twice
+    # and the FR3's position-dependent velocity limit ended both runs.
+    tracking_box_x_m: [0.20, 0.80]
+    tracking_box_y_m: [-0.45, 0.45]
+    tracking_box_z_max_m: 0.80
+    tracking_joint_lower: [-2.7437, -1.7837, -2.9007, -3.0421, -2.8065, 0.5445, -3.0159]
+    tracking_joint_upper: [2.7437, 1.7837, 2.9007, -0.1518, 2.8065, 4.5169, 3.0159]
+    tracking_joint_margin_rad: 0.14     # ~8 deg; the FR3 still allows ~0.4-1 rad/s toward a stop there
+    # true = TRACK keeps the operator's applied gains (2026-09-24, the user's
+    # call); only the profile slew is written, and the deadband and lead caps
+    # below scale by (profile k / k in force) so they stay F/k and 15 N/k.
+    # false = the track_* gain profile is applied at START, as before.
+    tracking_use_operator_gains: true
+
+    # --- GRIP (cell/grip_node.py) ------------------------------------------
+    # The panel's GRIP grips a marked cube with the Franka Hand on the
+    # impedance controller (the operator's gains), reading its pose ONCE from
+    # the marker centred on its top face. cell_panel writes grip_cube_m and
+    # grip_force_n from its drawer before every GRIP. Heights are along the
+    # marker normal; the Z floor, the workspace box and the joint limits above
+    # apply to every target.
+    grip_base_frame: fr3_link0
+    grip_tcp_frame: fr3_hand_tcp
+    grip_cube_m: 0.055                  # m; the Franka Hand strokes 80 mm
+    grip_open_margin_m: 0.020           # m opened beyond the cube before the descent
+    grip_depth_m: 0.025                 # m below the top face for the TCP (fingertip centre)
+    grip_approach_m: 0.10               # m above the grasp before the descent
+    grip_lift_m: 0.05                   # m lifted after the grasp
+    grip_force_n: 20.0                  # N grasp force
+    grip_epsilon_m: 0.008               # m either side of grip_cube_m the grasp accepts
+    grip_travel_mps: 0.04               # m/s approach, lift, retreat
+    grip_descend_mps: 0.015             # m/s the last approach_m down (and PLACE's)
+    grip_turn_radps: 0.4                # rad/s wrist turn at most
+    grip_contact_n: 10.0                # N change in external force (vs the move's start): hold, or set down
+    grip_arrive_window_m: 0.015         # m; PLACE takes a contact as the set-down only this close to it
+    # PLACE AT B: target marker B (cam_pub target_marker_id, launch arg, default
+    # id 1) lies flat on the table; grip_node remembers its pose whenever it is
+    # steadily in view. The cube is set down centred on B + offset (B's x/y),
+    # resting on B's plane, faces turned to B's axes.
+    grip_target_topic: /aruco/target_pose_raw
+    grip_target_offset_m: [0.0, 0.0]    # m in B's own x/y
+    grip_target_max_age_s: 600.0        # s; an older sighting refuses PLACE AT B (= cell settings.yaml)
+    grip_target_max_tilt_deg: 10.0      # deg; B must lie flat
+    grip_carry_clearance_m: 0.03        # m above both ends for the level carry
+    grip_tol_m: 0.003                   # m settled within, before the next step
+    grip_tol_deg: 3.0                   # deg
+    grip_settle_s: 8.0                  # s to settle, else it fails with how far off it is
+    grip_ki: 0.5                        # 1/s friction integrator, as tracking_ki
+    grip_raw_timeout_s: 0.25            # s; GRIP needs a raw detection this fresh
+    grip_joint_margin_rad: 0.05         # rad; a joint this close to its stop halts the grip
+
+    # Gain profile (TRACKING_SPEC.md section 4 C1). Sent as ONE atomic
+    # set_parameters request; the controller's GainLimits still reject the
+    # set as a whole. ~/stop_tracking restores whatever the controller had
+    # before start, read back at start - there is deliberately no `mate`
+    # block here, because the panel retunes gains live and the shipped
+    # defaults are not necessarily what the operator had.
+    track_k_pos_tool: [1500.0, 1500.0, 1500.0]  # N/m, isotropic on purpose: an anisotropic tool-frame K deflects force off the commanded direction at the measured 18.5 deg median tilt
+    track_k_rot_tool: [90.0, 90.0, 90.0]        # Nm/rad, the measured ceiling - see spec O1 before raising
+    track_damping_ratio: 0.5                    # was 1.0: D = 2*zeta*sqrt(k) made D_rot 19 Nms/rad and a 40 Hz wrist mode went unstable once tracking moved the wrist (2026-09-23, 1 kHz: damping torque ~50x the spring's at 40 Hz). 0.5 halves D, as TRACKING_SPEC O1 proposed; friction still damps the spring
+    track_setpoint_slew_mps: 0.10               # m/s; slew, not stiffness, is the speed limit (spec finding 2)
+    track_setpoint_slew_rps: 0.5                # rad/s

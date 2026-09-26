@@ -5,6 +5,7 @@ that keeps the rest of the stack safe without one: lazy SDK import,
 graceful failure, and the data shapes the nodes rely on.
 """
 import sys
+import types
 import unittest.mock as mock
 
 import numpy as np
@@ -156,3 +157,54 @@ def test_forgiveness_does_not_fire_without_prior_reset():
     cap = RsCapture(frames_to_forgive=5)
     assert cap.resets_done == 0
     assert cap._frames_since_reset == 0
+
+
+class _Sensor:
+    def __init__(self, opts):
+        self.opts, self.set = set(opts), []
+
+    def supports(self, opt):
+        return opt in self.opts
+
+    def set_option(self, opt, value):
+        self.set.append((opt, value))
+
+
+def _streaming(*sensors):
+    dev = types.SimpleNamespace(query_sensors=lambda: list(sensors))
+    profile = types.SimpleNamespace(get_device=lambda: dev)
+    return types.SimpleNamespace(get_active_profile=lambda: profile)
+
+
+def test_exposure_and_gain_change_while_streaming():
+    """A locked short exposure for the blur test, and back to auto, live."""
+    stereo = _Sensor(['exposure', 'enable_auto_exposure', 'gain'])
+    cap = RsCapture()
+    cap._rs = types.SimpleNamespace(option=types.SimpleNamespace(
+        exposure='exposure', enable_auto_exposure='enable_auto_exposure', gain='gain'))
+    cap._pipeline = _streaming(stereo, _Sensor([]))
+    cap.set_exposure(3000)
+    assert stereo.set == [('enable_auto_exposure', 0), ('exposure', 3000.0)]
+    cap.set_gain(32)
+    assert stereo.set[-1] == ('gain', 32.0)
+    cap.set_exposure(-1)
+    assert stereo.set[-1] == ('enable_auto_exposure', 1)
+    assert cap.settings()['exposure_us'] == 'auto' and cap.settings()['gain'] == 32
+    cap._pipeline = _streaming(_Sensor([]))
+    with pytest.raises(RuntimeError, match='no settable exposure'):
+        cap.set_exposure(3000)
+
+
+def test_each_frame_carries_the_exposure_and_gain_it_was_shot_with():
+    color = types.SimpleNamespace(
+        get_data=lambda: np.zeros((2, 2, 3), np.uint8), get_timestamp=lambda: 5.0,
+        get_frame_timestamp_domain=lambda: 'global_time',
+        supports_frame_metadata=lambda k: k in ('actual_exposure', 'gain_level'),
+        get_frame_metadata=lambda k: {'actual_exposure': 4000, 'gain_level': 16}[k])
+    frames = types.SimpleNamespace(get_color_frame=lambda: color)
+    cap = RsCapture()
+    cap._rs = types.SimpleNamespace(frame_metadata_value=types.SimpleNamespace(
+        actual_exposure='actual_exposure', gain_level='gain_level'))
+    cap._pipeline = types.SimpleNamespace(wait_for_frames=lambda ms: frames)
+    f = cap.wait_frame()
+    assert f.exposure_us == 4000.0 and f.gain == 16.0
