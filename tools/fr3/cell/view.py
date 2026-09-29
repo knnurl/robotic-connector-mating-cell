@@ -22,8 +22,8 @@ import time
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QImage, QPainter, QPainterPath,
-                           QPen, QPixmap, QPolygonF)
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
+                           QKeySequence, QPen, QPixmap, QPolygonF)
+from PySide6.QtWidgets import (QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
                                QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                                QMainWindow, QPlainTextEdit, QPushButton, QScrollArea,
                                QSizePolicy, QSlider, QVBoxLayout, QWidget)
@@ -48,6 +48,12 @@ TEXT = {
     'recover': 'RECOVER', 'stop_now': 'STOP NOW', 'pause': 'PAUSE',
     'stop_after': 'stop after\ncurrent move',
 }
+# One plain key per button, pressed like a click (blocked, confirm and
+# pending all behave the same). Never while typing in a field or with a
+# dropdown or dialog open; Esc is EscapeFilter's alone.
+KEYS = {Qt.Key_H: 'goto:home', Qt.Key_A: 'goto:pre_align', Qt.Key_T: 'track',
+        Qt.Key_F: 'float', Qt.Key_G: 'hold'}
+KEY_HINT = {name: QKeySequence(k).toString() for k, name in KEYS.items()}
 STOP_TIP = ('Software stop (Esc, from anywhere in the window): halts MoveIt '
             'mid-move, ends tracking, pins the impedance equilibrium where the '
             'arm is. It is NOT an emergency stop and carries no safety rating - '
@@ -163,9 +169,12 @@ class ActionButton(QPushButton):
     from the press until the command answers."""
 
     def __init__(self, name, window, text=None, kind=None, height=None):
-        super().__init__(text or TEXT.get(name, name))
+        base = text or TEXT.get(name, name)
+        if name in KEY_HINT:
+            base += f'   ({KEY_HINT[name]})'
+        super().__init__(base)
         self.name, self.w = name, window
-        self.base = text or TEXT.get(name, name)
+        self.base = base
         self.state, self.why = None, ''
         self.setFocusPolicy(Qt.NoFocus)
         self.setCursor(Qt.PointingHandCursor)
@@ -1482,7 +1491,7 @@ class MainWindow(QMainWindow):
             e = en.get(key, logic.Enable(True, ''))
             text = None
             if name == 'track' and trk:
-                text = 'END TRACK'
+                text = f'END TRACK   ({KEY_HINT["track"]})'
             elif name == 'pause' and s.user_paused:
                 text = 'RESUME'
             elif name == 'translate':
@@ -1731,7 +1740,8 @@ class MainWindow(QMainWindow):
 
 class EscapeFilter(QObject):
     """Esc = STOP NOW from anywhere: an application-wide filter sees the key
-    before any widget or open popup can keep it."""
+    before any widget or open popup can keep it. It also takes the KEYS
+    shortcuts, but only where they cannot be typing."""
 
     def __init__(self, window):
         super().__init__()
@@ -1744,7 +1754,24 @@ class EscapeFilter(QObject):
             if not e.isAutoRepeat():
                 self.w.on_press('stop_now')
             return True
+        if e.type() == QEvent.KeyPress and e.key() in KEYS and self._shortcut_ok(e):
+            btn = self.w.buttons.get(KEYS[e.key()])
+            if btn is not None and btn.isVisible():
+                btn.click()
+            return True
         return False
+
+    def _shortcut_ok(self, e):
+        if e.isAutoRepeat() or e.modifiers() & ~(Qt.ShiftModifier | Qt.KeypadModifier):
+            return False
+        app = QApplication.instance()
+        if app.activePopupWidget() or app.activeModalWidget():
+            return False
+        if app.activeWindow() is not self.w:
+            return False
+        f = app.focusWidget()
+        typing = (QLineEdit, QAbstractSpinBox, QPlainTextEdit)
+        return not (isinstance(f, typing) or (isinstance(f, QComboBox) and f.isEditable()))
 
 
 def make_app(argv):

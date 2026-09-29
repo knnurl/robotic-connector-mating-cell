@@ -80,6 +80,34 @@ def test_escape_is_stop_now_whatever_has_focus(app, make):
         app.removeEventFilter(esc)
 
 
+def test_shortcut_keys_press_their_buttons_but_never_while_typing(app, make):
+    w, b = make()
+    esc = view.EscapeFilter(w)
+    app.installEventFilter(esc)
+    try:
+        w.activateWindow()
+        QCoreApplication.processEvents()
+        if app.activeWindow() is not w:
+            pytest.skip('no active window on this platform')
+        clicked = []
+        for name in view.KEYS.values():
+            w.buttons[name].clicked.connect(lambda _=False, n=name: clicked.append(n))
+        for key in view.KEYS:
+            QTest.keyClick(w, key)
+        assert clicked == list(view.KEYS.values())       # once each, in order
+        assert w.buttons['float'].base.endswith('(F)')
+        w._toggle_drawer()
+        w.floor_edit.setFocus()
+        QTest.keyClick(w.floor_edit, Qt.Key_H)            # typing, not going home
+        w.target.showPopup()
+        QTest.keyClick(w.target.view(), Qt.Key_T)
+        w.target.hidePopup()
+        QTest.keyClick(w, Qt.Key_G, Qt.ControlModifier)
+        assert clicked == list(view.KEYS.values())
+    finally:
+        app.removeEventFilter(esc)
+
+
 def test_blocked_press_explains_and_runs_nothing(make):
     w, b = make('idle')                               # PRE-FLIGHT not done
     assert w.buttons['hold'].state == 'blocked'
