@@ -378,7 +378,7 @@ class Impedance(Node):
 
     LIVE = {'k_pos_tool': (0.0, 3000.0), 'k_rot_tool': (0.0, 300.0),
             'damping_ratio': (0.1, 2.0), 'nullspace_stiffness': (0.0, 50.0),
-            'setpoint_slew_mps': (0.001, 0.25), 'setpoint_slew_rps': (0.001, 1.0)}
+            'setpoint_slew_mps': (0.001, 0.30), 'setpoint_slew_rps': (0.001, 1.0)}
     CONFIGURE_ONLY = ('arm_id', 'max_force_n', 'max_torque_nm', 'tau_max_nm',
                       'tau_rate_limit')
 

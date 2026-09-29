@@ -147,7 +147,7 @@ class LiveBackend:
             self.set_param('track_speed_pct', float(a[0]))
             if not c.params.track_fast and (
                     c.tracking or c._track_state() in ('starting', 'tracking', 'holding')):
-                c.run('track_speed', c.write_speed, float(a[0]))
+                c.run('track_speed', c.write_speed, float(a[0]), True)
         elif name == 'track_fast':
             c.run(name, c.set_track_fast, bool(a[0]))
         elif name == 'stop_now':

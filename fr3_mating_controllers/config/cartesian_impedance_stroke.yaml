@@ -52,10 +52,10 @@ cartesian_impedance_stroke_controller:
 
     # Equilibrium slew limits (fr3_backend pattern): topic jumps become
     # bounded ramps. Also caps the effective stroke speed. Live, so tracking
-    # can raise the cap to 0.10-0.25 m/s without a cleanup and reconfigure
-    # cycle (TRACKING_SPEC.md section 4 C2); ConfigLimits 0.25 / 1.0 stays
+    # can raise the cap to 0.10-0.30 m/s without a cleanup and reconfigure
+    # cycle (TRACKING_SPEC.md section 4 C2); ConfigLimits 0.30 / 1.0 stays
     # the hard bound either way.
-    setpoint_slew_mps: 0.05             # 0.001-0.25
+    setpoint_slew_mps: 0.05             # 0.001-0.30
     setpoint_slew_rps: 0.5              # 0.001-1.0
 
     # --- configure-time only - arm_id above, and the four ceilings below:

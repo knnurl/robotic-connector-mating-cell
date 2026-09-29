@@ -170,15 +170,16 @@ def main():
         ok, msg = run('track', cell.start_tracking)
         check('TRACK starts', ok and wait_for(lambda s: s.track.get('state') == 'tracking', 5),
               msg)
-        want = L.speed_torque(cell.params.track_speed_pct, st)['setpoint_slew_mps']
+        want = L.speed_torque(cell.params.track_speed_pct, st, True)['setpoint_slew_mps']
         check('TRACK SPEED overrides the node profile (100 mm/s) after START',
               wait_for(lambda s: abs(node.applied_params()['setpoint_slew_mps'] - want) < 1e-9,
                        3), f'{node.applied_params()["setpoint_slew_mps"]} vs {want}')
         cell.params = actions.Params(track_speed_pct=5.0)
-        ok, msg = run('track_speed', cell.write_speed, 5.0)
+        ok, msg = run('track_speed', cell.write_speed, 5.0, True)
         check('TRACK SPEED is live while tracking',
               ok and wait_for(lambda s: abs(node.applied_params()['setpoint_slew_mps']
-                                            - 0.0125) < 1e-9, 3), msg)
+                                            - L.speed_torque(5.0, st, True)['setpoint_slew_mps'])
+                              < 1e-9, 3), msg)
         check('gains and speed lock while tracking',
               not en('preset').ok and not en('speed').ok, en('speed').why)
         cell.params = actions.Params(marker_loss='stop', marker_loss_ms=500.0)
@@ -194,7 +195,7 @@ def main():
         wait_for(lambda s: s.marker is not None, 3)
         ok, msg = run('track', cell.start_tracking)
         wait_for(lambda s: s.track.get('state') == 'tracking', 5)
-        fast = L.speed_torque(st.track_fast_pct, st)['setpoint_slew_mps']
+        fast = L.speed_torque(st.track_fast_pct, st, True)['setpoint_slew_mps']
         ok, msg = run('track_fast', cell.set_track_fast, True)
         check('FAST writes track_fast_pct while tracking',
               ok and wait_for(lambda s: abs(node.applied_params()['setpoint_slew_mps']

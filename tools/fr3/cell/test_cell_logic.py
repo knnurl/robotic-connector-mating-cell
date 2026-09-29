@@ -268,10 +268,14 @@ def test_speed_maps():
     p = L.speed_position(100, ST)
     assert p['velocity_scale'] == pytest.approx(ST.position_ceiling_pct / 100)
     assert p['accel_scale'] == pytest.approx(p['velocity_scale'] ** 2)
-    assert L.speed_position(25, ST)['slowdown'] == pytest.approx(20.0)  # the Tk panel's 5 % default
+    assert L.speed_position(12.5, ST)['slowdown'] == pytest.approx(20.0)  # the Tk panel's 5 % default
     t = L.speed_torque(20, ST)
     assert t['setpoint_slew_mps'] == pytest.approx(0.05)
     assert L.speed_torque(100, ST)['setpoint_slew_rps'] == pytest.approx(ST.slew_max_rps)
+    assert L.speed_torque(100, ST)['setpoint_slew_mps'] == pytest.approx(0.25)   # MOTION SPEED
+    assert L.speed_torque(100, ST, True)['setpoint_slew_mps'] == pytest.approx(0.30)   # TRACK
+    assert L.speed_torque(ST.track_fast_pct, ST, True)['setpoint_slew_mps'] == \
+        pytest.approx(0.10, abs=1e-3)                                     # FAST stays 100 mm/s
     assert L.speed_torque(0, ST)['setpoint_slew_mps'] >= 0.001
     assert not L.speed_needs_confirm(ST.speed_default_pct, ST)
     assert L.speed_needs_confirm(ST.speed_confirm_pct + 1, ST)

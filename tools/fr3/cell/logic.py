@@ -73,12 +73,13 @@ class Settings:
     speed_default_pct: float = 20.0
     track_speed_default_pct: float = 10.0
     speed_confirm_pct: float = 25.0
-    track_fast_pct: float = 40.0
+    track_fast_pct: float = 33.3
     grip_cube_mm: float = 55.0
     grip_force_n: float = 20.0
     grip_target_max_age_s: float = 600.0
-    position_ceiling_pct: float = 20.0  # core.CEIL_SPEED_PCT
-    slew_max_mps: float = 0.25          # impedance_detail.hpp ConfigLimits
+    position_ceiling_pct: float = 40.0  # core.CEIL_SPEED_PCT
+    slew_max_mps: float = 0.25          # MOTION SPEED in torque mode; <= ConfigLimits
+    track_slew_max_mps: float = 0.30    # TRACK SPEED; impedance_detail.hpp ConfigLimits
     slew_max_rps: float = 1.0
     preset_max_force_n: float = 5.0
     preset_max_lead_mm: float = 5.0
@@ -696,10 +697,12 @@ def speed_position(pct, st):
     return {'velocity_scale': v, 'accel_scale': v * v, 'slowdown': 1.0 / v}
 
 
-def speed_torque(pct, st):
-    """Slider % -> the controller's equilibrium slew caps (m/s, rad/s)."""
+def speed_torque(pct, st, track=False):
+    """Slider % -> the controller's equilibrium slew caps (m/s, rad/s). TRACK
+    SPEED (track) reaches further than MOTION SPEED."""
     f = clamp_pct(pct) / 100.0
-    return {'setpoint_slew_mps': max(0.001, f * st.slew_max_mps),
+    mps = st.track_slew_max_mps if track else st.slew_max_mps
+    return {'setpoint_slew_mps': max(0.001, f * mps),
             'setpoint_slew_rps': max(0.001, f * st.slew_max_rps)}
 
 

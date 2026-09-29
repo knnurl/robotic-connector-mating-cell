@@ -1339,7 +1339,7 @@ class Cell:
         # is already streaming: override it with TRACK SPEED at once. It
         # restores the pre-TRACK slew at STOP. Re-reading the profile at
         # START would close this gap on the node side (TODO C9).
-        s_ok, s_msg = self.write_speed(p.track_speed_pct)
+        s_ok, s_msg = self.write_speed(p.track_speed_pct, True)
         if not s_ok:
             t_ok, t_msg = self.stop_tracking()
             return False, (f'TRACK SPEED not applied ({s_msg}) - tracking stopped rather '
@@ -1507,9 +1507,10 @@ class Cell:
         self.trace({'rec': 'gains', 'ok': ok, **g})
         return ok, msg
 
-    def write_speed(self, pct):
-        """Torque mode: the controller's own slew caps - no second limiter."""
-        vals = logic.speed_torque(pct, self.st)
+    def write_speed(self, pct, track=False):
+        """Torque mode: the controller's own slew caps - no second limiter.
+        track: TRACK SPEED's range, not MOTION SPEED's."""
+        vals = logic.speed_torque(pct, self.st, track)
         ok, msg = self.n.set_params(vals)
         self.n.refresh_now()
         self.say(f'speed {pct:.0f}% -> slew {vals["setpoint_slew_mps"]*1000:.0f} mm/s, '
@@ -1529,7 +1530,7 @@ class Cell:
             self.params = replace(self.params, track_fast=False)
             return False, 'FAST works only while tracking'
         self.params = replace(self.params, track_fast=on)
-        ok, msg = self.write_speed(self.track_pct())
+        ok, msg = self.write_speed(self.track_pct(), True)
         if not ok:
             self.params = replace(self.params, track_fast=False)
         return ok, msg

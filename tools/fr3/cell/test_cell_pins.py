@@ -135,7 +135,8 @@ def test_speed_slider_ceilings_are_the_controllers_slew_limits():
     """Both speed sliders map onto ConfigLimits; above them the controller
     refuses the whole set."""
     const = _consts(IMPEDANCE_HPP)
-    assert ST.slew_max_mps == const('slewMpsMax')
+    assert ST.track_slew_max_mps == const('slewMpsMax')
+    assert ST.slew_max_mps <= const('slewMpsMax')
     assert ST.slew_max_rps == const('slewRpsMax')
     assert L.speed_torque(1, ST)['setpoint_slew_mps'] >= const('slewMpsMin')
 

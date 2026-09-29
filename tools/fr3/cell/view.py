@@ -1156,7 +1156,7 @@ class MainWindow(QMainWindow):
         self.tspeed_dragging = False
         pct = float(self.tspeed.value())
         if logic.speed_needs_confirm(pct, self.st):
-            t = logic.speed_torque(pct, self.st)
+            t = logic.speed_torque(pct, self.st, True)
             self._arm_confirm(self.tspeed_confirm, 'track_speed', (pct,),
                               f'CONFIRM {pct:.0f} %  →  {t["setpoint_slew_mps"]*1000:.0f} mm/s')
             return
@@ -1506,7 +1506,7 @@ class MainWindow(QMainWindow):
             elif name == 'grip':
                 text = f'GRIP  {s.grip_cube_mm:.0f} mm cube'
             elif name == 'track_fast':
-                fast = logic.speed_torque(self.st.track_fast_pct, self.st)
+                fast = logic.speed_torque(self.st.track_fast_pct, self.st, True)
                 text = (('▲ FAST ON  ' if s.track_fast else 'FAST  ')
                         + f'{fast["setpoint_slew_mps"]*1000:.0f} mm/s')
             state = 'blocked' if not e.ok else 'next' if name == nxt else 'idle'
@@ -1577,13 +1577,13 @@ class MainWindow(QMainWindow):
         self.tspeed.setToolTip('Slew limit while tracking; tracking_node\'s own profile is '
                                '100 mm/s. Written right after START and live during TRACK.'
                                if e.ok else f'Not available: {e.why}')
-        t = logic.speed_torque(pct, self.st)
+        t = logic.speed_torque(pct, self.st, True)
         text = (f'{t["setpoint_slew_mps"]*1000:.0f} mm/s   '
                 f'{math.degrees(t["setpoint_slew_rps"]):.1f} deg/s')
         slew = self.b.applied_slew()
         if trk and slew is not None:
             if s.track_fast:
-                t = logic.speed_torque(self.st.track_fast_pct, self.st)
+                t = logic.speed_torque(self.st.track_fast_pct, self.st, True)
             text += (f'   ·   in force {slew[0]*1000:.0f} mm/s'
                      + (' FAST' if s.track_fast else '')
                      + ('' if abs(slew[0] - t['setpoint_slew_mps']) < 1e-6 else '  (pending)'))

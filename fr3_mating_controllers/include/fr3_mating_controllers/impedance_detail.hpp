@@ -52,7 +52,7 @@ struct ConfigLimits
     static constexpr double tauRateMin = 0.01;      // Nm per 1 ms cycle
     static constexpr double tauRateMax = 1.0;
     static constexpr double slewMpsMin = 0.001;     // m/s
-    static constexpr double slewMpsMax = 0.25;
+    static constexpr double slewMpsMax = 0.30;
     static constexpr double slewRpsMin = 0.001;     // rad/s
     static constexpr double slewRpsMax = 1.0;
     static constexpr double tauMaxMin = 0.1;        // Nm; the max is kTauSpecNm
@@ -69,7 +69,7 @@ inline bool finite_in(double v, double lo, double hi)
 inline std::string validate_slew(double slew_mps, double slew_rps)
 {
     if (!finite_in(slew_mps, ConfigLimits::slewMpsMin, ConfigLimits::slewMpsMax)) {
-        return "setpoint_slew_mps must be within [0.001, 0.25] m/s";
+        return "setpoint_slew_mps must be within [0.001, 0.30] m/s";
     }
     if (!finite_in(slew_rps, ConfigLimits::slewRpsMin, ConfigLimits::slewRpsMax)) {
         return "setpoint_slew_rps must be within [0.001, 1.0] rad/s";

@@ -28,7 +28,7 @@ STEP_MM_DEFAULT, ROT_DEG_DEFAULT = '30', '3'
 # ---- speed -----------------------------------------------------------------
 # The ceiling of the position-mode speed slider, as a percentage of the
 # trajectory speed MoveIt planned. Applied by stretching time_from_start.
-CEIL_SPEED_PCT = 20.0     # never faster than this, whatever is selected
+CEIL_SPEED_PCT = 40.0     # never faster than this, whatever is selected
 
 # ---- target standoff + convergence --------------------------------------
 TARGET_MM_CHOICES = ['80', '100', '150', '200', '250', '300']
