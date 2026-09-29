@@ -1345,7 +1345,10 @@ class Cell:
             return False, (f'TRACK SPEED not applied ({s_msg}) - tracking stopped rather '
                            f'than run at the node\'s profile speed ({t_msg})')
         self.say(f'TRACKING: {msg} at {p.track_speed_pct:.0f}% - the arm follows the '
-                 'marker. STOP NOW or END TRACK ends it.')
+                 'marker. STOP NOW or END TRACK ends it.'
+                 + (' Blind start: it holds until it sees the marker'
+                    + (', and keeps the in-plane angle it sees then.'
+                       if p.inplane_target is None else '.') if p.track_blind else ''))
         return True, msg
 
     def grip(self):

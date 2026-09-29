@@ -58,8 +58,10 @@ from controller_manager_msgs.srv import ListControllers  # noqa: E402
 from diagnostic_msgs.msg import DiagnosticStatus  # noqa: E402
 from franka_msgs.msg import FrankaRobotState  # noqa: E402
 from geometry_msgs.msg import PoseStamped, TransformStamped  # noqa: E402
+from rcl_interfaces.srv import SetParameters  # noqa: E402
 from rclpy.executors import MultiThreadedExecutor  # noqa: E402
 from rclpy.node import Node  # noqa: E402
+from rclpy.parameter import Parameter  # noqa: E402
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy  # noqa: E402
 from scipy.spatial.transform import Rotation  # noqa: E402
 from std_srvs.srv import Trigger  # noqa: E402
@@ -124,6 +126,7 @@ class Cell(Node):
         self.eq = None
         self.eq_count = 0
         self.raw_on = True
+        self.vision_on = True              # False: no pose at all, filtered or raw
         self.buzz_nm = 0.0                 # amplitude of an injected 40 Hz torque on J1
         # Joint positions/velocities, as the real robot state carries them:
         # tracking_node's joint-limit guard holds without them. The FR3 ready
@@ -181,6 +184,8 @@ class Cell(Node):
     def _vision(self):
         with self.lock:
             marker, cam, raw = self.marker.copy(), self.tcp @ T_TCP_CAM, self.raw_on
+            if not self.vision_on:
+                return
         now = self.get_clock().now().to_msg()
         self.pose_pub.publish(pose_msg(marker, 'fr3_link0', now))
         if raw:
@@ -229,6 +234,7 @@ class Operator(Node):
                                  self._status, latched)
         self.start = self.create_client(Trigger, '/tracking_node/start_tracking')
         self.stop = self.create_client(Trigger, '/tracking_node/stop_tracking')
+        self.params = self.create_client(SetParameters, '/tracking_node/set_parameters')
 
     def _status(self, msg):
         self.status = {kv.key: kv.value for kv in msg.values}
@@ -388,6 +394,42 @@ def main():
         check('operator gains intact after the buzz',
               wait_for(lambda: ctl.k_pos() == OPERATOR_GAINS, 2), str(ctl.k_pos()))
         cell.buzz_nm = 0.0
+
+        # A blind start with in-plane 'off' (2026-09-29): no marker at START
+        # must not refuse; the node holds, then keeps the in-plane angle the
+        # camera sees at the first detection instead of turning to one.
+        wait_for(lambda: op.state()[0] == 'idle', 3)
+        with cell.lock:
+            cell.vision_on = False
+            turn = np.eye(4)
+            turn[:3, :3] = Rotation.from_euler('z', 30, degrees=True).as_matrix()
+            cell.marker = cell.marker @ turn     # its z faces the camera: 90 -> 60 deg in the image
+        time.sleep(1.0)                          # older than vision_timeout_s
+        req = SetParameters.Request()
+        req.parameters = [Parameter('tracking_inplane_hold', value=True).to_parameter_msg()]
+        fut = op.params.call_async(req)
+        wait_for(fut.done, 5)
+        check('in-plane hold set', fut.done() and fut.result().results[0].successful)
+        r = call(op.start)
+        check('blind START with in-plane off starts', bool(r and r.success),
+              r.message if r else 'no reply')
+        check('it holds with no marker',
+              wait_for(lambda: op.state() == ('holding', 'marker stale'), 3), str(op.state()))
+        with cell.lock:
+            yaw0 = Rotation.from_matrix(cell.tcp[:3, :3]).as_euler('xyz')[2]
+            cell.vision_on = True
+        check('the first detection sets the in-plane angle as found',
+              wait_for(lambda: abs(float(op.status.get('inplane_deg', 'nan')) - 60.0) < 1.0, 3),
+              str(op.status.get('inplane_deg')))
+        check('and tracks', wait_for(lambda: op.state()[0] == 'tracking', 3), str(op.state()))
+        time.sleep(2.0)
+        with cell.lock:
+            yaw = Rotation.from_matrix(cell.tcp[:3, :3]).as_euler('xyz')[2]
+        check('without turning to a preset angle', abs(math.degrees(yaw - yaw0)) < 2.0,
+              f'{math.degrees(yaw - yaw0):.1f} deg')
+        call(op.stop)
+        req.parameters = [Parameter('tracking_inplane_hold', value=False).to_parameter_msg()]
+        wait_for(op.params.call_async(req).done, 5)
         check('node alive throughout', node.poll() is None, f'exit code {node.poll()}')
 
         # The track profile, as before operator gains (flag false).

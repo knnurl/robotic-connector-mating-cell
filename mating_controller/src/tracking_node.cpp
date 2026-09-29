@@ -825,14 +825,14 @@ private:
         double inplane_rad = inplane_deg * M_PI / 180.0;
         if (inplane_hold) {
             // cell_panel's in-plane 'off': keep the angle the camera sees now.
+            // With no marker in view (the panel's blind start) the angle is
+            // NaN, taken by the tick from the first fresh raw detection; the
+            // tick holds until then anyway.
             const auto pose = fresh_marker_pose();
             const auto t_cam_marker =
                 pose ? marker_in(camera_frame, *pose) : std::optional<tf2::Transform>();
-            if (!t_cam_marker) {
-                return "tracking_inplane_hold needs the marker in view in " + camera_frame +
-                       " at start";
-            }
-            inplane_rad = tracking_law::inplane_rad(t_cam_marker->getRotation());
+            inplane_rad = t_cam_marker ? tracking_law::inplane_rad(t_cam_marker->getRotation())
+                                       : NAN;
         }
 
         const auto measured = fresh_measured_ee();
@@ -981,6 +981,7 @@ private:
         t_tcp_cam_ = t_tcp_cam;
         standoff_m_ = standoff_m;
         inplane_rad_ = inplane_rad;
+        camera_frame_ = camera_frame;
         open_log();
         tracking_ = true;   // last: everything the tick reads is in place
         starting_ = false;
@@ -1001,7 +1002,10 @@ private:
                     "%s, Z floor %.0f mm, tool offset %.1f mm at %.2f deg (%s -> the "
                     "controller's EE frame).",
                     params_.gain_profile.c_str(), standoff_m * 1000.0,
-                    inplane_rad * 180.0 / M_PI, inplane_hold ? " (held as found)" : "",
+                    inplane_rad * 180.0 / M_PI,
+                    !inplane_hold ? ""
+                    : std::isfinite(inplane_rad) ? " (held as found)"
+                                                 : " (taken when the marker is first seen)",
                     tracking_law::over_lead_name(policy_.load()),
                     profile_.at(3).as_double(), params_.goal_glide ? "on" : "off",
                     cfg_.z_floor_m * 1000.0,
@@ -1140,6 +1144,19 @@ private:
         const auto t_base_marker = marker_in(params_.base_frame, *pose);
         if (!t_base_marker) {
             return hold(measured, stamp_s, "no transform");
+        }
+        if (!std::isfinite(inplane_rad_)) {
+            // A blind start with in-plane 'off': the angle the camera sees at
+            // the first real detection, as START would have taken it.
+            const auto t_cam_marker = marker_in(camera_frame_, *pose);
+            if (!t_cam_marker) {
+                return hold(measured, stamp_s, "no transform");
+            }
+            inplane_rad_ = tracking_law::inplane_rad(t_cam_marker->getRotation());
+            RCLCPP_INFO(get_logger(), "Marker seen: in-plane held at %.1f deg as found.",
+                        inplane_rad_ * 180.0 / M_PI);
+            std::lock_guard<std::mutex> status_lock(status_mutex_);
+            status_.inplane_deg = inplane_rad_ * 180.0 / M_PI;
         }
         const tf2::Transform frame_goal_ee = tracking_law::goal_in_ee(
             tracking_law::camera_centred_goal(*t_base_marker, standoff_m_, inplane_rad_,
@@ -1496,7 +1513,8 @@ private:
     tf2::Transform t_tcp_ee_{tf2::Transform::getIdentity()};
     tf2::Transform t_tcp_cam_{tf2::Transform::getIdentity()};
     double standoff_m_{0.10};
-    double inplane_rad_{0.0};
+    double inplane_rad_{0.0};           // NaN until the first detection (blind start)
+    std::string camera_frame_;
     bool held_{false};
 
     std::mutex status_mutex_;

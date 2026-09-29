@@ -923,7 +923,8 @@ class MainWindow(QMainWindow):
         self.blind_cb.setToolTip('Skips every marker check at START (visible, entry, lead cap). '
                                  'The node holds until it sees the marker, then approaches it at '
                                  'TRACK SPEED - or holds past its 60 mm lead cap under over lead '
-                                 "'hold'. Off at every launch.")
+                                 "'hold'. With in-plane 'off' the angle is the one the camera "
+                                 'sees at that first sighting. Off at every launch.')
         self.blind_cb.toggled.connect(lambda on: self.b.set_param('track_blind', bool(on)))
         g.addWidget(self.blind_cb, 5, 0, 1, 2)
 
