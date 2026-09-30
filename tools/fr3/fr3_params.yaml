@@ -216,7 +216,12 @@
     grip_target_finger_axis: 'y'        # x | y | any: the fingers close along B's y (operator, 2026-09-29)
     grip_target_offset_m: [0.0, 0.0]    # m in B's own x/y: a trim added to every slot
     grip_target_max_age_s: 600.0        # s; an older sighting refuses PLACE AT B (= cell settings.yaml)
-    grip_target_max_tilt_deg: 10.0      # deg; B must lie flat
+    grip_target_max_tilt_deg: 10.0      # deg; B (and, when level, the cube) must lie flat
+    # Where GRIP and PLACE AT B take the surface normal from: level (base z
+    # up, the marker gives position + yaw; its PnP tilt read 2-5 deg off on
+    # 2026-09-30) or marker (all 6 DoF). Later 'object', the 6-DoF /object/*
+    # pose, once validated - it retires level.
+    grip_surface_normal: level
     grip_carry_clearance_m: 0.03        # m above both ends for the level carry
     grip_tol_m: 0.003                   # m settled within, before the next step
     grip_tol_deg: 3.0                   # deg

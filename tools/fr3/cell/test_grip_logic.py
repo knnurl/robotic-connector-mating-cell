@@ -227,6 +227,28 @@ def test_a_slot_must_be_a_whole_number():
     assert G.slot_offset([-0.06, 0.0, 0.06, 0.0], 2.0) == (0.06, 0.0)
 
 
+def test_level_surface_keeps_position_and_yaw_but_not_the_tilt():
+    tilted = rz(155) @ G.from_rotvec(np.array([math.radians(4.0), math.radians(-2.0), 0.0]))
+    L = G.surface_frame(tilted, 'level')
+    assert L[:, 2] == pytest.approx([0, 0, 1], abs=1e-12)
+    assert L.T @ L == pytest.approx(np.eye(3), abs=1e-12) and np.linalg.det(L) == pytest.approx(1.0)
+    assert math.degrees(math.atan2(L[1, 0], L[0, 0])) == pytest.approx(155.0, abs=0.2)
+    assert G.surface_frame(tilted, 'marker') is tilted
+    with pytest.raises(ValueError):
+        G.surface_frame(tilted, 'object')                 # not built yet: refused, not ignored
+
+
+def test_a_level_place_is_vertical_even_when_b_reads_tilted():
+    tilted = rz(155) @ G.from_rotvec(np.array([math.radians(5.2), 0.0, 0.0]))
+    B = (np.array([0.43, -0.33, 0.08]), tilted)
+    p, R = G.place_tcp(B[0], G.surface_frame(B[1], 'level'), G.slot_offset([-0.06, 0, 0.06, 0], 1),
+                       0.055, 0.025, DOWN, 'y')
+    assert R[:, 2] == pytest.approx([0, 0, -1], abs=1e-12)     # straight down: a square set-down
+    assert p[2] == pytest.approx(0.08 + 0.030)                 # height from B's origin, not its tilt
+    _, Rm = G.place_tcp(B[0], B[1], (-0.06, 0), 0.055, 0.025, DOWN, 'y')
+    assert math.degrees(math.acos(-Rm[2, 2])) == pytest.approx(5.2, abs=0.01)   # the old behaviour
+
+
 def test_a_leaning_target_is_measured():
     assert G.target_tilt_deg(np.eye(3)) == pytest.approx(0.0)
     lean = G.from_rotvec(np.array([math.radians(12), 0.0, 0.0]))

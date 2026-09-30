@@ -184,6 +184,31 @@ def joint_problem(q, lower, upper, margin_rad):
     return None
 
 
+SURFACE_NORMALS = ('level', 'marker')     # later: 'object', the 6-DoF /object/* pose
+
+
+def surface_frame(R, source):
+    """The frame a GRIP or PLACE works in. 'marker': the marker's own, all
+    6 DoF. 'level': the surface taken as level - base z up, the marker's
+    yaw kept - because a marker's PnP tilt is its weakest DoF (2-5 deg off
+    on 2026-09-30, where the TCP copied it into a tilted set-down). The
+    caller still refuses a surface whose measured tilt is past its limit,
+    so a truly leaning one is never silently flattened."""
+    if source == 'marker':
+        return R
+    if source != 'level':
+        raise ValueError(f"grip_surface_normal must be one of {', '.join(SURFACE_NORMALS)}, "
+                         f'not {source!r}')
+    z = np.array([0.0, 0.0, 1.0])
+    x = R[:, 0] - z * R[2, 0]
+    if np.linalg.norm(x) < 0.5:                    # x near vertical: take the yaw from y
+        y = R[:, 1] - z * R[2, 1]
+        y = y / np.linalg.norm(y)
+        return np.column_stack([np.cross(y, z), y, z])
+    x = x / np.linalg.norm(x)
+    return np.column_stack([x, np.cross(z, x), z])
+
+
 def target_tilt_deg(target_R):
     """How far a place target's normal leans from the base's vertical."""
     return math.degrees(math.acos(max(-1.0, min(1.0, float(target_R[2, 2])))))

@@ -102,6 +102,7 @@ DEFAULTS = {
     'grip_target_finger_axis': 'y',
     'grip_target_max_age_s': 600.0,
     'grip_target_max_tilt_deg': 10.0,
+    'grip_surface_normal': 'level',
     'grip_carry_clearance_m': 0.03,
 }
 FRICTION_N = 6.5                 # tracking_law kFrictionBreakawayN
@@ -366,6 +367,16 @@ class GripNode(Node):
             raise Failed(why)
         self.check_controller()
         marker = self.marker_in_base()
+        src = self.p('grip_surface_normal')
+        tilt = G.target_tilt_deg(marker[1])
+        if src == 'level' and tilt > self.p('grip_target_max_tilt_deg'):
+            raise Failed(f'the cube leans {tilt:.0f} deg - grip_surface_normal is level, so it '
+                         'must stand on a level surface')
+        measured_R = marker[1]
+        try:
+            marker = (marker[0], G.surface_frame(marker[1], src))
+        except ValueError as e:
+            raise Failed(str(e))
         t_tcp_ee = self.tool_offset()
         ee_now = self.state()[0]
         tcp_now = G.compose(ee_now, G.inverse(t_tcp_ee))
@@ -375,7 +386,11 @@ class GripNode(Node):
         lift = G.above(grasp, marker[1], self.p('grip_lift_m'))
         for name, pose in (('approach', approach), ('grasp', grasp), ('lift', lift)):
             self.check_target(name, G.compose(pose, t_tcp_ee))
-        self.trace({'rec': 'plan', 'marker': marker, 'grasp': grasp, 'approach': approach,
+        # 'marker' is the frame the grip used; the camera's own rotation
+        # (the PnP tilt that 'level' discards) is kept beside it.
+        self.trace({'rec': 'plan', 'marker': marker, 'marker_R_measured': measured_R,
+                    'surface_normal': src, 'marker_tilt_deg': tilt,
+                    'grasp': grasp, 'approach': approach,
                     'lift': lift, 't_tcp_ee': t_tcp_ee})
         self.step('open', lambda: self.hand_move(G.open_width(cube, margin)))
         self.step('approach', lambda: self.move_to(approach, t_tcp_ee, self.p('grip_travel_mps')))
@@ -431,7 +446,10 @@ class GripNode(Node):
         cube = self.p('grip_cube_m')
         slot = self.p('grip_target_slot')
         trim = self.p('grip_target_offset_m')
+        src = self.p('grip_surface_normal')
+        target_R_measured = tgt[1]
         try:
+            tgt = (tgt[0], G.surface_frame(tgt[1], src), tgt[2])
             sx, sy = G.slot_offset(self.p('grip_target_slots_m'), slot)
             slot = int(slot)
             self.check_controller()
@@ -459,6 +477,8 @@ class GripNode(Node):
                            ('set-down', place)):
             self.check_target(name, G.compose(pose, t_tcp_ee))
         self.trace({'rec': 'plan', 'target': tgt[:2], 'target_age_s': age, 'slot': slot,
+                    'target_R_measured': target_R_measured, 'surface_normal': src,
+                    'target_tilt_deg': tilt,
                     'slot_xy_m': [sx + trim[0], sy + trim[1]], 'place': place,
                     'approach': approach, 'rise': rise, 'across': across})
         travel = self.p('grip_travel_mps')
