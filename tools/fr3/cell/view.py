@@ -795,6 +795,13 @@ class MainWindow(QMainWindow):
         r.addWidget(self._btn('grip', height=36), 2)
         r.addWidget(self._btn('place', height=36), 1)
         r.addWidget(self._btn('place_b', height=36), 1)
+        # Beside its button, not in the drawer: chosen at the moment of PLACE AT B.
+        r.addWidget(lab('slot', 'caption'))
+        self.b_slot = self._combo(['1', '2'], '1',
+                                  lambda t: self.b.set_param('b_slot', int(t)), 60)
+        self.b_slot.setToolTip("PLACE AT B's slot: 1 = B's -x side, 2 = B's +x side, "
+                               '60 mm from the marker (SLOTS_PLAN.md)')
+        r.addWidget(self.b_slot)
         self.grip_state = lab('', 'caption', wrap=True)
         r.addWidget(self.grip_state, 3)
         self.tq_sec.v.addLayout(r)
@@ -942,13 +949,8 @@ class MainWindow(QMainWindow):
         self.grip_cube.valueChanged.connect(lambda x: self.b.set_param('grip_cube_mm', float(x)))
         self.grip_force = self._spin(st.grip_force_n, 5, 70, 0, None)
         self.grip_force.valueChanged.connect(lambda x: self.b.set_param('grip_force_n', float(x)))
-        self.b_slot = self._combo(['1', '2'], '1',
-                                  lambda t: self.b.set_param('b_slot', int(t)), 90)
-        self.b_slot.setToolTip("PLACE AT B's slot: 1 = B's -x side, 2 = B's +x side, "
-                               '60 mm from the marker (SLOTS_PLAN.md)')
         for r, (name, w) in enumerate((('cube  mm', self.grip_cube),
-                                       ('grasp force  N', self.grip_force),
-                                       ('B slot', self.b_slot))):
+                                       ('grasp force  N', self.grip_force))):
             g.addWidget(lab(name, 'caption'), r, 0)
             g.addWidget(w, r, 1)
 
