@@ -938,11 +938,26 @@ private:
             }
         }
         // Operator gains: only the profile's slew goes out (TRACK SPEED
-        // overrides it right after START); k and zeta stay the operator's.
+        // overrides it right after START); k stays the operator's. zeta does
+        // too, but never above the profile's: a moving wrist turns rotational
+        // damping into a 40 Hz J1 buzz (TRACKING_SPEC O1: zeta 1.0 on 09-23,
+        // the operator's 0.8 at the 09-30 buzz stop). STOP restores the
+        // snapshot, the operator's zeta included.
         std::vector<rclcpp::Parameter> session;
         for (const auto &prm : profile_) {
             if (!params_.use_operator_gains || prm.get_name().rfind("setpoint_slew", 0) == 0) {
                 session.push_back(prm);
+            }
+        }
+        if (params_.use_operator_gains) {
+            const double zeta_op = (*snapshot)[2].as_double();
+            const double zeta_cap = profile_.at(2).as_double();
+            if (zeta_op > zeta_cap) {
+                session.emplace_back("damping_ratio", zeta_cap);
+                RCLCPP_INFO(get_logger(),
+                            "Damping capped for TRACK: zeta %.2f -> %.2f (the '%s' profile's); "
+                            "STOP restores %.2f.",
+                            zeta_op, zeta_cap, params_.gain_profile.c_str(), zeta_op);
             }
         }
         const auto [ok, reason] = apply_params(session);

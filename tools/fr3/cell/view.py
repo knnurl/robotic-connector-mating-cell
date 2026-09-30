@@ -1607,7 +1607,12 @@ class MainWindow(QMainWindow):
             self._set_pending(dict(applied))
         pend = self.pending_gains or {}
         own = trk and s.track.get('gains') == 'operator'     # TRACK kept the operator's gains
-        set_text(self.gain_state, 'your gains in force - locked while tracking' if own else
+        z_in, z_own = (applied or {}).get('zeta'), pend.get('zeta')
+        capped = own and z_in is not None and z_own is not None and z_in < z_own - 1e-9
+        set_text(self.gain_state,
+                 f'your k in force, zeta capped at {z_in:.2f} for TRACK (TRACKING_SPEC O1) - '
+                 f'{z_own:.2f} comes back at END TRACK' if capped else
+                 'your gains in force - locked while tracking' if own else
                  'tracking profile in force - yours come back at END TRACK' if trk else
                  'applied' + ('  →  pending (amber)' if s.gains_pending and applied else ''))
         for k, lbl in self.gain_lbls.items():

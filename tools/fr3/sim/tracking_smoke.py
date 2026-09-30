@@ -211,6 +211,9 @@ class Controller(Node):
     def slew(self):
         return float(self.get_parameter('setpoint_slew_mps').value)
 
+    def zeta(self):
+        return float(self.get_parameter('damping_ratio').value)
+
 
 class ControllerManager(Node):
     def __init__(self):
@@ -304,6 +307,9 @@ def main():
         check('operator gains kept at START', ctl.k_pos() == OPERATOR_GAINS, str(ctl.k_pos()))
         check('only the profile slew written', abs(ctl.slew() - TRACK_SLEW) < 1e-9,
               str(ctl.slew()))
+        # TRACKING_SPEC O1: the operator's zeta 1.0 is capped at the profile's 0.5
+        check('the operator zeta is capped at the profile damping', abs(ctl.zeta() - 0.5) < 1e-9,
+              str(ctl.zeta()))
         check('status says gains=operator', op.status.get('gains') == 'operator',
               str(op.status.get('gains')))
         check('status tracking', wait_for(lambda: op.state()[0] == 'tracking', 3),
@@ -372,6 +378,7 @@ def main():
         check('STOP succeeds', bool(r and r.success), r.message if r else 'no reply')
         check('operator gains untouched', ctl.k_pos() == OPERATOR_GAINS, str(ctl.k_pos()))
         check('operator slew restored', abs(ctl.slew() - OPERATOR_SLEW) < 1e-9, str(ctl.slew()))
+        check('operator zeta restored', abs(ctl.zeta() - 1.0) < 1e-9, str(ctl.zeta()))
         check('status idle', wait_for(lambda: op.state()[0] == 'idle', 3), str(op.state()))
         logs = [f for f in os.listdir(log_dir)
                 if f.startswith('tracking_') and f.endswith('.jsonl')]
