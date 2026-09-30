@@ -97,6 +97,9 @@ DEFAULTS = {
     'grip_arrive_window_m': 0.015,
     'grip_target_topic': '/aruco/target_pose_raw',
     'grip_target_offset_m': [0.0, 0.0],
+    'grip_target_slots_m': [-0.06, 0.0, 0.06, 0.0],
+    'grip_target_slot': 1.0,        # a double: the panel's parameter writer sends numbers as doubles
+    'grip_target_finger_axis': 'y',
     'grip_target_max_age_s': 600.0,
     'grip_target_max_tilt_deg': 10.0,
     'grip_carry_clearance_m': 0.03,
@@ -105,6 +108,7 @@ FRICTION_N = 6.5                 # tracking_law kFrictionBreakawayN
 FRICTION_NM = 0.6                # tracking_law kFrictionBreakawayNm
 LEAD_FORCE_MAX_N = 15.0          # tracking_law kLeadForceMaxN, per tool axis here
 LEAD_TORQUE_MAX_NM = 1.5         # the track profile's 0.017 rad * 90 Nm/rad
+Q7_PREDICT_SLACK_RAD = 0.15     # PLACE AT B: extra joint-7 room for the predicted wrist turn
 STOP_GRACE_S = 1.0               # a STOP this recent refuses a GRIP/PLACE that follows it
 
 
@@ -425,16 +429,37 @@ class GripNode(Node):
             raise Failed(f'target B leans {tilt:.0f} deg - it must lie flat on the table')
         _grasp, _marker_R, t_tcp_ee = self.holding
         cube = self.p('grip_cube_m')
-        self.check_controller()
-        tcp_now = G.compose(self.state()[0], G.inverse(t_tcp_ee))
-        place = G.place_tcp(tgt[0], tgt[1], self.p('grip_target_offset_m'), cube,
-                            G.grasp_depth(cube, self.p('grip_depth_m')), tcp_now[1])
+        slot = self.p('grip_target_slot')
+        trim = self.p('grip_target_offset_m')
+        try:
+            sx, sy = G.slot_offset(self.p('grip_target_slots_m'), slot)
+            slot = int(slot)
+            self.check_controller()
+            ee, _f, q, _t = self.state()
+            tcp_now = G.compose(ee, G.inverse(t_tcp_ee))
+            place = G.place_tcp(tgt[0], tgt[1], (sx + trim[0], sy + trim[1]), cube,
+                                G.grasp_depth(cube, self.p('grip_depth_m')), tcp_now[1],
+                                self.p('grip_target_finger_axis'))
+        except ValueError as e:
+            raise Failed(str(e))
+        # Two finger directions 180 deg apart leave up to 90 deg of wrist
+        # turn for the carry, and joint limits are otherwise only checked
+        # while moving: pick the way joint 7 has room for, or refuse now.
+        lo, hi = self.p('tracking_joint_lower')[6], self.p('tracking_joint_upper')[6]
+        R = G.wrist_choice(tcp_now[1], place[1], q[6], lo, hi,
+                           self.p('grip_joint_margin_rad') + Q7_PREDICT_SLACK_RAD)
+        if R is None:
+            raise Failed(f'joint 7 ({math.degrees(q[6]):.0f} deg) has no room to turn the cube '
+                         'to either finger direction at B - re-grip with the wrist nearer '
+                         'the middle of its range')
+        place = (place[0], R)
         approach = G.above(place, tgt[1], self.p('grip_approach_m'))
         rise, across, _ = G.carry_path(tcp_now, approach, self.p('grip_carry_clearance_m'))
         for name, pose in (('rise', rise), ('carry', across), ('approach', approach),
                            ('set-down', place)):
             self.check_target(name, G.compose(pose, t_tcp_ee))
-        self.trace({'rec': 'plan', 'target': tgt[:2], 'target_age_s': age, 'place': place,
+        self.trace({'rec': 'plan', 'target': tgt[:2], 'target_age_s': age, 'slot': slot,
+                    'slot_xy_m': [sx + trim[0], sy + trim[1]], 'place': place,
                     'approach': approach, 'rise': rise, 'across': across})
         travel = self.p('grip_travel_mps')
         self.step('rise', lambda: self.move_to(rise, t_tcp_ee, travel, contact='hold'))
@@ -445,8 +470,8 @@ class GripNode(Node):
         self.step('open', lambda: self.hand_move(G.open_width(cube, self.p('grip_open_margin_m'))))
         self.holding = None
         self.step('retreat', lambda: self.move_to(approach, t_tcp_ee, travel))
-        return (f'placed the cube on target B at ({tgt[0][0]*1000:.0f}, {tgt[0][1]*1000:.0f}) mm '
-                'and backed off above it')
+        return (f'placed the cube in slot {slot} of target B (B at {tgt[0][0]*1000:.0f}, '
+                f'{tgt[0][1]*1000:.0f} mm) and backed off above it')
 
     def step(self, name, fn):
         if self._stop.is_set():

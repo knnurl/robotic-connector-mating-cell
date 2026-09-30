@@ -171,6 +171,62 @@ def test_the_place_offset_is_in_the_targets_own_axes():
     assert p[:2] == pytest.approx([0.0, 0.030])
 
 
+def test_slot_is_60mm_along_bs_x_whichever_way_b_lies():
+    slots = [-0.06, 0.0, 0.06, 0.0]
+    for yaw in (0, 37, 155, 270):
+        target = (np.array([0.51, 0.41, 0.072]), rz(yaw))
+        for slot, sign in ((1, -1), (2, 1)):
+            p, _ = G.place_tcp(target[0], target[1], G.slot_offset(slots, slot), 0.055, 0.025,
+                               DOWN, 'y')
+            local = target[1].T @ (p - target[0])
+            assert local == pytest.approx([sign * 0.06, 0.0, 0.030], abs=1e-9)
+
+
+def test_slot_lookup_refuses_what_does_not_exist():
+    assert G.slot_offset([-0.06, 0.0, 0.06, 0.0], 2) == (0.06, 0.0)
+    for bad_slots, slot in (([-0.06, 0.0, 0.06, 0.0], 3), ([-0.06, 0.0, 0.06, 0.0], 0),
+                            ([-0.06, 0.0, 0.06], 1), ([], 1)):
+        with pytest.raises(ValueError):
+            G.slot_offset(bad_slots, slot)
+    with pytest.raises(ValueError):
+        G.place_tcp(np.zeros(3), np.eye(3), (0, 0), 0.055, 0.025, DOWN, 'z')
+
+
+def test_fingers_close_along_bs_y_whatever_yaw_the_hand_arrives_with():
+    target_R = rz(155)
+    for arrive in range(0, 360, 15):
+        now = rz(arrive) @ DOWN
+        _, R = G.place_tcp(np.zeros(3), target_R, (0.06, 0.0), 0.055, 0.025, now, 'y')
+        assert abs(float(R[:, 1] @ target_R[:, 1])) == pytest.approx(1.0)     # closing axis
+        assert R[:, 2] == pytest.approx([0, 0, -1], abs=1e-9)
+        # least turn of the two allowed: never more than 90 deg from the arrival yaw
+        assert G.rotation_angle(R @ now.T) <= math.radians(90) + 1e-9
+    _, Rx = G.place_tcp(np.zeros(3), target_R, (0, 0), 0.055, 0.025, DOWN, 'x')
+    assert abs(float(Rx[:, 1] @ target_R[:, 0])) == pytest.approx(1.0)
+
+
+def test_yaw_turn_is_signed_about_the_tcp_z():
+    assert math.degrees(G.yaw_turn(DOWN, DOWN @ rz(30))) == pytest.approx(30.0)
+    assert math.degrees(G.yaw_turn(DOWN, DOWN @ rz(-70))) == pytest.approx(-70.0)
+
+
+def test_the_wrist_takes_the_other_finger_direction_when_joint_7_has_no_room():
+    now, best = DOWN, DOWN @ rz(80)                 # the least turn: +80 deg
+    lo, hi, room = -3.0159, 3.0159, 0.2
+    assert G.wrist_choice(now, best, 0.0, lo, hi, room) is best
+    other = G.wrist_choice(now, best, 2.5, lo, hi, room)   # 2.5 + 1.40 rad is past the stop
+    assert other is not None
+    assert math.degrees(G.yaw_turn(now, other)) == pytest.approx(-100.0)
+    assert other[:, 1] == pytest.approx(-best[:, 1])       # same finger axis, other way round
+    assert G.wrist_choice(now, DOWN @ rz(90), 2.5, 1.5, 3.0159, room) is None   # 4.07 or 0.93
+
+
+def test_a_slot_must_be_a_whole_number():
+    with pytest.raises(ValueError):
+        G.slot_offset([-0.06, 0.0, 0.06, 0.0], 1.5)
+    assert G.slot_offset([-0.06, 0.0, 0.06, 0.0], 2.0) == (0.06, 0.0)
+
+
 def test_a_leaning_target_is_measured():
     assert G.target_tilt_deg(np.eye(3)) == pytest.approx(0.0)
     lean = G.from_rotvec(np.array([math.radians(12), 0.0, 0.0]))

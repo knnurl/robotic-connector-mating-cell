@@ -14,15 +14,16 @@ HAND_MAX_OPEN_M = 0.080         # Franka Hand stroke
 MIN_SIDE_CLEARANCE_M = 0.004    # per side, fully open, before the descent
 
 
-def grasp_tcp(marker_p, marker_R, tcp_R_now, depth_m):
+def grasp_tcp(marker_p, marker_R, tcp_R_now, depth_m, finger_axes=(0, 1)):
     """The TCP pose that grips the cube: depth_m below the marked top face,
     approaching against the marker normal, fingers closing across one pair
-    of faces. Of the four face-aligned yaws, the one nearest the hand's
-    current yaw, so the wrist turns as little as possible."""
+    of faces. Of the face-aligned yaws whose closing axis (TCP y) lies along
+    one of finger_axes (0 = the marker's x, 1 = its y), the one nearest the
+    hand's current yaw, so the wrist turns as little as possible."""
     n = marker_R[:, 2]
     z = -n                                              # approach: into the top face
     best = None
-    for y in (marker_R[:, 0], -marker_R[:, 0], marker_R[:, 1], -marker_R[:, 1]):
+    for y in [s * marker_R[:, a] for a in finger_axes for s in (1, -1)]:
         y = y - z * float(y @ z)
         y = y / np.linalg.norm(y)
         R = np.column_stack([np.cross(y, z), y, z])
@@ -188,15 +189,53 @@ def target_tilt_deg(target_R):
     return math.degrees(math.acos(max(-1.0, min(1.0, float(target_R[2, 2])))))
 
 
-def place_tcp(target_p, target_R, offset_xy, cube_m, depth_m, tcp_R_now):
+FINGER_AXES = {'any': (0, 1), 'x': (0,), 'y': (1,)}
+
+
+def place_tcp(target_p, target_R, offset_xy, cube_m, depth_m, tcp_R_now, finger_axis='any'):
     """The TCP pose that sets a held cube down on a flat target marker: the
     cube centred on target + offset (in the target's own x/y), resting on
     the target's plane, its faces turned to the target's axes by the yaw
-    needing the least wrist turn. The Hand holds the cube depth_m below its
-    top face, so the TCP ends up (cube - depth) above the plane."""
+    needing the least wrist turn - among those whose fingers close along the
+    target's finger_axis ('x', 'y', or 'any'). The Hand holds the cube
+    depth_m below its top face, so the TCP ends up (cube - depth) above the
+    plane."""
+    if finger_axis not in FINGER_AXES:
+        raise ValueError(f"grip_target_finger_axis must be x, y or any, not {finger_axis!r}")
     centre = target_p + target_R[:, 0] * offset_xy[0] + target_R[:, 1] * offset_xy[1]
     top = centre + target_R[:, 2] * cube_m
-    return grasp_tcp(top, target_R, tcp_R_now, depth_m)
+    return grasp_tcp(top, target_R, tcp_R_now, depth_m, FINGER_AXES[finger_axis])
+
+
+def slot_offset(slots_flat, slot):
+    """Slot `slot` (1-based) of B: its centre (x, y) in B's own frame, from
+    the flat list [x1, y1, x2, y2, ...] (a ROS parameter cannot nest)."""
+    if len(slots_flat) < 2 or len(slots_flat) % 2:
+        raise ValueError('grip_target_slots_m needs x, y pairs')
+    n = len(slots_flat) // 2
+    if float(slot) != int(slot) or not 1 <= int(slot) <= n:
+        raise ValueError(f'slot {slot:g} does not exist - B has slots 1 to {n}')
+    i = 2 * (int(slot) - 1)
+    return float(slots_flat[i]), float(slots_flat[i + 1])
+
+
+def yaw_turn(R_from, R_to):
+    """The signed turn (rad) about R_from's z that brings it to R_to's yaw.
+    For a TCP pointing down, joint 7 (the flange axis) turns by about this."""
+    D = R_from.T @ R_to
+    return math.atan2(float(D[1, 0]), float(D[0, 0]))
+
+
+def wrist_choice(R_now, R_best, q7, q7_lower, q7_upper, room_rad):
+    """R_best, or the same pose turned 180 deg about its z (the fingers on
+    the same axis, the other way round) when R_best would bring joint 7
+    within room_rad of a stop; the smaller turn first. None if neither fits:
+    refuse before moving rather than halt the carry mid-air."""
+    for R in sorted((R_best, R_best @ np.diag([-1.0, -1.0, 1.0])),
+                    key=lambda R: abs(yaw_turn(R_now, R))):
+        if q7_lower + room_rad <= q7 + yaw_turn(R_now, R) <= q7_upper - room_rad:
+            return R
+    return None
 
 
 def carry_path(tcp_now, approach, clearance_m):

@@ -206,10 +206,15 @@
     grip_arrive_window_m: 0.015         # m; PLACE takes a contact as the set-down only this close to it
     # PLACE AT B: target marker B (cam_pub target_marker_id, launch arg, default
     # id 1) lies flat on the table; grip_node remembers its pose whenever it is
-    # steadily in view. The cube is set down centred on B + offset (B's x/y),
-    # resting on B's plane, faces turned to B's axes.
+    # steadily in view. The cube is set down in one of B's slots, centred on
+    # B + slot + offset (B's x/y), resting on B's plane, faces turned to B's
+    # axes with the fingers closing along B's grip_target_finger_axis.
+    # SLOTS_PLAN.md; cell_panel writes grip_target_slot before every PLACE AT B.
     grip_target_topic: /aruco/target_pose_raw
-    grip_target_offset_m: [0.0, 0.0]    # m in B's own x/y
+    grip_target_slots_m: [-0.06, 0.0, 0.06, 0.0]   # m in B's x/y: slot 1, slot 2 (PLACEHOLDER pitch: measure)
+    grip_target_slot: 1.0               # 1-based; the panel's 'B slot'. A double: cell_panel sends numbers as doubles
+    grip_target_finger_axis: 'y'        # x | y | any: the fingers close along B's y (operator, 2026-09-29)
+    grip_target_offset_m: [0.0, 0.0]    # m in B's own x/y: a trim added to every slot
     grip_target_max_age_s: 600.0        # s; an older sighting refuses PLACE AT B (= cell settings.yaml)
     grip_target_max_tilt_deg: 10.0      # deg; B must lie flat
     grip_carry_clearance_m: 0.03        # m above both ends for the level carry

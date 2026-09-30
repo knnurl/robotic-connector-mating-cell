@@ -942,8 +942,13 @@ class MainWindow(QMainWindow):
         self.grip_cube.valueChanged.connect(lambda x: self.b.set_param('grip_cube_mm', float(x)))
         self.grip_force = self._spin(st.grip_force_n, 5, 70, 0, None)
         self.grip_force.valueChanged.connect(lambda x: self.b.set_param('grip_force_n', float(x)))
+        self.b_slot = self._combo(['1', '2'], '1',
+                                  lambda t: self.b.set_param('b_slot', int(t)), 90)
+        self.b_slot.setToolTip("PLACE AT B's slot: 1 = B's -x side, 2 = B's +x side, "
+                               '60 mm from the marker (SLOTS_PLAN.md)')
         for r, (name, w) in enumerate((('cube  mm', self.grip_cube),
-                                       ('grasp force  N', self.grip_force))):
+                                       ('grasp force  N', self.grip_force),
+                                       ('B slot', self.b_slot))):
             g.addWidget(lab(name, 'caption'), r, 0)
             g.addWidget(w, r, 1)
 
@@ -1505,6 +1510,8 @@ class MainWindow(QMainWindow):
                 text = f'AUTO-CONVERGE   →   {self.target.currentText()} mm standoff'
             elif name == 'grip':
                 text = f'GRIP  {s.grip_cube_mm:.0f} mm cube'
+            elif name == 'place_b':
+                text = f'PLACE AT B  →  slot {self.b_slot.currentText()}'
             elif name == 'track_fast':
                 fast = logic.speed_torque(self.st.track_fast_pct, self.st, True)
                 text = (('▲ FAST ON  ' if s.track_fast else 'FAST  ')

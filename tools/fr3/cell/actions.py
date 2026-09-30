@@ -57,6 +57,7 @@ class Params:
     track_blind: bool = False         # drawer: TRACK may start without the marker; off at launch
     grip_cube_mm: float = 55.0        # drawer: the cube GRIP grips
     grip_force_n: float = 20.0        # drawer: the Hand's grasp force
+    b_slot: int = 1                   # drawer: PLACE AT B's slot (SLOTS_PLAN.md)
     setpoint_mm: float = float(core.SETPOINT_MM_DEFAULT)
     axis: str = core.AXIS_CHOICES[0]
     over_lead: str = core.OVER_LEAD_DEFAULT
@@ -1396,15 +1397,17 @@ class Cell:
             return False, why
         if self.tracking:
             return False, 'end TRACK first - PLACE AT B and TRACK both drive the equilibrium'
-        ok, msg = self.n.set_grip_params(self._grip_box())
+        slot = int(self.params.b_slot)
+        ok, msg = self.n.set_grip_params({'grip_target_slot': float(slot), **self._grip_box()})
         if not ok:
-            return False, f'could not hand the workspace box to {core.GRIP_NODE} ({msg})'
+            return False, f'could not hand slot {slot} and the box to {core.GRIP_NODE} ({msg})'
         if self.abort:
             return False, 'PLACE AT B not started: STOP NOW'
+        self.say(f'PLACE AT B: slot {slot} - STOP NOW holds where the arm is')
         self.setpoint = None
         ok, msg = self.n.call_trigger(self.n.place_at_cli, core.GRIP_CALL_TIMEOUT_S, 'grip_node')
         self.setpoint = None
-        self.trace({'rec': 'place_at', 'ok': ok, 'msg': msg})
+        self.trace({'rec': 'place_at', 'ok': ok, 'msg': msg, 'slot': slot})
         self.say(f'PLACE AT B: {msg}')
         return ok, msg
 

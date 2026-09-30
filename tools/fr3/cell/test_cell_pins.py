@@ -399,6 +399,11 @@ def test_grip_node_defaults_are_the_shipped_params_and_the_panels():
             assert shipped[k] == pytest.approx(v) if not isinstance(v, str) else shipped[k] == v, k
     assert shipped['grip_cube_m'] * 1000 == pytest.approx(ST.grip_cube_mm)
     assert shipped['grip_force_n'] == pytest.approx(ST.grip_force_n)
+    # The panel's writer sends every number as a double (ros_node._param_msg);
+    # an integer declaration would refuse every PLACE AT B (review, 2026-09-30).
+    assert isinstance(shipped['grip_target_slot'], float)
+    assert isinstance(grip_node.DEFAULTS['grip_target_slot'], float)
+    assert all(isinstance(v, float) for v in shipped['grip_target_slots_m'])
 
 
 def test_target_b_age_limit_is_one_number():
