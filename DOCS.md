@@ -16,6 +16,7 @@ what duplicates what, so the next person knows which copy to believe.
 | [TODO.md](TODO.md) | Prioritised task list, plus lessons 1-20 that must not be re-learned. | **Current** |
 | [ARM_CHECKLIST.md](ARM_CHECKLIST.md) | What the next arm session must check: everything built offline since 2026-09-25, in order, with pass criteria. | **Current** - tick it off at the arm |
 | [TRACKING_SPEC.md](TRACKING_SPEC.md) | Implementation spec for continuous marker tracking, written against measured numbers. | **Current**, and amended in place where implementation proved it wrong — the **[AMENDED]** blocks are the parts to read |
+| [SLOTS_PLAN.md](SLOTS_PLAN.md) | Target B's two slots and a vision-checked slot state machine for PLACE AT B / GRIP with several cubes: decisions of 2026-09-29, open questions, phases. | **Plan**, nothing built yet; settle the open questions first |
 | [PERCEPTION_PLAN.md](PERCEPTION_PLAN.md) | The marker-free perception plan: the `/object/*` contract and phases 0-7. | **Current** plan. Phases 0-2 are partly implemented; what is done is in TODO.md |
 
 ## Reference manuals

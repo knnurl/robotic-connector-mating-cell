@@ -21,6 +21,11 @@ believe when two disagree: [DOCS.md](DOCS.md).
 3. **Perception Phase 4 (`depth_checked`) is built offline** as well: depth
    drives and the marker vetoes. Its arm runs come after Phase 3's
    (ARM_CHECKLIST section 7).
+4. **Target B's slots ([SLOTS_PLAN.md](SLOTS_PLAN.md), 2026-09-29).**
+   PLACE AT B aims the cube at B's marker itself; it belongs in one of two
+   slots, 60 mm either side of it along B's x. Then comes a slot state
+   machine for several cubes, checked by vision. Settle the plan's open
+   questions first.
 
 Resolved blockers:
 - The 09-11 FCI packet loss was Desk's browser tab on the robot link.

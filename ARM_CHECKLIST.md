@@ -55,6 +55,17 @@ stays in reach. Nothing on this list needs new code.
 
 Do this section first, because everything else sits on top of it.
 
+> **2026-09-29 results** (details: `runs/2026-09-29/analysis/README.md`):
+> - **Stills: PASS.** The cube z spread is 0.52 mm across 100/200/300 mm.
+>   With the ArUco distance it would have been 6.3 mm.
+> - **TRACK: PARTIAL.** Both runs used the depth_checked source. Redo a
+>   minute with the marker source, REC and the 1 kHz recorder on.
+> - **5 GRIPs: PASS.** The fingers closed within 0.77 mm. Still to do: 1-2
+>   GRIPs from 150-190 mm, because the starts only covered 202-246 mm. The
+>   finger width is not recorded.
+> - **PLACE AT B: not done.** It aimed the cube at the marker itself; the
+>   cube belongs in one of B's two slots. See [SLOTS_PLAN.md](SLOTS_PLAN.md).
+
 - [ ] **Still frames with REC on.** Hold the camera straight down over the
   cube at 100, 200 and 300 mm, and keep the arm still for at least 3 s at each
   height (HOLD, then SETPOINT up).
