@@ -23,6 +23,32 @@ controller).*
 > ([`test_tracking_law.cpp`](mating_controller/test/test_tracking_law.cpp)),
 > and it has **never been run** - on hardware or otherwise.
 
+> **STATUS 2026-09-30.** TRACK has run on the arm since 2026-09-23 (hand-moved
+> sessions on 09-24, 09-25, 09-29 and 09-30). The formal V1-V6 table in
+> section 7 has still **not** been run. What changed since the amendments
+> above:
+>
+> - **The operator's gains, not a profile.** TRACK keeps the operator's k and
+>   zeta (`tracking_use_operator_gains`); only the slew comes from the `track`
+>   profile, and the panel's TRACK SPEED overrides it.
+> - **Speed and start.**
+>   - TRACK SPEED reaches 300 mm/s (the controller's slewMpsMax went from 0.25
+>     to 0.30 on 2026-09-29).
+>   - A blind start with in-plane 'off' takes the angle at the first sighting.
+> - **J1 buzz stops came back:** 09-29 16:06 and 09-30 12:56 (section 8, O1,
+>   re-opened).
+> - **Hand-moved results, 09-30, marker source**
+>   (`runs/2026-09-30/analysis/c1b2_result.txt`):
+>   - published 98.4 %, lag 0.20 s, position p95 25.6 mm, RT min 1.000;
+>   - rotation error p95 22.7 deg. The operator turned the cube at 23 deg/s
+>     against a 12 deg/s cap, and even under half the cap it was 7.3 deg
+>     against 2.4-3.3 deg on 09-24.
+> - **The depth_checked source** (perception Phase 4) held for lack of a pose
+>   on 29-40 % of ticks on 09-29, against 1.6 % with the marker.
+> - **Still open:** the controller-side items C1 (heartbeat watchdog), C8 (one
+>   writer for the equilibrium) and C9 (TRACK speed at START). They were
+>   designed and agreed on 2026-09-29, then deferred (tools/fr3/cell/README.md).
+
 ## 1. What this is for
 
 Today alignment is **stepped**: `cell_panel` plans and executes a discrete
@@ -309,6 +335,14 @@ parameters in the params yaml, not constants in code.
 
 V3 also closes the open "measure true end-to-end latency" item in TODO.md.
 
+> **Status 2026-09-30: none of V1-V6 has been run as specified.** The arm
+> evidence so far is hand-moved TRACK, which is not a V-test.
+> - **V4-like:** marker loss holds with no lurch. It was seen repeatedly, but
+>   never as a staged test.
+> - **V6-like:** RT success ≥ 0.99 over sessions of up to 24 min.
+> - **Open:** V1-V3 are the next formal tests, and they need the buzz fixed
+>   first (section 8, O1).
+
 > **[AMENDED] V1 and V2 could not have passed as written.** Both numbers came
 > from the `k = 3000` row of section 2, but the shipped `track` profile is
 > `k_pos_tool` **1500**, so the deadband `F/k` is **2.3 - 4.3 mm**, not 1.8,
@@ -362,6 +396,22 @@ than the 4.3 mm worst case computed above. If V1 beats it, that is why.
   then the node glides the goal between camera frames (`GoalGlide`,
   `tracking_goal_glide`), so a fast slew follows the marker continuously
   instead of stop-starting each frame. Walking k_rot up again is still open.
+  **[RE-OPENED 2026-09-30]** Two more buzz stops, on J1 each time:
+  - **09-29 16:06:17:** 3.69 Nm, in a blind start.
+  - **09-30 12:56:** 3.51-3.55 Nm at 43.9 Hz, rising from 2 to 3.5 Nm in
+    74 ms, with the arm 659 mm out.
+
+  Both came with rotation clamped at its lead cap. The 09-30 run had the
+  operator's gains: k 1800, k_rp 95, k_yaw 80, **zeta 0.8**. That is the
+  damping this answer found excites the 40 Hz mode. Because
+  `tracking_use_operator_gains` keeps the operator's zeta, the 0.5 of the
+  `track` profile no longer applies in TRACK. (The 09-29 gains are not in the
+  trace.)
+
+  **Next:** cap the rotational damping during TRACK. Either write
+  `track_damping_ratio` even with operator gains, or refuse START above 0.5.
+  Then confirm with the 1 kHz recorder. This is a hypothesis, not yet
+  measured.
 - **O2 - what `Ki` is stable?** The outer loop closes around a spring with a
   deadband; too fast and it hunts. Start low (lead reaches `lead_max` in
   ~2 s) and raise it at V1.

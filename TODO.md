@@ -21,7 +21,16 @@ believe when two disagree: [DOCS.md](DOCS.md).
 3. **Perception Phase 4 (`depth_checked`) is built offline** as well: depth
    drives and the marker vetoes. Its arm runs come after Phase 3's
    (ARM_CHECKLIST section 7).
-4. **Target B's slots ([SLOTS_PLAN.md](SLOTS_PLAN.md), 2026-09-29).**
+4. **The road to 6-DoF ([PERCEPTION_PLAN.md](PERCEPTION_PLAN.md) section
+   3A, 2026-09-30).** In order:
+   - step 0, the TRACK buzz (the rotational damping, TRACKING_SPEC O1);
+   - the tilt reference;
+   - the range-dependent bias;
+   - depth_checked availability;
+   - the shadow session and the Phase 4 exit;
+   - `grip_surface_normal: object`, which retires `level`;
+   - Phase 5, several cubes, Phase 6, then the connector.
+5. **Target B's slots ([SLOTS_PLAN.md](SLOTS_PLAN.md), 2026-09-29).**
    PLACE AT B aims the cube at B's marker itself; it belongs in one of two
    slots, 60 mm either side of it along B's x. Then comes a slot state
    machine for several cubes, checked by vision. Settle the plan's open

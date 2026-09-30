@@ -1,6 +1,13 @@
 # Marker-free object pose for the FR3 cell: plan
 
-> **Status: plan, 2026-09-25.** Implemented so far, offline and not yet confirmed on the arm: Phase 0 in part, then Phases 1, 2 and 3 (what is done, and what waits for the arm: TODO.md and ARM_CHECKLIST.md). Where the build departed from this plan, an **[AS BUILT]** block says so. Written by a 4-agent research workflow (a codebase reader, a state-of-the-art researcher, a planner that drafted three approaches and synthesised them, and a completeness critic that checked every cited file, topic and parameter against the code with graphify). Research inputs: [PERCEPTION_RESEARCH.md](PERCEPTION_RESEARCH.md). How the approach was chosen, and the critic's corrections, are in the appendices.
+> **Status 2026-09-30:** Phases 1-4 are built offline, plus the C++ estimator. On the arm:
+> - The depth-ranged marker passed the height stills (Phase 0 / ARM_CHECKLIST 1a).
+> - The marker source runs every day through the `/object/*` contract (Phase 1, not formally exited).
+> - `depth_checked` was tried once and fell short on availability (Phase 4).
+>
+> The ordered steps to the 6-DoF goal are in **section 3A**. Arm evidence is in `runs/2026-09-29/analysis/` and `runs/2026-09-30/analysis/`.
+>
+> **Original status: plan, 2026-09-25.** Implemented so far, offline and not yet confirmed on the arm: Phase 0 in part, then Phases 1, 2 and 3 (what is done, and what waits for the arm: TODO.md and ARM_CHECKLIST.md). Where the build departed from this plan, an **[AS BUILT]** block says so. Written by a 4-agent research workflow (a codebase reader, a state-of-the-art researcher, a planner that drafted three approaches and synthesised them, and a completeness critic that checked every cited file, topic and parameter against the code with graphify). Research inputs: [PERCEPTION_RESEARCH.md](PERCEPTION_RESEARCH.md). How the approach was chosen, and the critic's corrections, are in the appendices.
 
 Repo: `/home/local/ISDADS/ses634/fabling/Robotic Connector Handling/src`. Checked:
 - TRACK reads `pose_topic` and `tracking_raw_pose_topic` (`tracking_node.cpp:382-383`).
@@ -139,6 +146,14 @@ The vision process that owns the camera (`vision_standalone`) publishes:
 - PNG CPU cost. The fallback is to record every 2nd frame.
 - `vision_standalone` is new on the arm. The rollback is `vision_source:=realsense`.
 
+> **[ARM 2026-09-29/30]**
+> - **Depth ranging confirmed.** Stills at 100-350 mm, with the cube fixed, give a cube-top height spread of 0.52 mm across 100/200/300 mm. With the ArUco distance it would be 6.3 mm.
+> - **Still open:**
+>   - Depth minus kinematics reaches −1.2 to −1.75 mm at 250-350 mm.
+>   - **Lateral drift with range:** marker y moves about −0.95 mm per 100 mm, about 0.55° between the modelled and the real ray (hand-eye rotation or principal point).
+>   - Beyond 300 mm, GRIP reads of the cube top came out about 1.5 mm low and up to 3.6 mm off sideways.
+>   - Not yet done: the missing recordings, the blur test, the sticker calipers and the independent tilt reference (ARM_CHECKLIST sections 3-4).
+
 ### Phase 1: the contract, with the marker as the only source (plumbing only)
 
 **What is built:**
@@ -173,6 +188,12 @@ The vision process that owns the camera (`vision_standalone`) publishes:
 - **The baseline table recorded:** marker raw and filtered σ per axis, availability, hunting, ALIGN time, GRIP and PLACE results, and the RT metrics with the vision process pinned.
 
 **Risks:** stale raw gating may make ALIGN refuse more often under marker flicker. That is measured here.
+
+> **[ARM 2026-09-29/30]** The marker source has driven TRACK, GRIP and PLACE AT B through `/object/*` on both days.
+> - **Bag check:** `/object/pose` and `/aruco/pose` share stamps and agree to 0.0000 mm.
+> - **Not formally exited:** the 60 s bag comparison, the ALIGN raw gate and TRACK V1-V3 were not run as specified.
+> - **Baseline table:** the GRIP and PLACE numbers exist, in `c1c*` and `slots1_*`.
+> - **Gaps:** the panel logs `pose_source` only when it changes, and the finger width is not recorded.
 
 ### Phase 2: the depth estimator, offline only, scored against the references (no robot)
 
@@ -294,6 +315,14 @@ The vision process that owns the camera (`vision_standalone`) publishes:
 >
 > Replay results are in `runs/2026-09-25/analysis/phase4_*`.
 
+> **[ARM 2026-09-29] First live use: availability short.** There were two hand-moved TRACK runs on `depth_checked`, at 48 and 168 mm/s (`runs/2026-09-29/analysis/c1b_*`).
+> - **Holds:** the arm held for lack of a pose on **29 % and 40 %** of ticks, in hold episodes with a median of 1.8-1.9 s, against 1.6 % on the marker (09-30).
+> - **Why the estimator gave no pose:** the **"size" check** 63-75 %, "acquiring" 14-21 %, "no outline" 5-7 %, "no prior" 3-6 %. There were 0 marker vetoes.
+> - **The marker was fresh** on 92 % of those ticks.
+> - **Following when a pose came:** no worse than the marker's.
+>
+> Before the Phase 4 exit, the size gate must be understood (3A step 3).
+
 ### Phase 5: the marker is only a seed; the tracked prior carries the pose
 
 **What is built:**
@@ -356,6 +385,68 @@ FoundationPose runs only once four things are shown on this host:
 - FP16 VRAM ≤ 6 GB;
 - tracking ≥ 15 Hz;
 - a same-session A/B of V6 with GPU load meets the Cell row.
+
+## 3A. Road to 6-DoF (2026-09-30)
+
+The goal: a pose of the part from depth, all 6 DoF, good enough that GRIP and PLACE stop assuming a level surface (`grip_surface_normal: level`, 2026-09-30), and that the marker can go.
+
+Each step says where it runs (offline, arm) and what passes. The order is the dependency order. Offline steps run while the arm is busy with other work.
+
+**0. Prerequisite: TRACK without buzz stops** (offline, then arm).
+- The long TRACK sessions in steps 4-5 need it (TRACKING_SPEC section 8, O1).
+- Cap the rotational damping during TRACK at the profile's 0.5.
+- **Pass:** 15 min of hand-moved TRACK with the 1 kHz recorder and no buzz stop.
+
+**1. Ground truth for tilt** (arm, 10 min; ARM_CHECKLIST section 4).
+- Touch 3-4 table points in FLOAT, and the top of B's box, and note the TCP z. Add an inclinometer if one is at hand.
+- Offline, a script fits the planes and compares them with the marker and depth tilts over the same poses.
+- **Pass:** a reference tilt known to ±0.2°, and a verdict on which source is biased: the marker (2-5° off on 09-30) or depth (0.5-2° off the marker).
+- This decides whether depth tilt can be trusted.
+
+**2. Range-dependent bias** (offline, on the 09-29 stills; arm check after).
+- Fit the hand-eye rotation and/or the principal point to the 13 still plateaus of `bag_20260929_164854`, where the cube is fixed and the camera moved 100-350 mm.
+- **Pass:** the lateral drift is < 0.3 mm per 100 mm, and the height is flat to ±0.5 mm over 100-350 mm.
+- Then GRIPs from 360 mm read the cube like those from 200 mm.
+
+**3. `depth_checked` availability** (offline, on `vision_20260929_164854`).
+- Replay the two 09-29 TRACK runs with `loop_replay.py`, and classify every "size" refusal: the hand in the depth ROI, the cube leaving the depth view, fill on bare plastic, or the gate set too tight.
+- Fix the cause, not the threshold.
+- **Pass:** a pose on ≥ 95 % of the frames where the marker is fresh, still with 0 false accepts on the junk and hand frames.
+
+**4. Phase 3 shadow session** (arm, 20+ min; ARM_CHECKLIST section 6).
+- The marker drives and depth runs beside it, with the estimator on and off.
+- **Pass:** agreement within the §1 budgets. The tilt residual is compared with the step 1 reference.
+
+**5. Phase 4 exit on the arm** (ARM_CHECKLIST section 7).
+- `depth_checked` drives TRACK, GRIP and PLACE AT B.
+- **Pass:**
+  - TRACK availability within 5 points of the marker's;
+  - the GRIP closing height within 1 mm, as the marker's;
+  - PLACE AT B landing within ±4 mm, as the marker's.
+
+**6. `grip_surface_normal: object`** (offline, then arm).
+- grip_node takes the 6-DoF `/object/*` pose for GRIP and PLACE AT B, gated on its quality and `weak_dof`. It refuses when tilt is weakly determined, and it never falls back to `level` silently.
+- **Pass:**
+  - Set-downs are as square as with `level` on the level box, measured by the cube's re-read tilt after placing.
+  - A deliberately tilted surface (a 5° wedge under B) is followed, where `level` refuses.
+- This retires `level` as the default.
+
+**7. Phase 5: the marker is only a seed** (as planned above).
+- The tracked prior carries the pose, and the marker only initialises it.
+- **Pass:** as Phase 5 exit, on the arm.
+
+**8. Several cubes in the contract** (SLOTS_PLAN phase 2).
+- `/object/*` carries an id; the cubes have ids 0 and 2, and B is id 1.
+- This must not break the single-cube consumers.
+- **Pass:** two cubes tracked at once in replay and on the arm, with no id swaps.
+
+**9. Phase 6: acquisition without the marker, then removing it** (as planned above).
+- Table plane, then `minAreaRect`, then **ICP**, then the symmetry snap on bare-cube recordings (ARM_CHECKLIST section 3).
+- **Pass:** as Phase 6 exit, then the sticker comes off.
+
+**10. Phase 7: the connector** (when it is chosen).
+- **Needs a decision:** a GPU for FoundationPose, or classical ICP on the CPU against its STL.
+- ICP is better conditioned there than on a flat cube top, because the connector has real 3-D shape.
 
 ## 4. Compute budget (shared with the 1 kHz RT controller; images stay in-process)
 
