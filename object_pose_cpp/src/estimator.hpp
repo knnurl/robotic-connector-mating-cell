@@ -161,7 +161,8 @@ class Estimator {
                  const EdgeImg& img, int win_in, int win_out) const;
   std::vector<char> part_like(const std::vector<std::array<float, 3>>& pool,
                               const std::vector<float>& inner, int n_rows, int n_cols,
-                              const std::vector<char>& pk) const;
+                              const std::vector<char>& pk,
+                              const std::vector<std::array<float, 3>>& at_rim) const;
   void edge_obs_rows(const Pts3& X, const Obs& obs, const Mat3& R, const Vec3& t,
                      const Ctx& ctx, double c_px, Rows& J, VecX& r, VecX& w) const;
   void fixed_rows(const Ctx& ctx, const Mat4& T, const Pairs& pairs, const Pts3& X,

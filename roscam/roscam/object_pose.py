@@ -147,6 +147,9 @@ def pose_error(T_est, T_ref, sym_order=1):
     return D[:3, 3], float(tilt), float(yaw)
 
 
+RIM_DEPTH_M = 0.0015         # the colours 'at the outline': this far inside it
+
+
 def _ransac_plane(P, tol=0.003, iters=150, seed=0, min_frac=0.1):
     """The plane with the most points within tol of it, refined by a least
     squares fit on those: (n, d) with n . p + d the signed distance, n turned
@@ -1009,6 +1012,12 @@ class ObjectPoseEstimator:
                 rim = X
             if J is None:
                 return None, rim
+            if not outline:
+                # The surface alone moves height and tilt only (rx, ry, tz in
+                # the part's frame). Side faces seen at 60-85 deg read 1-2 mm
+                # inside the part in depth, and turned a marker prior 2-6 deg
+                # about the top face's normal at 250-300 mm (10-02 18:02).
+                J[:, 2:5] = 0.0
             x = self._gn_step(J, r, wts)
             T = self._apply(T, x)
             q['iterations'] = q.get('iterations', 0) + 1
@@ -1164,8 +1173,20 @@ class ObjectPoseEstimator:
         # colours: a coarse histogram of the deep samples all round; only
         # its MAJOR colours count (3% of the samples), or small dark print
         # near the outline (the cube's tape) passes the band as the part.
+        # Also the colours just inside the silhouette (about RIM_DEPTH_M at
+        # the part's distance, 1-3 px), where the part's depth region (holes
+        # filled) confirms the part (see _part_like). A fixed 3 px reached the
+        # blue patch 2 mm inside the edge from ~0.5 m (review 2026-10-02).
+        n_rim = int(np.clip(np.round(RIM_DEPTH_M * ctx['f'] / max(float(t[2]), 0.05)), 1, 3))
+        rim = slice(win_in + 8 - n_rim, win_in + 8)                 # offsets -n_rim..-1
+        reg, (rx, ry) = ctx['region'], ctx['roi'][:2]
+        qx = np.round(mx[:, rim] + (ox - rx)).astype(int).ravel()
+        qy = np.round(my[:, rim] + (oy - ry)).astype(int).ravel()
+        on = (qx >= 0) & (qx < reg.shape[1]) & (qy >= 0) & (qy < reg.shape[0])
+        on[on] = reg[qy[on], qx[on]] > 0
         pk &= self._part_like(smp[:, 1:6].reshape(-1, smp.shape[2]),
-                              0.5 * (smp[:, 6:6 + pk.shape[1]] + smp[:, 7:7 + pk.shape[1]]), pk)
+                              0.5 * (smp[:, 6:6 + pk.shape[1]] + smp[:, 7:7 + pk.shape[1]]), pk,
+                              at_rim=smp[:, rim].reshape(-1, smp.shape[2])[on])
         found = np.flatnonzero(pk.any(axis=1))
         if not len(found):
             return none
@@ -1179,12 +1200,15 @@ class ObjectPoseEstimator:
         return found, uv[found] + off[:, None] * nrm[found], nrm[found]
 
     @staticmethod
-    def _part_like(pool, inner, pk, share=0.03, tol=24.0, max_colours=12, blend_colours=6):
+    def _part_like(pool, inner, pk, share=0.03, tol=24.0, max_colours=12, blend_colours=6,
+                   at_rim=None):
         """Which candidates (pk) have an inner colour that belongs to the
         part: near one of its MAJOR colours near the outline (bins of 16
         levels holding at least `share` of the pool), or near the blend of
         two of them - a narrow strip of one colour beside another (the
-        cube's yellow beside its blue patch) reads as their blend."""
+        cube's yellow beside its blue patch) reads as their blend.
+        at_rim: colours just inside the outline that the depth confirms
+        are the part (BGR); their own peaks add up to max_colours more."""
         q = np.clip(pool // 16, 0, 15).astype(int)
         ch = q.shape[1]
         flat = np.ravel_multi_index(tuple(q.T), (16,) * ch)
@@ -1197,6 +1221,42 @@ class ObjectPoseEstimator:
         if not len(major):
             return out
         major = major[np.argsort(-hist[tuple(major.T)], kind='stable')[:max_colours]]
+        # The commonest bins can all be one dominant colour's spread: a side
+        # face seen at 60-75 deg is a strip a few px wide, whose colour (the
+        # blue tape) holds well over `share` of the pool but ranks below the
+        # yellow top face's 12 bins (10-02 18:02, 250-300 mm: 109 of 169
+        # frames "no colour outline", 38 % of their silhouette points). So
+        # the colours AT the outline add too, each a peak of their own
+        # histogram holding `share` of them, more than one bin from every
+        # colour kept. Only where the depth confirms the part: a prior half
+        # off it must not make the background a colour of the part (with
+        # every deep sample's peaks, 2 junk frames passed at a 20 mm shift).
+        # Only at the outline: a patch just inside it (the blue patch 2 mm
+        # short of the edge) must not make its own edge the silhouette.
+        if at_rim is not None and len(at_rim) and ch == 3:
+            qr = np.clip(at_rim // 16, 0, 15).astype(int)
+            raw = np.bincount(np.ravel_multi_index(tuple(qr.T), (16,) * ch),
+                              minlength=16 ** ch).reshape((16,) * ch)
+            hc = _box3(raw)
+            cand = np.argwhere(hc >= max(3.0, share * len(at_rim)))
+            cand = cand[np.argsort(-hc[tuple(cand.T)], kind='stable')]
+            hp = np.pad(hc, 1, constant_values=-1)
+            kept = list(major)
+            for b in cand:
+                if len(kept) >= len(major) + max_colours:
+                    break
+                if hc[tuple(b)] < hp[b[0]:b[0] + 3, b[1]:b[1] + 3, b[2]:b[2] + 3].max():
+                    continue                                            # not a peak
+                # The box sum's peak is flat-topped over a colour's own bin and
+                # its neighbours: take the bin with the most raw samples there,
+                # or the kept colour sits a bin off its own (review 2026-10-02).
+                lo = np.maximum(b - 1, 0)
+                nb = raw[lo[0]:b[0] + 2, lo[1]:b[1] + 2, lo[2]:b[2] + 2]
+                b = lo + np.array(np.unravel_index(int(np.argmax(nb)), nb.shape))
+                if any(np.abs(b - k).max() <= 1 for k in kept):
+                    continue                                            # beside a kept colour
+                kept.append(b)
+            major = np.array(kept)
         C = (major + 0.5) * 16.0                                        # (Kc, ch)
         rows, cols = np.nonzero(pk)
         c = inner[rows, cols]                                           # (P, ch)

@@ -328,6 +328,8 @@ The vision process that owns the camera (`vision_standalone`) publishes:
 > - **Replay of the 09-29 TRACK runs:** a raw pose on 93.2 % of marker frames (was 69.9 %), with no more false accepts.
 > - **Next cause:** "no colour outline" (109 frames).
 > - **Phase 5 condition:** a confidently wrong prior between two near-flush cubes (`runs/2026-09-30/analysis/step3_result.txt`).
+> - **"No colour outline" at 250-300 mm, oblique (2026-10-02):** the part-colour test kept 12 bins, all from the yellow top face, so the side faces' edges were refused. Now the colours just inside the outline that the depth confirms are the part are added, and stage A near the prior moves height and tilt only. 180231 at 250-300 mm: 34.0 % → 58.5 % valid, false accepts 1 → 4. Elsewhere no worse (`runs/2026-10-02/analysis/oblique/result.txt`).
+> - **Phase 5 condition:** the cube partly out of the image, with a one-sided outline (180231 frames 2650-2871). The accepted frames there are 1.7-3.6 mm off. A two-sidedness gate did not separate them. Also open: background stripes stealing the bottom edge near the box end (frames 1434-1449, 3-5° in-plane in `acquire`).
 
 ### Phase 5: the marker is only a seed; the tracked prior carries the pose
 
@@ -374,7 +376,7 @@ The vision process that owns the camera (`vision_standalone`) publishes:
 
 **Exit criteria:** acquisition ≥ 98%; 0 false acquisitions; GRIP ≥ 19/20 without the marker.
 
-> **[AS BUILT 2026-10-02, offline, first step]** `ObjectPoseEstimator.acquire(depth, bgr, K, dist, hint=None)`. Not wired into the vision node yet.
+> **[AS BUILT 2026-10-02, offline, first step]** `ObjectPoseEstimator.acquire(depth, bgr, K, dist, hint=None)`. Live in shadow mode only (`object_acquire_shadow:=true`, `AcquireShadow` in `object_shadow.py`): it runs about once a second on a background thread, is drawn in cyan, and reports `acquire_*` against the marker. Nothing reads it.
 >
 > **How it works:**
 > 1. **Support plane:** RANSAC. If nothing stands on the first plane (up close the cube's own face is the largest plane in view), the next plane behind it.

@@ -25,11 +25,13 @@ struct Estimator::Ctx {
   double f = 0.0;
   KdTree<2> out_tree;
   Pts2 out_uv, out_n;
+  cv::Mat region;                 // the part's depth region, ROI-local, holes filled
 };
 
 namespace {
 
 constexpr double kPi = 3.14159265358979323846;
+constexpr double kRimDepthM = 0.0015;   // RIM_DEPTH_M: 'at the outline' this far inside it
 
 inline double rad(double deg) { return deg * kPi / 180.0; }
 inline double deg(double r) { return r * 180.0 / kPi; }
@@ -755,6 +757,7 @@ bool Estimator::segment(const cv::Mat& depth, const Mat3& K, const VecX& dist,
     ctx.out_n(i, 1) = uy / nn;
   }
   ctx.roi = roi;
+  ctx.region = filled;
   return true;
 }
 
@@ -910,32 +913,37 @@ void Estimator::depth_outline_rows(const Pts3& X, const Pts3& P, const Mat3& R, 
 // blend of two of the main ones
 std::vector<char> Estimator::part_like(const std::vector<std::array<float, 3>>& pool,
                                        const std::vector<float>& inner, int n_rows, int n_cols,
-                                       const std::vector<char>& pk) const {
+                                       const std::vector<char>& pk,
+                                       const std::vector<std::array<float, 3>>& at_rim) const {
   const double share = 0.03, tol = 24.0;
   const int max_colours = 12, blend_colours = 6;
   std::vector<char> out(pk.size(), 0);
   // the colour histogram, 16 levels per channel, and its exact 3x3x3 box sum
-  std::vector<long> hist(16 * 16 * 16, 0), tmp(hist.size());
-  for (const auto& c : pool) {
-    int b[3];
-    for (int k = 0; k < 3; ++k)
-      b[k] = clampv(static_cast<int>(std::floor(c[k] / 16.0f)), 0, 15);
-    ++hist[b[0] * 256 + b[1] * 16 + b[2]];
-  }
-  const int stride[3] = {256, 16, 1};
-  for (int ax = 0; ax < 3; ++ax) {
-    for (int i = 0; i < 16; ++i)
-      for (int j = 0; j < 16; ++j)
-        for (int k = 0; k < 16; ++k) {
-          const int idx = i * 256 + j * 16 + k;
-          const int pos = ax == 0 ? i : ax == 1 ? j : k;
-          long s = hist[idx];
-          if (pos > 0) s += hist[idx - stride[ax]];
-          if (pos < 15) s += hist[idx + stride[ax]];
-          tmp[idx] = s;
-        }
-    hist.swap(tmp);
-  }
+  auto histogram = [&](const std::vector<std::array<float, 3>>& smp) {
+    std::vector<long> h(16 * 16 * 16, 0), tmp(h.size());
+    for (const auto& c : smp) {
+      int b[3];
+      for (int k = 0; k < 3; ++k)
+        b[k] = clampv(static_cast<int>(std::floor(c[k] / 16.0f)), 0, 15);
+      ++h[b[0] * 256 + b[1] * 16 + b[2]];
+    }
+    const int stride[3] = {256, 16, 1};
+    for (int ax = 0; ax < 3; ++ax) {
+      for (int i = 0; i < 16; ++i)
+        for (int j = 0; j < 16; ++j)
+          for (int k = 0; k < 16; ++k) {
+            const int idx = i * 256 + j * 16 + k;
+            const int pos = ax == 0 ? i : ax == 1 ? j : k;
+            long v = h[idx];
+            if (pos > 0) v += h[idx - stride[ax]];
+            if (pos < 15) v += h[idx + stride[ax]];
+            tmp[idx] = v;
+          }
+      h.swap(tmp);
+    }
+    return h;
+  };
+  const std::vector<long> hist = histogram(pool);
   const double thr = std::max(3.0, share * static_cast<double>(pool.size()));
   std::vector<int> major;
   for (int i = 0; i < 4096; ++i)
@@ -943,6 +951,60 @@ std::vector<char> Estimator::part_like(const std::vector<std::array<float, 3>>& 
   if (major.empty()) return out;
   std::stable_sort(major.begin(), major.end(), [&](int a, int b) { return hist[a] > hist[b]; });
   if (static_cast<int>(major.size()) > max_colours) major.resize(max_colours);
+  // the colours at the outline where the depth confirms the part: peaks of
+  // their own histogram, each more than one bin from every colour kept
+  if (!at_rim.empty()) {
+    const std::vector<long> hc = histogram(at_rim);
+    std::vector<long> raw(4096, 0);                // the raw counts, for the peak's own bin
+    for (const auto& c : at_rim) {
+      int bb[3];
+      for (int k = 0; k < 3; ++k)
+        bb[k] = clampv(static_cast<int>(std::floor(c[k] / 16.0f)), 0, 15);
+      ++raw[bb[0] * 256 + bb[1] * 16 + bb[2]];
+    }
+    const double thr_c = std::max(3.0, share * static_cast<double>(at_rim.size()));
+    std::vector<int> cand;
+    for (int i = 0; i < 4096; ++i)
+      if (static_cast<double>(hc[i]) >= thr_c) cand.push_back(i);
+    std::stable_sort(cand.begin(), cand.end(), [&](int a, int b) { return hc[a] > hc[b]; });
+    const std::size_t n0 = major.size();
+    for (int b : cand) {
+      if (major.size() >= n0 + static_cast<std::size_t>(max_colours)) break;
+      const int bi = b / 256, bj = (b / 16) % 16, bk = b % 16;
+      bool peak = true;
+      for (int di = -1; di <= 1 && peak; ++di)
+        for (int dj = -1; dj <= 1 && peak; ++dj)
+          for (int dk = -1; dk <= 1 && peak; ++dk) {
+            const int i2 = bi + di, j2 = bj + dj, k2 = bk + dk;
+            if (i2 < 0 || i2 > 15 || j2 < 0 || j2 > 15 || k2 < 0 || k2 > 15) continue;
+            if (hc[i2 * 256 + j2 * 16 + k2] > hc[b]) peak = false;
+          }
+      if (!peak) continue;
+      // the box sum is flat-topped over a colour's own bin and its
+      // neighbours: the bin with the most raw samples there (np.argmax order)
+      int best = -1;
+      long best_n = -1;
+      for (int di = -1; di <= 1; ++di)
+        for (int dj = -1; dj <= 1; ++dj)
+          for (int dk = -1; dk <= 1; ++dk) {
+            const int i2 = bi + di, j2 = bj + dj, k2 = bk + dk;
+            if (i2 < 0 || i2 > 15 || j2 < 0 || j2 > 15 || k2 < 0 || k2 > 15) continue;
+            const int idx = i2 * 256 + j2 * 16 + k2;
+            if (raw[idx] > best_n) {
+              best_n = raw[idx];
+              best = idx;
+            }
+          }
+      b = best;
+      const int ri = b / 256, rj = (b / 16) % 16, rk = b % 16;
+      bool beside = false;
+      for (int m : major)
+        if (std::abs(m / 256 - ri) <= 1 && std::abs((m / 16) % 16 - rj) <= 1 &&
+            std::abs(m % 16 - rk) <= 1)
+          beside = true;
+      if (!beside) major.push_back(b);
+    }
+  }
   std::vector<std::array<double, 3>> C;
   for (int b : major)
     C.push_back({(b / 256 + 0.5) * 16.0, ((b / 16) % 16 + 0.5) * 16.0, (b % 16 + 0.5) * 16.0});
@@ -1079,7 +1141,26 @@ Estimator::Obs Estimator::find_edges(const Pts3& X, const Idx& eid, const Mat3& 
       for (int ch = 0; ch < 3; ++ch)
         inner[(static_cast<std::size_t>(i) * nP + p) * 3 + ch] = 0.5f * (a[ch] + b[ch]);
     }
-  const std::vector<char> like = part_like(pool, inner, n, nP, pk);
+  // the colours just inside the silhouette (RIM_DEPTH_M at the part's
+  // distance, 1-3 px), where the part's depth region (holes filled)
+  // confirms the part
+  std::vector<std::array<float, 3>> at_rim;
+  const int rx = ctx.roi[0], ry = ctx.roi[1];
+  const int n_rim =
+      clampv(static_cast<int>(rnd(kRimDepthM * ctx.f / std::max(t(2), 0.05))), 1, 3);
+  for (int i = 0; i < n; ++i)
+    for (int k = win_in + 8 - n_rim; k < win_in + 8; ++k) {
+      const int qx = static_cast<int>(
+          rnd(static_cast<double>(mx.at<float>(i, k) + static_cast<float>(img.ox - rx))));
+      const int qy = static_cast<int>(
+          rnd(static_cast<double>(my.at<float>(i, k) + static_cast<float>(img.oy - ry))));
+      if (qx >= 0 && qx < ctx.region.cols && qy >= 0 && qy < ctx.region.rows &&
+          ctx.region.at<uchar>(qy, qx) > 0) {
+        const cv::Vec3f v = S(i, k);
+        at_rim.push_back({v[0], v[1], v[2]});
+      }
+    }
+  const std::vector<char> like = part_like(pool, inner, n, nP, pk, at_rim);
   Obs out;
   std::vector<std::array<double, 2>> e_uv, e_n;
   for (int i = 0; i < n; ++i) {
@@ -1231,10 +1312,11 @@ bool Estimator::solve(const Mat4& T0, const Ctx& ctx, Quality& q, bool coarse, d
     const Vec3 t = T.block<3, 1>(0, 3);
     const double gate_s = std::max(0.003, 2.0 * err * std::pow(0.6, it));
     const double gate_o = std::max(0.003, 6.0 * err * std::pow(0.6, it));
-    const RowsOut ro = rows(ctx, R, t, gate_s, gate_o, q, rim_out ? &*rim_out : nullptr,
-                            nullptr, 0, 0, nullptr, false, outline);
+    RowsOut ro = rows(ctx, R, t, gate_s, gate_o, q, rim_out ? &*rim_out : nullptr, nullptr, 0,
+                      0, nullptr, false, outline);
     if (outline && !rim_out && gate_s <= 0.003 && gate_o <= 0.003) rim_out = ro.used;
     if (!ro.ok) return false;
+    if (!outline) ro.J.middleCols(2, 3).setZero();   // the surface alone: height and tilt
     const Vec6 x = gn_step(ro.J, ro.r, ro.w);
     T = apply(T, x);
     ++q.iterations;

@@ -488,6 +488,23 @@ def test_a_dark_band_beside_the_outline_is_not_the_part():
         check(T_c, T, mm=0.15, deg=0.1)
 
 
+def test_a_narrow_face_in_its_own_colour_is_still_the_part():
+    """A side face seen at 60-75 deg is a strip a few px wide in its own
+    colour (the cube's blue tape, 10-02): the deep samples are mostly the
+    top face's yellow, whose spread fills the commonest bins. Its colour
+    counts where the depth confirms it at the outline, not otherwise."""
+    rng = np.random.default_rng(0)
+    yellow = np.array(YELLOW, float) + rng.normal(0.0, 12.0, (900, 3))
+    blue = np.array(BLUE, float) + rng.normal(0.0, 3.0, (100, 3))
+    pool = np.vstack([yellow, blue])
+    inner = np.array([[BLUE]], float)                   # one candidate, blue on its inner side
+    pk = np.ones((1, 1), bool)
+    like = ObjectPoseEstimator._part_like
+    assert not like(pool, inner, pk)[0, 0]              # outranked by yellow's spread
+    assert like(pool, inner, pk, at_rim=blue)[0, 0]
+    assert not like(pool, inner, pk, at_rim=yellow)[0, 0]
+
+
 # ---------------------------------------------------------------- acquisition (Phase 6)
 
 PART_BOX = dict(PART, box_m=np.array([CUBE] * 3))
@@ -520,3 +537,25 @@ def test_acquire_with_nothing_there_or_a_finger_over_the_face_finds_nothing_fals
 def test_acquire_needs_a_box_part():
     _, valid, q = ObjectPoseEstimator(PART).acquire(np.ones((480, 640)), None, K, None)
     assert not valid and 'box parts only' in q['reason']
+
+
+def test_a_colour_at_the_outline_is_kept_as_its_own_bin_without_noise():
+    """Review 2026-10-02: the box-summed peak is flat-topped, and the kept
+    bin sat one off the tape's own colour, so an exact colour was refused."""
+    pool = np.tile([[40.0, 200.0, 215.0]], (900, 1))                 # the yellow top
+    blue = np.array([200.0, 120.0, 60.0])
+    inner, pk = np.tile(blue, (5, 4, 1)), np.ones((5, 4), bool)
+    ok = ObjectPoseEstimator._part_like(pool, inner, pk, at_rim=np.tile(blue, (60, 1)))
+    assert ok.all()
+
+
+def test_the_patch_inside_the_edge_stays_out_of_the_outline_at_range():
+    """Review 2026-10-02: a fixed 3 px rim band reached the blue patch 2 mm
+    inside the edge from ~0.5 m; it is about 1.5 mm at the part's distance."""
+    for z in (0.40, 0.60):
+        T = pose([0.004, -0.003, z], yaw=8.0, tilt=2.0)
+        depth, bgr = colour_scene(T)
+        T_est, valid, q = ObjectPoseEstimator(PART, depth_fallback=False).process(
+            depth, bgr, K, None, perturbed(T, 0.6, 0.4), prior_err_m=0.0015)
+        assert valid, q['reason']
+        check(T_est, T, mm=0.1, deg=0.2)
