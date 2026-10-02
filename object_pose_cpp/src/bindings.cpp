@@ -83,6 +83,7 @@ PYBIND11_MODULE(_object_pose_cpp, m) {
              p.size_hi = d("size_hi");
              p.weak_rel = d("weak_rel");
              p.min_outline_frac = d("min_outline_frac");
+             p.min_outline_frac_occluded = d("min_outline_frac_occluded");
              p.fragment_in = d("fragment_in");
              p.fragment_tol_m = d("fragment_tol_m");
              p.fragment_on_part_m = d("fragment_on_part_m");
@@ -138,6 +139,8 @@ PYBIND11_MODULE(_object_pose_cpp, m) {
              out["rms_mm"] = opt(q.rms_mm);
              out["inlier_frac"] = opt(q.inlier_frac);
              out["outline_frac"] = opt(q.outline_frac);
+             out["outline_frac_all"] = opt(q.outline_frac_all);
+             out["rim_in_view"] = opt(q.rim_in_view);
              out["weak_dof"] = q.weak_dof;
              out["agree_mm"] = q.agree_mm;
              out["agree_deg"] = q.agree_deg;

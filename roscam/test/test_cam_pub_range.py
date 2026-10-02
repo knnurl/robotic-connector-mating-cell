@@ -81,3 +81,43 @@ def test_a_plane_too_far_off_is_not_trusted(ros):
 def test_no_depth_keeps_the_aruco_distance(ros):
     t = published_t(1.05 * SIZE, 'depth', depth=False)
     assert np.isclose(t[2], 1.05 * T_TRUE[2], atol=1e-3), t
+
+
+class _SlowTf:
+    """A TF buffer whose transform arrives ready_s after the first lookup."""
+
+    def __init__(self, ready_s):
+        self.ready_s, self.t0 = ready_s, None
+
+    def lookup_transform_core(self, target, source, stamp):
+        import time
+        from geometry_msgs.msg import TransformStamped
+        from tf2_ros import LookupException
+        now = time.perf_counter()
+        self.t0 = now if self.t0 is None else self.t0
+        if self.ready_s is None or now - self.t0 < self.ready_s:
+            raise LookupException('not yet')
+        tf = TransformStamped()
+        tf.transform.rotation.w = 1.0
+        return tf
+
+
+def _filter_frame_wait(ready_s):
+    from types import SimpleNamespace
+    from std_msgs.msg import Header
+    ns = SimpleNamespace(tf_buffer=_SlowTf(ready_s), filter_frame='fr3_link0',
+                         get_logger=lambda: SimpleNamespace(warn=lambda *a, **k: None),
+                         last_tf_wait_ms=None, last_tf=None)
+    header = Header(frame_id='camera_color_optical_frame')
+    out = ArucoPosePublisher._to_filter_frame(
+        ns, (np.zeros(3), np.array([0.0, 0.0, 0.0, 1.0])), header)
+    return out, ns.last_tf_wait_ms
+
+
+def test_the_tf_lookup_answers_within_a_few_ms_of_the_transform_arriving():
+    """3A step 3 on 10-02: tf2_ros's own timeout sleeps in 20 ms steps, so a
+    transform 3 ms late cost 20 ms. Polled finely, it costs about 3."""
+    out, wait = _filter_frame_wait(0.003)
+    assert out is not None and wait < 10.0
+    out, wait = _filter_frame_wait(None)                    # never: refused after 50 ms
+    assert out is None and 45.0 <= wait < 80.0

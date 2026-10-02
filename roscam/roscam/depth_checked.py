@@ -29,7 +29,13 @@ Acquisition: acquire_frames accepted estimates on one KF track before the
 first raw. A frame without one (no marker, vetoed, invalid, skipped for the
 time budget) pauses the count; only the lost-track limit restarts it. A KF
 gate rejection before the track is acquired restarts it from that estimate:
-an early track the new data disagrees with is not one to finish.
+an early track the new data disagrees with is not one to finish. A track
+lost only to silence (no veto since its last accepted estimate) comes back
+faster: if its new track's first estimate comes within reacquire_window_s of
+the last one accepted, reacquire_frames are enough (each of them has passed
+the marker check like any other). A track lost to vetoes acquires afresh. On
+10-02, waiting out acquire_frames after short marker gaps cost 7 % of the
+frames.
 
 reset() restarts the track (a source switch calls it). The KF is PoseKF with
 the marker's settings, so /object/pose behaves as it did with the marker and
@@ -44,6 +50,7 @@ from roscam.object_pose import _quat
 from roscam.pose_kf import PoseKF
 
 ACQUIRE_FRAMES = 5          # accepted estimates on one track before the first raw
+REACQUIRE_FRAMES = 2        # ... after a short silence on an acquired track
 
 
 def pose7(T):
@@ -54,11 +61,14 @@ def pose7(T):
 class DepthChecked:
     def __init__(self, check_mm=3.0, check_tilt_deg=4.0, check_inplane_deg=2.0,
                  acquire_frames=ACQUIRE_FRAMES, max_prediction_s=0.3,
-                 rejects_before_reacquire=5, veto_window=150, **kf):
+                 rejects_before_reacquire=5, veto_window=150,
+                 reacquire_frames=REACQUIRE_FRAMES, reacquire_window_s=1.0, **kf):
         self.check_mm = float(check_mm)
         self.check_tilt_deg = float(check_tilt_deg)
         self.check_inplane_deg = float(check_inplane_deg)
         self.acquire_frames = int(acquire_frames)
+        self.reacquire_frames = min(int(reacquire_frames), self.acquire_frames)
+        self.reacquire_window_s = float(reacquire_window_s)
         self.max_prediction_s = float(max_prediction_s)
         self.rejects_before_reacquire = int(rejects_before_reacquire)
         self.kf = PoseKF(**kf)
@@ -75,10 +85,13 @@ class DepthChecked:
         self.last_accept = None     # image stamp of the last accepted estimate
         self.last_stamp = None
         self.rejects = 0            # KF gate rejections in a row
+        self.need = self.acquire_frames   # accepted estimates this track needs
+        self.lost_at = None         # last accept of an acquired track lost to silence
+        self.vetoed = False         # a veto since the last accepted estimate
 
     @property
     def acquired(self):
-        return self.agreeing >= self.acquire_frames
+        return self.agreeing >= self.need
 
     def veto_pct(self):
         """Vetoed share of the recent valid estimates, %, or None."""
@@ -97,10 +110,14 @@ class DepthChecked:
         if self.kf.initialized and self.last_stamp is not None:
             self.kf.predict(stamp_s - self.last_stamp)
         if self.last_accept is not None and stamp_s - self.last_accept > self.max_prediction_s:
+            lost = self.last_accept if self.acquired and not self.vetoed else None
             self.reset()                                    # silent too long: lost
+            self.lost_at = lost
         self.last_stamp = stamp_s
 
         check = self._check(est, T_filter_cam, why)
+        if check is not None and check.startswith('vetoed'):
+            self.vetoed = True
         if check is None:
             t, q = pose7(T_filter_cam @ est[0])
             ok = self.kf.update(t, q)
@@ -114,16 +131,21 @@ class DepthChecked:
                     self.last_stamp = stamp_s
                     ok = self.kf.update(t, q)
             if ok:
+                if self.agreeing == 0 and self.lost_at is not None:
+                    if stamp_s - self.lost_at <= self.reacquire_window_s:
+                        self.need = self.reacquire_frames
+                    self.lost_at = None
                 self.rejects = 0
+                self.vetoed = False
                 self.agreeing += 1
                 self.last_accept = stamp_s
                 if self.acquired:
                     return est[0], (self.kf.position, self.kf.quaternion), 'ok'
-                return None, None, f'acquiring {self.agreeing}/{self.acquire_frames}'
+                return None, None, f'acquiring {self.agreeing}/{self.need}'
         if self.acquired:                   # coast on the prediction, never as raw
             return None, (self.kf.position, self.kf.quaternion), check
         if self.agreeing:                   # acquiring: the count pauses
-            return None, None, f'{check} (acquiring {self.agreeing}/{self.acquire_frames})'
+            return None, None, f'{check} (acquiring {self.agreeing}/{self.need})'
         return None, None, check
 
     def _check(self, est, T_filter_cam, why):

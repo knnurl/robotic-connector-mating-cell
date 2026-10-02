@@ -170,7 +170,9 @@ class ObjectPoseEstimator:
                  search_m=0.010, prior_err_m=0.005, depth_band_m=0.015, support_band_m=0.003,
                  max_incidence_deg=86.0, rim_max_incidence_deg=75.0, outline_offset_px=0.5,
                  max_iter=30, min_points=200, max_rms_m=0.0015, min_inlier_frac=0.8,
-                 min_outline_frac=0.6, max_shift_m=0.010, max_shift_deg=10.0,
+                 min_outline_frac=0.6, min_outline_frac_occluded=0.55,
+                 occluded_min_inlier_frac=0.95, min_in_view=0.8,
+                 max_shift_m=0.010, max_shift_deg=10.0,
                  size_ratio=(0.7, 1.6), weak_rel=1e-3, use_outline=True,
                  outline_weight=0.1, colour_edges=True, edge_min_step=6.0, edge_rel=0.3,
                  depth_fallback=True, fragment_in=0.9, fragment_tol_m=0.003,
@@ -275,6 +277,17 @@ class ObjectPoseEstimator:
         self.max_iter = max_iter
         self.gates = dict(min_points=min_points, max_rms_m=max_rms_m,
                           min_inlier_frac=min_inlier_frac, min_outline_frac=min_outline_frac,
+                          # A hand over one edge hides it from the colour
+                          # outline: below min_outline_frac, down to this,
+                          # passes only with a surface fit this good (and
+                          # weak_dof still refuses what the rest cannot pin).
+                          # Chosen on the 09-29 and 10-02 replays: lower, a
+                          # hidden edge let yaw go 2.5-3.9 deg off.
+                          min_outline_frac_occluded=min_outline_frac_occluded,
+                          occluded_min_inlier_frac=occluded_min_inlier_frac,
+                          # The outline only counts silhouette points inside
+                          # the image; this much of the silhouette must be.
+                          min_in_view=min_in_view,
                           max_shift_m=max_shift_m, max_shift_deg=max_shift_deg,
                           size_ratio=size_ratio, weak_rel=weak_rel)
         self._norm_key = None
@@ -645,7 +658,7 @@ class ObjectPoseEstimator:
             if len(X):
                 img = self._edge_image(bgr_clean, roi)
                 T_b, frac, obs_b = self._stage_b(T, ctx, q, (X, eid), img)
-                if T_b is not None and frac >= self.gates['min_outline_frac']:
+                if T_b is not None and frac >= self.gates['min_outline_frac_occluded']:
                     T, rim, edges, obs = T_b, (X, eid), (img, (3, 4)), obs_b
                     q['edge_source'] = 'colour'
             if edges is None and not self.depth_fallback:
@@ -701,10 +714,27 @@ class ObjectPoseEstimator:
     @staticmethod
     def _new_q():
         return {'source': 'depth', 'valid': False, 'reason': '', 'n_pts': 0,
-                'rms_mm': None, 'inlier_frac': None, 'outline_frac': None, 'weak_dof': [],
+                'rms_mm': None, 'inlier_frac': None, 'outline_frac': None,
+                'outline_frac_all': None,
+                'rim_in_view': None, 'weak_dof': [],
                 'agree_mm': None, 'agree_deg': None, 'agree_tilt_deg': None,
                 'agree_inplane_deg': None, 'sym_index': 0, 'iterations': 0,
                 'edge_source': None, 'support': None, 'cand_pose': None}
+
+    @staticmethod
+    def _n_in_image(X, R, t, K, dist, shape):
+        """How many silhouette points X (part frame) at R, t project inside
+        the image: only those can find an outline. The outline fractions
+        count against these, not all of them (a cube partly out of view read
+        as 'no colour outline', 3A step 3 on 10-02); the solve is unchanged."""
+        if not len(X):
+            return 0
+        P = X @ R.T + t
+        px = np.round(cv2.projectPoints(P, np.zeros(3), np.zeros(3), K, dist)[0]
+                      .reshape(-1, 2)).astype(int)
+        h, w = shape[:2]
+        return int(np.count_nonzero((px[:, 0] >= 0) & (px[:, 0] < w)
+                                    & (px[:, 1] >= 0) & (px[:, 1] < h)))
 
     def _judge(self, q):
         """(valid, reason) of a finished estimate: the gates."""
@@ -716,8 +746,19 @@ class ObjectPoseEstimator:
             reasons.append(f"rms {q['rms_mm']}")
         if (q['inlier_frac'] or 0.0) < g['min_inlier_frac']:
             reasons.append(f"inliers {q['inlier_frac']}")
-        if (q['outline_frac'] or 0.0) < g['min_outline_frac']:
-            reasons.append(f"outline {q['outline_frac']}")
+        # outline_frac counts only the silhouette points inside the image.
+        # Over all of them (outline_frac_all) it is what passed before: that still
+        # passes alone. Below it, the in-image count, or the occluded-edge
+        # rule, may pass only with most of the silhouette in view.
+        of, inl = q['outline_frac'] or 0.0, q['inlier_frac'] or 0.0
+        of_all = q.get('outline_frac_all')
+        of_all = of if of_all is None else of_all
+        iv = q.get('rim_in_view')
+        iv = 1.0 if iv is None else iv
+        in_image = of >= g['min_outline_frac'] or (of >= g['min_outline_frac_occluded']
+                                                   and inl >= g['occluded_min_inlier_frac'])
+        if not (of_all >= g['min_outline_frac'] or (iv >= g['min_in_view'] and in_image)):
+            reasons.append(f"outline {q['outline_frac']} (in view {iv:.2f})")
         if q['agree_mm'] > g['max_shift_m'] * 1e3 or q['agree_deg'] > g['max_shift_deg']:
             reasons.append(f"shift {q['agree_mm']:.1f} mm / {q['agree_deg']:.1f} deg")
         if q['weak_dof']:
@@ -769,7 +810,8 @@ class ObjectPoseEstimator:
         for win, steps in (((8, 10), 4), ((3, 4), 3)):
             R, t = T[:3, :3], T[:3, 3]
             obs = self._find_edges(X, eid, R, t, ctx, img, win)
-            frac = len(obs[0]) / max(1, len(X))
+            frac = len(obs[0]) / max(1, self._n_in_image(X, R, t, ctx['K'], ctx['dist'],
+                                                         ctx['depth'].shape))
             pairs = self._surface_pairs(ctx, R, t, 0.003)
             if len(obs[0]) + len(pairs[0]) < 12:
                 return None, frac, None
@@ -1013,7 +1055,10 @@ class ObjectPoseEstimator:
         if final:
             q['rms_mm'] = float(np.sqrt(np.mean(rs ** 2)) * 1e3) if len(rs) else None
             q['inlier_frac'] = float(len(rs) / max(1, len(S)))
-            q['outline_frac'] = float(len(ro) / max(1, len(X)))
+            n_in = self._n_in_image(X, R, t, ctx['K'], ctx['dist'], ctx['depth'].shape)
+            q['outline_frac'] = float(len(ro) / max(1, n_in))
+            q['outline_frac_all'] = float(len(ro) / max(1, len(X)))
+            q['rim_in_view'] = float(n_in / max(1, len(X)))
         if len(rs) + len(ro) < 12:
             q['reason'] = 'too few correspondences'
             return None, None, None, (X, eid)
@@ -1050,6 +1095,7 @@ class CppObjectPoseEstimator(ObjectPoseEstimator):
                   'edge_rel': self.edge_rel, 'min_points': g['min_points'],
                   'size_lo': g['size_ratio'][0], 'size_hi': g['size_ratio'][1],
                   'weak_rel': g['weak_rel'], 'min_outline_frac': g['min_outline_frac'],
+                  'min_outline_frac_occluded': g['min_outline_frac_occluded'],
                   'fragment_in': self.fragment_in, 'fragment_tol_m': self.fragment_tol_m,
                   'fragment_on_part_m': self.fragment_on_part_m,
                   'fragment_spill_max': self.fragment_spill_max}
@@ -1068,7 +1114,8 @@ class CppObjectPoseEstimator(ObjectPoseEstimator):
         prior = np.asarray(prior, dtype=np.float64)
         r = self._core.process(np.asarray(depth_m), bgr_clean, K, dist, prior, err)
         q = self._new_q()
-        for k in ('n_pts', 'rms_mm', 'inlier_frac', 'outline_frac', 'sym_index',
+        for k in ('n_pts', 'rms_mm', 'inlier_frac', 'outline_frac', 'outline_frac_all',
+                  'rim_in_view', 'sym_index',
                   'iterations', 'edge_source', 'support'):
             q[k] = r[k]
         if r['support'] is not None:

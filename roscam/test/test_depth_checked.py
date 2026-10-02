@@ -151,6 +151,26 @@ def test_a_dropped_frame_pauses_an_acquisition_and_only_the_lost_track_limit_res
     assert run(est(T_at()))[2] == 'acquiring 1/5'           # the track was lost: from 1
 
 
+def test_a_short_silence_reacquires_in_two_frames_a_long_one_or_a_veto_in_five():
+    """3A step 3, 10-02: an acquired track lost only to a marker gap comes
+    back after REACQUIRE_FRAMES if the gap was under reacquire_window_s."""
+    from roscam.depth_checked import REACQUIRE_FRAMES
+    for gap_frames, need in ((6, REACQUIRE_FRAMES), (20, ACQUIRE_FRAMES)):   # 0.4 s / 1.33 s
+        run = Run()
+        run.acquire()
+        for _ in range(gap_frames):
+            run(None, why='no marker prior')
+        out = [run(est(T_at())) for _ in range(need)]
+        assert [o[0] is None for o in out] == [True] * (need - 1) + [False], gap_frames
+        assert out[0][2] == f'acquiring 1/{need}'
+    run = Run()                                             # lost to vetoes: afresh
+    run.acquire()
+    for _ in range(6):
+        run(est(T_at(), mm=3.4))
+    out = run.acquire()
+    assert [o[0] is None for o in out] == [True] * 4 + [False]
+
+
 def test_a_kf_gate_rejection_while_acquiring_restarts_from_that_estimate():
     run = Run()
     for _ in range(2):

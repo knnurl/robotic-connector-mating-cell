@@ -730,17 +730,26 @@ class ArucoPosePublisher(Node):
         predicts briefly, then goes silent and the controller holds)."""
         t, q = measurement
         t0 = time.perf_counter()
-        try:
-            tf = self.tf_buffer.lookup_transform(
-                self.filter_frame, header.frame_id,
-                Time.from_msg(header.stamp), timeout=Duration(seconds=0.05))
-        except TransformException as e:
-            self.last_tf_wait_ms = (time.perf_counter() - t0) * 1e3
-            self.get_logger().warn(
-                f'TF {header.frame_id} -> {self.filter_frame} unavailable '
-                f'({e}); dropping detection',
-                throttle_duration_sec=2.0)
-            return None
+        # Up to 50 ms for /tf to reach the image stamp, polled every 1 ms:
+        # tf2_ros's own timeout sleeps in 20 ms steps, and with /tf at 15 Hz
+        # that made the wait 0, 20.5 or 40.8 ms per frame (10-02), enough to
+        # cost the depth estimate its frame budget.
+        stamp = Time.from_msg(header.stamp)
+        while True:
+            try:
+                tf = self.tf_buffer.lookup_transform_core(
+                    self.filter_frame, header.frame_id, stamp)
+                break
+            except TransformException as e:
+                if time.perf_counter() - t0 < 0.05:
+                    time.sleep(0.001)
+                    continue
+                self.last_tf_wait_ms = (time.perf_counter() - t0) * 1e3
+                self.get_logger().warn(
+                    f'TF {header.frame_id} -> {self.filter_frame} unavailable '
+                    f'({e}); dropping detection',
+                    throttle_duration_sec=2.0)
+                return None
         self.last_tf_wait_ms = (time.perf_counter() - t0) * 1e3
         tr = tf.transform.translation
         ro = tf.transform.rotation

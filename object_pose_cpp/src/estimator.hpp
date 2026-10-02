@@ -54,6 +54,7 @@ struct Params {
   double fragment_spill_max = 0.5;   // share of the ring's depth on the top plane: no merge
   double weak_rel = 1e-3;
   double min_outline_frac = 0.6;
+  double min_outline_frac_occluded = 0.55;   // stage B keeps the colour outline down to this
 };
 
 // The mesh as ObjectPoseEstimator prepared it.
@@ -76,6 +77,7 @@ struct Quality {
   bool finished = false;         // reached the gates
   int n_pts = 0;
   std::optional<double> size_ratio, rms_mm, inlier_frac, outline_frac;
+  std::optional<double> outline_frac_all, rim_in_view;   // over all silhouette points; their in-image share
   Idx weak_dof;                  // into (rx, ry, rz, tx, ty, tz), sorted
   double agree_mm = 0.0, agree_deg = 0.0, agree_tilt_deg = 0.0, agree_inplane_deg = 0.0;
   int sym_index = 0;

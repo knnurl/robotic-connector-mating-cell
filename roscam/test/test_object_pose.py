@@ -329,6 +329,26 @@ def test_a_face_broken_into_islands_is_still_the_part():
     check(T_est, T, mm=0.5, deg=0.5)
 
 
+def _judged(**q):
+    base = {'n_pts': 500, 'rms_mm': 0.5, 'inlier_frac': 0.97, 'outline_frac': 0.9,
+            'outline_frac_all': 0.9, 'rim_in_view': 1.0, 'agree_mm': 0.3, 'agree_deg': 0.2,
+            'weak_dof': []}
+    base.update(q)
+    return ObjectPoseEstimator(PART)._judge(base)
+
+
+def test_the_outline_gate_counts_only_points_in_the_image_when_most_are_in_view():
+    """3A step 3 on 10-02: a cube partly out of view, or a hand over one
+    edge, read as 'no colour outline'. What passed before still passes."""
+    assert _judged(outline_frac=0.65, outline_frac_all=0.62, rim_in_view=0.5)[0]   # as before
+    assert _judged(outline_frac=0.7, outline_frac_all=0.56, rim_in_view=0.8)[0]    # in-image
+    assert not _judged(outline_frac=0.7, outline_frac_all=0.53, rim_in_view=0.75)[0]
+    # one edge hidden, a good surface fit
+    assert _judged(outline_frac=0.56, outline_frac_all=0.56, inlier_frac=0.96)[0]
+    assert not _judged(outline_frac=0.56, outline_frac_all=0.56, inlier_frac=0.94)[0]
+    assert not _judged(outline_frac=0.5, outline_frac_all=0.5, inlier_frac=0.99)[0]
+
+
 def _fragment_case():
     """A 100 x 100 px label image for _fragments, with the prior at the
     object frame (R0 = I, t0 = 0), so a pixel's point is in the object frame:

@@ -69,6 +69,24 @@ Pts2 project(const Pts3& P, const cv::Mat& K, const cv::Mat& dist) {
   return uv;
 }
 
+// _n_in_image: how many silhouette points X at R, t project inside the image
+// (the outline fractions count against these; the solve is unchanged)
+long n_in_image(const Pts3& X, const Mat3& R, const Vec3& t, const cv::Mat& K,
+                       const cv::Mat& dist, const cv::Mat& depth) {
+  if (X.rows() == 0) return 0;
+  Pts3 P(X.rows(), 3);
+  for (int i = 0; i < X.rows(); ++i) P.row(i) = (R * X.row(i).transpose() + t).transpose();
+  const Pts2 px = project(P, K, dist);
+  long n = 0;
+  for (int i = 0; i < px.rows(); ++i) {
+    const int u = static_cast<int>(std::nearbyint(px(i, 0)));
+    const int v = static_cast<int>(std::nearbyint(px(i, 1)));
+    if (u >= 0 && u < depth.cols && v >= 0 && v < depth.rows) ++n;
+  }
+  return n;
+}
+
+
 // cv2.undistortPoints(pts, K, dist, P=K)
 Pts2 undistort_px(const Pts2& pts, const cv::Mat& K, const cv::Mat& dist) {
   Pts2 out(pts.rows(), 2);
@@ -1178,7 +1196,10 @@ Estimator::RowsOut Estimator::rows(const Ctx& ctx, const Mat3& R, const Vec3& t,
       q.rms_mm.reset();
     }
     q.inlier_frac = static_cast<double>(rs.size()) / std::max<Eigen::Index>(1, ctx.S.rows());
-    q.outline_frac = static_cast<double>(ro.size()) / std::max<Eigen::Index>(1, X.rows());
+    const long n_in = n_in_image(X, R, t, ctx.cvK, ctx.cvDist, *ctx.depth);
+    q.outline_frac = static_cast<double>(ro.size()) / std::max<long>(1, n_in);
+    q.outline_frac_all = static_cast<double>(ro.size()) / std::max<Eigen::Index>(1, X.rows());
+    q.rim_in_view = static_cast<double>(n_in) / std::max<Eigen::Index>(1, X.rows());
   }
   out.used.X = X;
   out.used.eid = eid;
@@ -1232,7 +1253,8 @@ bool Estimator::stage_b(Mat4& T, const Ctx& ctx, Quality& q, const Rim& rim, con
     const Mat3 R = T.block<3, 3>(0, 0);
     const Vec3 t = T.block<3, 1>(0, 3);
     obs = find_edges(rim.X, rim.eid, R, t, ctx, img, win_in, win_out);
-    frac = static_cast<double>(obs.idx.size()) / std::max<Eigen::Index>(1, rim.X.rows());
+    frac = static_cast<double>(obs.idx.size()) /
+           std::max<long>(1, n_in_image(rim.X, R, t, ctx.cvK, ctx.cvDist, *ctx.depth));
     const Pairs pairs = surface_pairs(ctx, R, t, 0.003);
     if (obs.idx.size() + pairs.si.size() < 12) return false;
     for (int s = 0; s < steps; ++s) {
@@ -1284,7 +1306,7 @@ Result Estimator::process(const cv::Mat& depth, const cv::Mat& bgr, const Mat3& 
       Mat4 T_b = T;
       double frac = 0.0;
       Obs obs_b;
-      if (stage_b(T_b, ctx, q, rb, img, frac, obs_b) && frac >= p_.min_outline_frac) {
+      if (stage_b(T_b, ctx, q, rb, img, frac, obs_b) && frac >= p_.min_outline_frac_occluded) {
         T = T_b;
         rim_opt = rb;
         obs = std::move(obs_b);
