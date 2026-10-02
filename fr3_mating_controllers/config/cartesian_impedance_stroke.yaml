@@ -73,3 +73,23 @@ cartesian_impedance_stroke_controller:
 
     # Torque-rate saturation per 1 ms cycle (FCI discontinuity limit, max 1.0).
     tau_rate_limit: 1.0
+
+    # The joint-limit wall (impedance_detail.hpp joint_wall_torque), in every
+    # mode, FLOAT included, instead of the robot's reflex taking the driver
+    # down. Inside the last joint_wall_margin_rad before a limit a spring
+    # pushes the joint back out and damping (both ways) slows it; anywhere, a
+    # joint moving toward a limit faster than joint_speed_frac of the FR3's
+    # position-dependent speed limit is braked. The wrist (12 Nm) can still be
+    # overpowered by hand. Configure-time only. Reviewed 2026-10-02: a 5 deg
+    # margin is inside the FR3 speed envelope for pushes over ~0.5 rad/s.
+    joint_lower: [-2.7437, -1.7837, -2.9007, -3.0421, -2.8065, 0.5445, -3.0159]   # = fr3_params tracking_joint_lower
+    joint_upper: [2.7437, 1.7837, 2.9007, -0.1518, 2.8065, 4.5169, 3.0159]        # = fr3_params tracking_joint_upper
+    joint_wall_margin_rad: 0.14         # 8 deg, = tracking_joint_margin_rad; 0 = off; 0-0.35
+    joint_wall_k: [600.0, 600.0, 600.0, 600.0, 150.0, 150.0, 150.0]   # Nm/rad
+    joint_wall_d: [20.0, 20.0, 20.0, 20.0, 3.0, 3.0, 1.5]             # Nm s/rad, both ways inside the margin
+    joint_speed_frac: 0.7               # brake beyond 70 % of the FR3 speed envelope; 0 = off
+    # Nm s/rad per rad/s over it. J1-4 hold a 30 Nm hand push under the
+    # envelope at 1 rad/s; the light wrist low, because the brake is a delayed
+    # velocity loop that chattered at 32-80 Hz in simulation with J7's
+    # damping at 9 (I 0.005 kg m^2): the 40 Hz buzz mechanism (TRACKING_SPEC O1).
+    joint_brake_d: [120.0, 120.0, 100.0, 100.0, 6.0, 6.0, 3.0]

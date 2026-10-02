@@ -436,3 +436,15 @@ def test_the_pose_topics_are_the_object_contracts():
     assert core.POSE_QUALITY_TOPIC == oc.QUALITY_TOPIC
     assert tuple(core.POSE_SOURCES) == tuple(oc.SOURCES)
     assert core.RAW_MAX_AGE_S == prm['tracking_raw_timeout_s']
+
+
+def test_the_controllers_joint_wall_uses_the_limits_track_and_grip_use():
+    """The joint-limit wall (impedance_detail.hpp) and the tracking / grip
+    joint guards must agree on where the FR3's limits are, and the wall must
+    not start before the TRACK guard's margin, so TRACK holds first."""
+    ctrl, shipped = _controller_yaml(), _shipped()
+    assert ctrl['joint_lower'] == pytest.approx(shipped['tracking_joint_lower'])
+    assert ctrl['joint_upper'] == pytest.approx(shipped['tracking_joint_upper'])
+    assert 0.0 < ctrl['joint_wall_margin_rad'] <= shipped['tracking_joint_margin_rad']
+    assert 0.0 < ctrl['joint_speed_frac'] < 1.0 and len(ctrl['joint_brake_d']) == 7
+    assert len(ctrl['joint_wall_k']) == 7 and len(ctrl['joint_wall_d']) == 7

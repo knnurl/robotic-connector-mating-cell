@@ -228,3 +228,134 @@ TEST(ValidateSlew, LiveSlewUsesTheSameBoundAsConfigure)
     EXPECT_EQ(validate_limits(30.0, 10.0, 1.0, ConfigLimits::slewMpsMax,
                               ConfigLimits::slewRpsMax, kTauSpecNm), "");
 }
+
+// ---------------------------------------------------------------- joint wall
+
+namespace
+{
+using fr3_mating_controllers::detail::joint_wall_torque;
+using fr3_mating_controllers::detail::JointWall;
+using fr3_mating_controllers::detail::validate_wall;
+using Vec7 = Eigen::Matrix<double, 7, 1>;
+
+JointWall fr3_wall()
+{
+    JointWall w;
+    w.lower = {-2.7437, -1.7837, -2.9007, -3.0421, -2.8065, 0.5445, -3.0159};
+    w.upper = {2.7437, 1.7837, 2.9007, -0.1518, 2.8065, 4.5169, 3.0159};
+    w.margin_rad = 0.0873;
+    w.k = {600, 600, 600, 600, 150, 150, 150};
+    w.d = {20, 20, 20, 20, 3, 3, 3};
+    return w;
+}
+
+Vec7 mid(const JointWall &w)
+{
+    Vec7 q;
+    for (int i = 0; i < 7; ++i) q(i) = 0.5 * (w.lower[i] + w.upper[i]);
+    return q;
+}
+}  // namespace
+
+TEST(JointWall, NothingOutsideTheMargin)
+{
+    const JointWall w = fr3_wall();
+    Vec7 q = mid(w);
+    q(0) = w.upper[0] - w.margin_rad - 1e-6;                // just outside
+    EXPECT_TRUE(joint_wall_torque(q, Vec7::Constant(1.0), w).isZero());
+}
+
+TEST(JointWall, TheSpringPushesBackOutOfEitherMargin)
+{
+    const JointWall w = fr3_wall();
+    Vec7 q = mid(w);
+    q(1) = w.upper[1] - w.margin_rad + 0.035;               // 2 deg into the high margin
+    q(5) = w.lower[5] + w.margin_rad - 0.02;                // into the low margin
+    const Vec7 tau = joint_wall_torque(q, Vec7::Zero(), w);
+    EXPECT_NEAR(tau(1), -600.0 * 0.035, 1e-9);              // -21 Nm: back down
+    EXPECT_NEAR(tau(5), 150.0 * 0.02, 1e-9);                // +3 Nm: back up
+    for (int i : {0, 2, 3, 4, 6}) EXPECT_EQ(tau(i), 0.0);
+}
+
+TEST(JointWall, DampsBothWaysInsideTheMarginRampedIn)
+{
+    // Both ways: one-way damping threw a released joint back out at ~80 % of
+    // its entry speed (review 2026-10-02). Damping only ever removes energy.
+    const JointWall w = fr3_wall();
+    const double deep = 0.5 * w.margin_rad;
+    Vec7 q = mid(w), dq = Vec7::Zero();
+    q(0) = w.upper[0] - w.margin_rad + deep;
+    dq(0) = 0.5;                                            // toward the limit
+    EXPECT_NEAR(joint_wall_torque(q, dq, w)(0), -600.0 * deep - 20.0 * 0.5, 1e-9);
+    dq(0) = -0.5;                                           // away: slowed too
+    EXPECT_NEAR(joint_wall_torque(q, dq, w)(0), -600.0 * deep + 20.0 * 0.5, 1e-9);
+    q(0) = w.upper[0] - w.margin_rad + 0.004;               // 0.004 of the 0.01 rad ramp
+    dq(0) = 0.5;
+    EXPECT_NEAR(joint_wall_torque(q, dq, w)(0), -600.0 * 0.004 - 20.0 * 0.5 * 0.4, 1e-9);
+}
+
+TEST(JointWall, TheEnvelopeIsTheFr3s)
+{
+    using fr3_mating_controllers::detail::fr3_allowed_speed;
+    // J2, 5 deg (0.0873 rad) short of its 1.7837 limit: 0.50 rad/s
+    // (-0.20 + sqrt(5.17 * (1.7918 - 1.6964))); the review's number too.
+    EXPECT_NEAR(fr3_allowed_speed(1, 1.7837 - 0.0873, true), 0.502, 0.002);
+    EXPECT_NEAR(fr3_allowed_speed(0, 0.0, true), 2.62, 1e-9);          // capped mid-range
+    EXPECT_EQ(fr3_allowed_speed(3, -0.1458, true), 0.0);                // at J4's stop
+    EXPECT_NEAR(fr3_allowed_speed(5, 0.54092 + 0.1, false),
+                -0.35 + std::sqrt(11.0 * 0.1), 1e-9);                   // J6 toward its low stop
+}
+
+TEST(JointWall, BrakesOnlyPastTheSpeedEnvelopeAndOnlyTowardTheLimit)
+{
+    using fr3_mating_controllers::detail::fr3_allowed_speed;
+    JointWall w = fr3_wall();
+    w.margin_rad = 0.0;                                     // the brake alone
+    w.speed_frac = 0.8;
+    w.brake_d = {60, 60, 60, 60, 6, 6, 6};
+    Vec7 q = mid(w), dq = Vec7::Zero();
+    q(1) = 1.5;                                             // J2, 0.28 rad from its stop
+    const double allow = 0.8 * fr3_allowed_speed(1, 1.5, true);
+    dq(1) = allow - 0.01;                                   // under the envelope: nothing
+    EXPECT_EQ(joint_wall_torque(q, dq, w)(1), 0.0);
+    dq(1) = allow + 0.3;                                    // over it: braked by the excess
+    EXPECT_NEAR(joint_wall_torque(q, dq, w)(1), -60.0 * 0.3, 1e-9);
+    dq(1) = -(allow + 0.3);                                 // as fast, but away from the
+    EXPECT_EQ(joint_wall_torque(q, dq, w)(1), 0.0);         // near stop: far from the other
+    q = mid(w);
+    dq = Vec7::Constant(1.0);                               // mid-range at 1 rad/s: nothing
+    EXPECT_TRUE(joint_wall_torque(q, dq, w).isZero());
+}
+
+TEST(JointWall, MarginZeroAndFracZeroAreOff)
+{
+    JointWall w = fr3_wall();
+    w.margin_rad = 0.0;
+    w.speed_frac = 0.0;
+    Vec7 q = mid(w);
+    q(3) = w.upper[3] - 0.001;
+    EXPECT_TRUE(joint_wall_torque(q, Vec7::Constant(1.0), w).isZero());
+}
+
+TEST(JointWall, ValidationRefusesWhatCouldNotBeAWall)
+{
+    EXPECT_EQ(validate_wall(fr3_wall()), "");
+    JointWall w = fr3_wall();
+    w.margin_rad = 0.5;
+    EXPECT_NE(validate_wall(w), "");
+    w = fr3_wall();
+    w.k[2] = -1.0;
+    EXPECT_NE(validate_wall(w), "");
+    w = fr3_wall();
+    w.d[6] = kNan;
+    EXPECT_NE(validate_wall(w), "");
+    w = fr3_wall();
+    w.upper[4] = w.lower[4] + 0.1;                          // less than two margins apart
+    EXPECT_NE(validate_wall(w), "");
+    w = fr3_wall();
+    w.speed_frac = 1.5;
+    EXPECT_NE(validate_wall(w), "");
+    w = fr3_wall();
+    w.brake_d[0] = -1.0;
+    EXPECT_NE(validate_wall(w), "");
+}

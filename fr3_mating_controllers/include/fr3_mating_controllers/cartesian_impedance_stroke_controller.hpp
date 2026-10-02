@@ -143,6 +143,7 @@ private:
 
     Vector7d q_ = Vector7d::Zero();
     Vector7d dq_ = Vector7d::Zero();
+    detail::JointWall wall_;   // set at configure; off (margin 0) until then
     Vector7d q_nullspace_ = Vector7d::Zero();  // posture seed (activation q)
     Vector7d tau_last_ = Vector7d::Zero();
 

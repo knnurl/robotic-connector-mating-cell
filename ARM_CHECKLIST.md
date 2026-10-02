@@ -51,6 +51,25 @@ stays in reach. Nothing on this list needs new code.
 - `vision_source:=realsense` goes back to the old camera owner. The
   `/object/*` topics still come out in that mode.
 
+## 0b. The joint-limit wall (new 2026-10-02, needs a T1 restart)
+
+The T1 log at configure says `Joint-limit wall: 8.0 deg before each limit ...
+speed brake beyond 70 % of the FR3 envelope`. Run the 1 kHz recorder.
+
+- [ ] **In FLOAT, push one joint at a time slowly toward a limit,** under
+  about 0.5 rad/s. Start with J4 (its upper stop is near the usual poses),
+  then J1 and J2.
+  - **Pass:** the joint resists from about 8 deg out and stops before the
+    limit. The driver stays up. Released, it eases back without a fling.
+- [ ] **The wrist, J5-J7, gently.** It has only 12 Nm, so a firm twist can
+  still go through. Note any buzz or chatter: the recorder shows it, and the
+  J7 brake gain is the suspect (simulated 32-80 Hz if J7 is very light).
+- [ ] **A brisker push on J4 at about 1 rad/s.** It should be braked without
+  a `joint_velocity_violation` reflex.
+- **Rollback:** set `joint_wall_margin_rad: 0` and `joint_speed_frac: 0` in
+  fr3_mating_controllers/config/cartesian_impedance_stroke.yaml, then
+  restart T1.
+
 ## 1. The marker distance from depth (8345442)
 
 Do this section first, because everything else sits on top of it.
