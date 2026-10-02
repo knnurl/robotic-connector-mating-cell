@@ -106,3 +106,40 @@ def test_the_outline_goes_on_the_given_image_only():
     again = bgr.copy()
     sh.draw_outline(again, K, None)                    # held: no estimate, nothing drawn
     assert np.array_equal(again, bgr)
+
+
+# ---------------------------------------------------------------- acquisition shadow (Phase 6)
+
+def _wait(cond, timeout_s=20.0):
+    import time
+    t0 = time.monotonic()
+    while not cond() and time.monotonic() - t0 < timeout_s:
+        time.sleep(0.02)
+    return cond()
+
+
+def test_the_acquisition_shadow_finds_the_part_alone_and_reports_against_the_marker():
+    from roscam.object_shadow import AcquireShadow
+    from test_object_pose import CUBE
+    part = dict(PART, box_m=np.array([CUBE] * 3), T_marker_object=np.eye(4))
+    T = pose([0.01, -0.02, 0.15], yaw=12.0, tilt=2.0)
+    depth, bgr = colour_scene(T)
+    acq = AcquireShadow(part, impl='python', period_s=0.5)
+    try:
+        assert acq.offer(1.0, depth, bgr, K, None, T)          # the marker as the reference
+        assert not acq.offer(1.1, depth, bgr, K, None, T)      # one in hand / not due
+        assert _wait(lambda: acq.last is not None)
+        q = acq.quality(1.2)
+        assert q['acquire_valid'] == 'true', q
+        assert float(q['acquire_mm']) < 0.5 and abs(float(q['acquire_yaw'])) < 0.5
+        img = np.zeros_like(bgr)
+        acq.draw(img, K, None, 1.5)
+        assert img.any()                                       # the cyan outline
+        img = np.zeros_like(bgr)
+        acq.draw(img, K, None, 9.0)                            # too old: not drawn
+        assert not img.any()
+        assert not acq.offer(1.3, depth, bgr, K, None, T)      # within the period
+        acq.holding = True
+        assert not acq.offer(5.0, depth, bgr, K, None, T)      # held: nothing
+    finally:
+        acq.close()

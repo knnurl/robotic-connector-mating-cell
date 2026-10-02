@@ -69,7 +69,7 @@ from roscam.connector_pose import ConnectorPoseNode
 from roscam.frame_recorder import FrameRecorder
 from roscam.depth_checked import DepthChecked, pose7
 from roscam.object_contract import ObjectContract
-from roscam.object_shadow import DepthShadow, pose_matrix
+from roscam.object_shadow import AcquireShadow, DepthShadow, pose_matrix
 from roscam.rs_capture import RsCapture
 
 GRIP_STATUS_TOPIC = '/grip_node/status'
@@ -136,6 +136,16 @@ class DepthRunner:
                 gate_sigma=prm('gate_sigma'))
         self._switches = contract.switches
         self.period_ms = 1000.0 / max(1, int(aruco.get_parameter('capture_fps').value))
+        # PERCEPTION_PLAN Phase 6 in shadow: the marker-free acquisition in a
+        # background thread at most every acquire_shadow_period_s, reporting
+        # its agreement with the marker (acquire_* quality keys) and drawing
+        # its outline in cyan. Never drives anything.
+        aruco.declare_parameter('object_acquire_shadow', False)
+        aruco.declare_parameter('acquire_shadow_period_s', 1.0)
+        self.acquire = None
+        self.acquire_on = bool(aruco.get_parameter('object_acquire_shadow').value)
+        if self.acquire_on:
+            self._start_acquire()
         aruco.debug_hooks.append(self.draw)
         aruco.add_on_set_parameters_callback(self._on_set)
         aruco.create_subscription(
@@ -143,8 +153,29 @@ class DepthRunner:
             QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                        durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
+    def _start_acquire(self):
+        part = self.contract.part
+        if part is None or part.get('box_m') is None:
+            self.aruco.get_logger().error('object_acquire_shadow needs a box part file - off')
+            self.acquire_on = False
+            return
+        impl = str(self.aruco.get_parameter('object_pose_impl').value)
+        try:
+            self.acquire = AcquireShadow(
+                part, impl=impl,
+                period_s=float(self.aruco.get_parameter('acquire_shadow_period_s').value),
+                log=lambda m: self.aruco.get_logger().warn(m, throttle_duration_sec=5.0))
+        except ImportError:
+            self.acquire = AcquireShadow(part, impl='python')
+        self.aruco.get_logger().info('acquisition shadow on (no marker, cyan outline)')
+
     def _on_set(self, params):
         for prm in params:
+            if prm.name == 'object_acquire_shadow':
+                self.acquire_on = bool(prm.value)
+                if self.acquire_on and self.acquire is None:
+                    self._start_acquire()
+                continue
             if prm.name == 'object_shadow':
                 if prm.value and self.depth is None:
                     return SetParametersResult(successful=False,
@@ -157,9 +188,11 @@ class DepthRunner:
         return SetParametersResult(successful=True)
 
     def _grip_cb(self, msg):
+        holding = any(kv.key == 'holding' and kv.value == 'true' for kv in msg.values)
         if self.depth is not None:
-            self.depth.holding = any(kv.key == 'holding' and kv.value == 'true'
-                                     for kv in msg.values)
+            self.depth.holding = holding
+        if self.acquire is not None:
+            self.acquire.holding = holding
 
     def _running(self, source):
         return self.depth is not None and (self.enabled or source == 'depth_checked')
@@ -171,6 +204,9 @@ class DepthRunner:
         detection whenever someone watched)."""
         if self._running(self.contract.source):
             self.depth.draw_outline(img, self.aruco.camera_matrix, self.aruco.dist_coeffs)
+        if self.acquire is not None and self.acquire_on:
+            self.acquire.draw(img, self.aruco.camera_matrix, self.aruco.dist_coeffs,
+                              time.monotonic())
 
     def after(self, frame, header, poses, t_start):
         """This frame's estimate (shadow mode or depth_checked), the
@@ -203,6 +239,13 @@ class DepthRunner:
                     extra['check'] = f'error: {e!r}'
                 self.aruco.get_logger().warn(f'depth estimate failed: {e!r}',
                                              throttle_duration_sec=5.0)
+        if self.acquire is not None and self.acquire_on:
+            raw = poses.get('/aruco/pose_raw')
+            now = time.monotonic()
+            self.acquire.offer(now, frame.depth_m, frame.bgr, self.aruco.camera_matrix,
+                               self.aruco.dist_coeffs,
+                               None if raw is None else pose_matrix(raw[1], raw[2]))
+            extra = {**(extra or {}), **self.acquire.quality(now)}
         self.contract.publish_quality(extra)
 
     def _drive(self, header, extra):

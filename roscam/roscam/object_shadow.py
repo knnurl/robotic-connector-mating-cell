@@ -136,3 +136,109 @@ class DepthShadow:
         lines = np.round(np.stack([uv[:n], uv[n:]], 1) * 16).astype(np.int32)
         cv2.polylines(img, list(lines), False, VALID_BGR if valid else INVALID_BGR, 1,
                       cv2.LINE_AA, shift=4)
+
+
+ACQUIRE_BGR = (255, 200, 0)                     # cyan: the marker-free acquisition
+
+
+class AcquireShadow:
+    """Phase 6 in shadow: ObjectPoseEstimator.acquire() (no prior, no marker)
+    on the newest frame at most every period_s, in a background thread with
+    its own estimator, so the frame loop only pays for a copy of the frame
+    (the C++ refinement releases the GIL). It never drives anything: it
+    reports its agreement with the same frame's marker (quality() keys
+    acquire_*) and draws its outline in cyan on the debug image. Nothing is
+    acquired while GRIP holds the part (holding)."""
+
+    def __init__(self, part, impl='python', period_s=1.0, log=None):
+        import threading
+        cls = {'cpp': CppObjectPoseEstimator, 'python': ObjectPoseEstimator}[impl]
+        self.est = cls(part, depth_fallback=False)
+        self.T_mo = np.asarray(part.get('T_marker_object', np.eye(4)), dtype=float)
+        self.sym = int(part.get('sym_order', 1))
+        self.period_s = float(period_s)
+        self.log = log
+        self.holding = False
+        self.last = None                 # dict of the newest result
+        self._job = None
+        self._next_t = 0.0
+        self._cv = threading.Condition()
+        self._stop = False
+        self._thread = threading.Thread(target=self._run, name='acquire_shadow', daemon=True)
+        self._thread.start()
+
+    def close(self):
+        with self._cv:
+            self._stop = True
+            self._cv.notify()
+
+    def offer(self, now_s, depth_m, bgr_clean, K, dist, T_cam_marker):
+        """Hand this frame over if one is due and none is in hand. Cheap."""
+        if self.holding or depth_m is None or now_s < self._next_t:
+            return False
+        with self._cv:
+            if self._job is not None:
+                return False
+            self._job = (now_s, np.array(depth_m, copy=True),
+                         None if bgr_clean is None else np.array(bgr_clean, copy=True),
+                         np.array(K, dtype=float), None if dist is None else np.array(dist),
+                         None if T_cam_marker is None else np.array(T_cam_marker))
+            self._next_t = now_s + self.period_s
+            self._cv.notify()
+        return True
+
+    def _run(self):
+        import time
+        from roscam.object_pose import pose_error
+        while True:
+            with self._cv:
+                while self._job is None and not self._stop:
+                    self._cv.wait()
+                if self._stop:
+                    return
+                stamp, depth, bgr, K, dist, T_marker = self._job
+            t0 = time.perf_counter()
+            try:
+                T, valid, q = self.est.acquire(depth, bgr, K, dist)
+                out = {'stamp': stamp, 'T': T, 'valid': bool(valid), 'reason': q['reason'],
+                       'n': len(q.get('candidates', [])),
+                       'ms': (time.perf_counter() - t0) * 1e3, 'K': K, 'dist': dist}
+                if valid and T_marker is not None:
+                    d, tilt, yaw = pose_error(T, T_marker @ self.T_mo, self.sym)
+                    out.update(mm=float(np.linalg.norm(d)) * 1e3, tilt=float(tilt),
+                               yaw=float(yaw))
+            except Exception as e:                          # noqa: BLE001
+                out = {'stamp': stamp, 'T': None, 'valid': False, 'reason': f'error: {e!r}',
+                       'n': 0, 'ms': (time.perf_counter() - t0) * 1e3}
+                if self.log is not None:
+                    self.log(f'acquire shadow failed: {e!r}')
+            self.last = out
+            with self._cv:
+                self._job = None
+
+    def quality(self, now_s):
+        """The newest result as /object/pose_quality keys (strings)."""
+        r = self.last
+        if r is None:
+            return {}
+        out = {'acquire_valid': 'true' if r['valid'] else 'false',
+               'acquire_reason': r['reason'], 'acquire_age_s': f"{now_s - r['stamp']:.2f}",
+               'acquire_ms': f"{r['ms']:.0f}", 'acquire_n': str(r['n'])}
+        for k in ('mm', 'tilt', 'yaw'):
+            if r.get(k) is not None:
+                out[f'acquire_{k}'] = f'{r[k]:.2f}'
+        return out
+
+    def draw(self, img, K, dist, now_s, max_age_s=2.0):
+        """The last acquisition's outline (cyan) while it is recent."""
+        r = self.last
+        if r is None or r['T'] is None or now_s - r['stamp'] > max_age_s:
+            return
+        T = r['T']
+        P = self.est.V @ T[:3, :3].T + T[:3, 3]
+        if np.any(P[:, 2] <= 1e-3):
+            return
+        uv = cv2.projectPoints(P, np.zeros(3), np.zeros(3), K,
+                               np.zeros(5) if dist is None else dist)[0].reshape(-1, 2)
+        hull = cv2.convexHull(np.round(uv * 16).astype(np.int32))
+        cv2.polylines(img, [hull], True, ACQUIRE_BGR, 2, cv2.LINE_AA, shift=4)

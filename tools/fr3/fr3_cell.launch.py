@@ -103,6 +103,11 @@ def generate_launch_description():
         DeclareLaunchArgument('object_shadow', default_value='false',
                               description='true = run the depth estimator in shadow mode '
                                           '(vision_source:=standalone only)'),
+        # PERCEPTION_PLAN Phase 6 in shadow: the marker-free acquisition once
+        # a second, reporting only (cyan outline, acquire_* quality keys).
+        DeclareLaunchArgument('object_acquire_shadow', default_value='false',
+                              description='true = run the marker-free acquisition in shadow '
+                                          '(vision_source:=standalone only; never drives)'),
         DeclareLaunchArgument('object_pose_impl', default_value='cpp',
                               description='the depth estimator: cpp (object_pose_cpp, colcon-'
                                           'built) or python (the reference); same poses'),
@@ -240,6 +245,7 @@ def _vision(context):
     if source == 'standalone':
         executable = 'vision_standalone'
         params['object_shadow'] = arg('object_shadow') == 'true'
+        params['object_acquire_shadow'] = arg('object_acquire_shadow') == 'true'
         params['object_pose_impl'] = arg('object_pose_impl')
     else:
         params['source'] = source
@@ -247,6 +253,9 @@ def _vision(context):
         if arg('object_shadow') == 'true':
             notes.append(LogInfo(msg='fr3_cell: object_shadow needs vision_source:=standalone '
                                      '- ignored'))
+        if arg('object_acquire_shadow') == 'true':
+            notes.append(LogInfo(msg='fr3_cell: object_acquire_shadow needs vision_source:='
+                                     'standalone - ignored'))
     # One BLAS thread: the per-frame plane fits are tiny SVDs, and OpenBLAS
     # spreads each over every core, next to the 1 kHz control loop
     # (measured on recorded frames: cam_pub kept 4.7 cores busy, 2.5 with

@@ -95,7 +95,7 @@ def bag_tf_buffer(bag_dir):
     return buf
 
 
-def replay(session, part_file, source, rows, impl='cpp'):
+def replay(session, part_file, source, rows, impl='cpp', acquire_shadow=False):
     import cv2
     from builtin_interfaces.msg import Time
     from rclpy.parameter import Parameter
@@ -117,7 +117,8 @@ def replay(session, part_file, source, rows, impl='cpp'):
         Parameter('publish_debug_image', value=False), Parameter('capture_fps', value=fps),
         Parameter('filter_frame', value='fr3_link0' if bag is not None else ''),
         Parameter('object_part', value=str(part_file)), Parameter('object_shadow', value=True),
-        Parameter('object_source', value=source), Parameter('object_pose_impl', value=impl)])
+        Parameter('object_source', value=source), Parameter('object_pose_impl', value=impl),
+        Parameter('object_acquire_shadow', value=bool(acquire_shadow))])
     if bag is not None:
         node.tf_buffer = bag                        # the TF the cell had, from the bag
     it = meta['intrinsics']
@@ -305,6 +306,8 @@ def main(argv=None):
     ap.add_argument('--csv', help='per-frame rows to this CSV file')
     ap.add_argument('--impl', default='cpp', choices=('cpp', 'python'),
                     help='the depth estimator (object_pose_cpp, or the Python reference)')
+    ap.add_argument('--acquire-shadow', action='store_true',
+                    help='also run the marker-free acquisition shadow (Phase 6) in its thread')
     args = ap.parse_args(argv)
     import rclpy
     rclpy.init(domain_id=88)                           # never the cell's domain
@@ -312,7 +315,7 @@ def main(argv=None):
     try:
         for s in session_dirs(args.sessions):
             meta, n, tf = replay(s, pathlib.Path(args.part).resolve(), args.source, rows,
-                                 args.impl)
+                                 args.impl, args.acquire_shadow)
             fps = int(meta.get('capture', {}).get('fps', 15))
             print(f"{s.name}: {n} frames, filters in "
                   f"{'fr3_link0 (bag TF)' if tf else 'the optical frame (no bag)'}", flush=True)
