@@ -78,7 +78,9 @@ def load_part(path):
     T_mo[:3, 3] = np.asarray(mo.get('xyz_mm', [0.0, 0.0, 0.0]), dtype=float) / 1000.0
     return {'name': doc.get('name', path.stem), 'V': V, 'F': F,
             'sym_order': int((doc.get('symmetry') or {}).get('order', 1)),
-            'T_marker_object': T_mo}
+            'T_marker_object': T_mo,
+            'box_m': (np.asarray(mesh['box_mm'], dtype=float) / 1000.0
+                      if 'box_mm' in mesh else None)}
 
 
 # ------------------------------------------------------------------- helpers
@@ -143,6 +145,35 @@ def pose_error(T_est, T_ref, sym_order=1):
     per = 360.0 / max(1, sym_order)
     yaw = (yaw + per / 2.0) % per - per / 2.0
     return D[:3, 3], float(tilt), float(yaw)
+
+
+def _ransac_plane(P, tol=0.003, iters=150, seed=0, min_frac=0.1):
+    """The plane with the most points within tol of it, refined by a least
+    squares fit on those: (n, d) with n . p + d the signed distance, n turned
+    toward the camera at the origin (d > 0). None if no plane holds min_frac."""
+    rng = np.random.default_rng(seed)
+    if len(P) > 20000:
+        P = P[rng.choice(len(P), 20000, replace=False)]
+    best, best_n = None, 0
+    for _ in range(iters):
+        a, b, c = P[rng.choice(len(P), 3, replace=False)]
+        n = np.cross(b - a, c - a)
+        L = np.linalg.norm(n)
+        if L < 1e-9:
+            continue
+        n /= L
+        cnt = int(np.count_nonzero(np.abs((P - a) @ n) < tol))
+        if cnt > best_n:
+            best_n, best = cnt, (n, a)
+    if best is None or best_n < min_frac * len(P):
+        return None
+    n, a = best
+    inl = P[np.abs((P - a) @ n) < tol]
+    fit = fit_plane_robust(inl)
+    if fit is not None:
+        n, a = fit[0], fit[1]
+    d = -float(n @ a)
+    return (n, d) if d > 0 else (-n, -d)
 
 
 # ----------------------------------------------------------------- estimator
@@ -618,6 +649,195 @@ class ObjectPoseEstimator:
         return pts, pin, nu, roi, filled
 
     # ------------------------------------------------------------- solve
+
+    # ---------------------------------------------------------- acquisition
+
+    def acquire(self, depth_m, bgr_clean, K, dist, hint=None, stride=4, max_range_m=1.0,
+                prior_err_m=0.004, max_above_m=0.3):
+        """Find the part with no prior (PERCEPTION_PLAN Phase 6): the support
+        plane by RANSAC, the clusters standing on it, and for each a box fit
+        (the top face's plane and cv2.minAreaRect of its points, sized
+        against the part's box), refined by process() from that guess.
+        Returns (T, valid, q) like process(), the best valid candidate first
+        (lowest rms); q['acquire'] lists every candidate and why it fell.
+        hint: a 4x4 whose x axis picks the symmetry member (e.g. the last
+        pose); else the member nearest the image's +x. Box parts only: a
+        connector's STL needs a global registration (Phase 7)."""
+        t_start = time.perf_counter()
+        q = self._new_q()
+        q['acquire'] = []
+        box = self.part.get('box_m') if isinstance(self.part, dict) else None
+        if box is None:
+            q['reason'] = 'acquire: box parts only (a mesh part needs Phase 7)'
+            return None, False, q
+        K = np.asarray(K, dtype=np.float64)
+        dist = np.zeros(5) if dist is None else np.asarray(dist, dtype=np.float64).ravel()
+        depth = np.asarray(depth_m, dtype=np.float64)
+        h, w = depth.shape
+        nrm = self._norm_grid(K, dist, depth.shape)[::stride, ::stride]
+        z = depth[::stride, ::stride]
+        ok = np.isfinite(z) & (z > 0.0) & (z < max_range_m)
+        P = np.stack([nrm[..., 0] * z, nrm[..., 1] * z, z], -1)
+        if ok.sum() < 200:
+            q['reason'] = 'acquire: too little depth'
+            return None, False, q
+        plane = _ransac_plane(P[ok], tol=0.003)
+        if plane is None:
+            q['reason'] = 'acquire: no support plane'
+            return None, False, q
+        n, d0 = plane                                       # n . p + d0 = height above it
+        height = np.where(ok, P @ n + d0, 0.0)
+        # Up to max_above_m over it: the part may stand on something that
+        # gives no depth (the cell's black stand, B's box).
+        above = ok & (height > 0.006) & (height < max_above_m)
+        if not above.any():
+            # Up close the part's own face can be the largest plane in view:
+            # then the support is the next plane behind it.
+            behind = ok & (height < -0.010)
+            if behind.sum() >= 200:
+                plane2 = _ransac_plane(P[behind], tol=0.003)
+                if plane2 is not None:
+                    n, d0 = plane2
+                    height = np.where(ok, P @ n + d0, 0.0)
+                    above = ok & (height > 0.006) & (height < max_above_m)
+        # Islands of one face (passive stereo up close: plain plastic and paper
+        # give no depth) join before labelling: bridge about 10 mm at the
+        # depth the points stand at. A merge of two objects fails the size
+        # check below; it never makes a false part.
+        if not above.any():
+            q['reason'] = 'acquire: nothing standing on the support plane'
+            return None, False, q
+        zm = float(np.median(z[above]))
+        r = int(np.ceil(0.010 * K[0, 0] / max(zm, 0.05) / stride / 2.0))
+        mask = cv2.dilate(above.astype(np.uint8), np.ones((2 * r + 1, 2 * r + 1), np.uint8))
+        n_lab, lab = cv2.connectedComponents(mask, connectivity=8)
+        cands = []
+        for k in range(1, n_lab):
+            sel = (lab == k) & above
+            entry, T0 = self._box_guess(P[sel], height[sel], box, hint, stride)
+            if entry is not None and entry.get('why') == 'too big':
+                # Two parts close together merged into one cluster: split it
+                # at full resolution, where a gap of a few mm is several px.
+                q['acquire'].append(entry)
+                pieces = self._split_full(depth, K, dist, (n, d0), sel, stride,
+                                          entry['height_mm'] / 1e3, box, hint)
+            else:
+                pieces = [(entry, T0)]
+            for entry, T0 in pieces:
+                if entry is None:
+                    continue
+                if T0 is not None:
+                    T, valid, qq = self.process(depth_m, bgr_clean, K, dist, T0,
+                                                prior_err_m=prior_err_m)
+                    entry.update(valid=bool(valid), why=qq['reason'], rms_mm=qq.get('rms_mm'))
+                    if T is not None and valid:
+                        cands.append((T, qq))
+                q['acquire'].append(entry)
+        q['compute_ms'] = (time.perf_counter() - t_start) * 1e3
+        if not cands:
+            q['reason'] = ('acquire: no candidate passed' if q['acquire']
+                           else 'acquire: nothing standing on the support plane')
+            return None, False, q
+        # Several parts (or none told apart without a marker): the one nearest
+        # the hint's position if there is one, else the best surface fit.
+        if hint is not None:
+            cands.sort(key=lambda c: float(np.linalg.norm(c[0][:3, 3] - hint[:3, 3])))
+        else:
+            cands.sort(key=lambda c: c[1].get('rms_mm') or 1e9)
+        T, qq = cands[0]
+        qq['support_normal'] = n.tolist()                  # the plane it stands on
+        qq['acquire'] = q['acquire']
+        qq['candidates'] = [c[0] for c in cands]
+        qq['compute_ms'] = q['compute_ms']
+        return T, True, qq
+
+    def _split_full(self, depth, K, dist, plane, sel, stride, band_m, box, hint):
+        """_box_guess for each full-resolution piece of a cluster (sel, on the
+        stride grid) that read too big, split on its face's height band only:
+        the side walls in a gap between two parts would join them."""
+        n, d0 = plane
+        ys, xs = np.nonzero(sel)
+        y0, y1 = ys.min() * stride, (ys.max() + 1) * stride
+        x0, x1 = xs.min() * stride, (xs.max() + 1) * stride
+        z = depth[y0:y1, x0:x1]
+        nrm = self._norm_grid(K, dist, depth.shape)[y0:y1, x0:x1]
+        ok = np.isfinite(z) & (z > 0.0)
+        P = np.stack([nrm[..., 0] * z, nrm[..., 1] * z, z], -1)
+        height = np.where(ok, P @ n + d0, 0.0)
+        face = ok & (np.abs(height - band_m) < 0.003)
+        n_sub, sub = cv2.connectedComponents(face.astype(np.uint8), connectivity=8)
+        out = []
+        for j in range(1, n_sub):
+            m = sub == j
+            if m.sum() >= 20 * stride * stride:
+                step = max(1, int(m.sum()) // 4000)       # as many points as a stride cluster
+                out.append(self._box_guess(P[m][::step], height[m][::step], box, hint, 1))
+        return out
+
+    def _box_guess(self, pts, hts, box, hint, stride):
+        """(entry, T0) for one cluster standing on the support plane: its
+        top face is the most populated height band (a finger lying on the
+        part is a smaller band above it), fitted as a plane, and its extent
+        by cv2.minAreaRect, sized against the part's box. T0 None when it
+        does not fit (entry['why'] says why); entry None for a scrap."""
+        if len(pts) < 20:
+            return None, None
+        dims = sorted(box)
+        bins = np.floor(hts / 0.004).astype(int)
+        vals, counts = np.unique(bins, return_counts=True)
+        band = (vals[np.argmax(counts)] + 0.5) * 0.004
+        top = pts[np.abs(hts - band) < 0.003]
+        entry = {'px': int(len(pts) * stride * stride), 'height_mm': band * 1e3}
+        if len(top) < 12:
+            entry['why'] = 'no face'
+            return entry, None
+        fit = fit_plane_robust(top)
+        if fit is None:
+            entry['why'] = 'no face'
+            return entry, None
+        nt, ct = fit[0], fit[1]
+        nt = nt if nt @ ct < 0.0 else -nt                   # out of the face, toward the camera
+        u = np.cross(nt, [1.0, 0.0, 0.0] if abs(nt[0]) < 0.9 else [0.0, 1.0, 0.0])
+        u /= np.linalg.norm(u)
+        v = np.cross(nt, u)
+        uv = np.column_stack([(top - ct) @ u, (top - ct) @ v]).astype(np.float32)
+        _, _, ang = cv2.minAreaRect(uv)
+        # The extent between the 1st and 99th percentiles along the rect's
+        # axes: a sliver of something else (a finger's side wall at the
+        # face's height) must not stretch it.
+        th = np.radians(ang)
+        ax = np.array([np.cos(th), np.sin(th)])
+        ay = np.array([-np.sin(th), np.cos(th)])
+        pa, pb = uv @ ax, uv @ ay
+        lo_a, hi_a = np.percentile(pa, [1, 99])
+        lo_b, hi_b = np.percentile(pb, [1, 99])
+        a, b = hi_a - lo_a, hi_b - lo_b
+        cx, cy = 0.5 * (lo_a + hi_a) * ax + 0.5 * (lo_b + hi_b) * ay
+        side = sorted([a, b])
+        entry['side_mm'] = [s_ * 1e3 for s_ in side]
+        # The face's extent can read short (no depth at plain edges), never long.
+        pair = min(((dims[i], dims[j]) for i in range(3) for j in range(i + 1, 3)),
+                   key=lambda pr: abs(pr[0] - side[0]) + abs(pr[1] - side[1]))
+        if any(sd > pr + 0.005 for pr, sd in zip(pair, side)):
+            entry['why'] = 'too big'
+            return entry, None
+        if any(sd < pr - 0.012 for pr, sd in zip(pair, side)):
+            entry['why'] = 'too small'
+            return entry, None
+        x = np.cos(th) * u + np.sin(th) * v
+        T0 = np.eye(4)
+        T0[:3, :3] = np.column_stack([x, np.cross(nt, x), nt])
+        T0[:3, 3] = ct + cx * u + cy * v
+        ref = hint[:3, 0] if hint is not None else np.array([1.0, 0.0, 0.0])
+        best, R0 = -2.0, T0[:3, :3]
+        for kk in range(max(1, self.sym_order)):
+            a_ = 2.0 * np.pi * kk / max(1, self.sym_order)
+            Rz = np.array([[np.cos(a_), -np.sin(a_), 0], [np.sin(a_), np.cos(a_), 0], [0, 0, 1]])
+            dd = float((T0[:3, :3] @ Rz)[:, 0] @ ref)
+            if dd > best:
+                best, R0 = dd, T0[:3, :3] @ Rz
+        T0[:3, :3] = R0
+        return entry, T0
 
     def process(self, depth_m, bgr_clean, K, dist, prior, prior_err_m=None):
         t_start = time.perf_counter()

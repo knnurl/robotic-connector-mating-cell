@@ -374,6 +374,34 @@ The vision process that owns the camera (`vision_standalone`) publishes:
 
 **Exit criteria:** acquisition ≥ 98%; 0 false acquisitions; GRIP ≥ 19/20 without the marker.
 
+> **[AS BUILT 2026-10-02, offline, first step]** `ObjectPoseEstimator.acquire(depth, bgr, K, dist, hint=None)`. Not wired into the vision node yet.
+>
+> **How it works:**
+> 1. **Support plane:** RANSAC. If nothing stands on the first plane (up close the cube's own face is the largest plane in view), the next plane behind it.
+> 2. **Clusters:** clusters above the plane, up to 300 mm (the part may stand on the black stand, which gives no depth). A face's islands are joined over about 10 mm.
+> 3. **Box fit per cluster:** the most populated height band is the face. Its extent is minAreaRect between the 1st and 99th percentiles along the rect's axes, sized against the part's box (−12/+5 mm).
+> 4. **Too big:** a cluster that reads too big is split at full resolution on its face band.
+> 5. **Refinement:** `process()` refines each guess. Several valid candidates: the one nearest the hint wins, else the lowest rms.
+>
+> Box parts only; a mesh part (the connector) needs Phase 7.
+>
+> **`tools/fr3/vision/acquire_eval.py`, no prior, against the marker:**
+>
+> | Recording | Correct | Notes |
+> |---|---|---|
+> | 09-29 stills, cube resting | 96.3 % | |
+> | 10-02 stills, cube resting | 69.1 % | 93-98 % at 150-350 mm, 25-56 % under 150 mm |
+> | 09-29 hand-held TRACK | 31 % | 0 false; hand and cube make one cluster, by design out of scope |
+>
+> - **Position:** p50/p95 0.25/0.55 mm (09-29) and 0.66/0.94 mm (10-02).
+> - **Marker masked out of depth:** the same results.
+> - **Disagreements:** 7 frames at 250-350 mm disagree with the marker by 3-5° in tilt, within 0.3-1.0 mm in position. Two of them the floor favours the acquisition. The other five stay unresolved, because the support plane found there is tilted against both.
+> - **Synthetic:** a finger over the face, or a flush neighbour, is refused (the refinement's inlier gate). Cubes 20 mm apart are found.
+> - **Next:**
+>   - close range (< 150 mm), where clusters read too big or too small;
+>   - an independent angle reference at 300 mm;
+>   - then wiring it in: Phase 5's re-acquire, and the panel's ACQUIRED.
+
 **Risks:** distractors of similar size. The size and rms gates catch them; otherwise the operator confirms.
 
 ### Phase 7 (starts only when the connector is chosen)

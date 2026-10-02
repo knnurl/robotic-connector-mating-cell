@@ -486,3 +486,37 @@ def test_a_dark_band_beside_the_outline_is_not_the_part():
                                                           perturbed(T, 3.0, 1.5))
         assert valid and q['edge_source'] == 'colour', q['reason']
         check(T_c, T, mm=0.15, deg=0.1)
+
+
+# ---------------------------------------------------------------- acquisition (Phase 6)
+
+PART_BOX = dict(PART, box_m=np.array([CUBE] * 3))
+
+
+def test_acquire_finds_the_cube_with_no_prior_at_any_range():
+    for z, yaw, hole in ((0.10, 12.0, None), (0.25, 40.0, None), (0.08, -20.0, _islands)):
+        T = pose([0.01, -0.02, z], yaw=yaw, tilt=2.0)
+        depth, bgr = colour_scene(T, hole=hole)
+        T_est, valid, q = ObjectPoseEstimator(PART_BOX, depth_fallback=False).acquire(
+            depth, bgr, K, None)
+        assert valid, q['reason']
+        check(T_est, T, mm=0.2, deg=0.2)
+
+
+def test_acquire_with_nothing_there_or_a_finger_over_the_face_finds_nothing_false():
+    T = pose([0.01, -0.02, 0.15], yaw=12.0, tilt=2.0)
+    depth, bgr = colour_scene(T)
+    empty = np.where(depth < 0.2, 0.0, depth)                # only the table left
+    _, valid, q = ObjectPoseEstimator(PART_BOX).acquire(empty, bgr, K, None)
+    assert not valid and 'nothing standing' in q['reason']
+    over = T.copy()
+    over[:3, 3] += T[:3, 2] * 0.012
+    depth, bgr = colour_scene(T, extra=[([0.018, 0.07, 0.01], over, (60, 60, 60), None)])
+    T_est, valid, q = ObjectPoseEstimator(PART_BOX, depth_fallback=False).acquire(
+        depth, bgr, K, None)
+    assert not valid or np.linalg.norm(pose_error(T_est, T, 4)[0]) < 0.001
+
+
+def test_acquire_needs_a_box_part():
+    _, valid, q = ObjectPoseEstimator(PART).acquire(np.ones((480, 640)), None, K, None)
+    assert not valid and 'box parts only' in q['reason']
