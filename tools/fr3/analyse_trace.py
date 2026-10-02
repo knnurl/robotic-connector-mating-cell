@@ -1,168 +1,229 @@
 #!/usr/bin/env python3
-"""Summarise an align_gui auto-converge trace.
+"""Summarise an FR3 cell log.
 
-    python3 tools/fr3/analyse_trace.py                  # newest trace
-    python3 tools/fr3/analyse_trace.py logs/foo.jsonl
+    python3 tools/fr3/analyse_trace.py                  # newest log
+    python3 tools/fr3/analyse_trace.py <log.jsonl> ...
 
-Built to answer one question first: when a level step is commanded, does the
-tilt actually change, and which joints moved? If commanded_deg is nonzero but
-achieved_rot_deg is ~0, the rotation never reached the robot. If both are
-nonzero but tilt_change is positive, the correction has the wrong sign. If
-tilt just wanders while both look right, the marker's orientation estimate is
-the problem, not the controller.
+Two kinds, both one JSON object per line:
+
+  cell_*.jsonl      cell_panel's session trace: header and outcome, ladder
+                    events, ALIGN iterations and steps, TRACK as the panel
+                    saw it (start, stop, the node's status changes)
+  tracking_*.jsonl  tracking_node's per-tick log, one per TRACK run
+                    (log_record in mating_controller/src/tracking_node.cpp)
+
+With no argument it takes the newest of either under $FR3_LOG_DIR, day
+folders included, else under tools/fr3/logs. Files are streamed: a panel
+trace carries the 50 Hz robot samples and can run to hundreds of MB.
 """
 
+import collections
+import datetime
 import json
+import os
 import pathlib
+import re
 import sys
+import textwrap
 
 import numpy as np
 
-ARM = [f'fr3_joint{i}' for i in range(1, 8)]
+LOG_DIR = pathlib.Path(__file__).with_name('logs')
+PATTERNS = ('cell_*.jsonl', 'tracking_*.jsonl')
+# ALIGN step records: commanded field, achieved field, unit
+STEPS = {'translate': ('cmd_d_base_mm', 'achieved_trans_mm', 'mm'),
+         'level': ('clamped_cmd_deg', 'achieved_rot_deg', 'deg'),
+         'inplane': ('cmd_deg', 'achieved_rot_deg', 'deg')}
 
 
-def normal_flip_check(iters):
-    """Detect the planar-marker pose ambiguity.
-
-    A small, nearly fronto-parallel planar marker has two poses that project
-    almost identically - tilted the same amount in OPPOSITE directions. The
-    solver picks one arbitrarily per frame, so the tilt MAGNITUDE looks
-    stable while its in-plane DIRECTION flips ~180 deg. Every correction
-    then undoes the previous one and levelling cannot converge, which shows
-    up as the wrist joint alternating sign on every step.
-    """
-    N = np.array([r['marker_normal_cam'] for r in iters
-                  if 'marker_normal_cam' in r])
-    if len(N) < 4:
-        return ''
-    ang = np.degrees(np.arctan2(N[:, 1], N[:, 0]))
-    d = np.abs(np.diff(ang))
-    d = np.minimum(d, 360 - d)                  # wrap to 0..180
-    flips = int((d > 120).sum())
-    frac = flips / len(d)
-    out = [f'  normal in-plane direction: {flips}/{len(d)} '
-           f'frame-to-frame flips >120 deg ({frac*100:.0f}%)',
-           f'  nz std {N[:, 2].std():.4f} (stable) vs '
-           f'ny std {N[:, 1].std():.4f} (flipping)']
-    if frac > 0.3:
-        out.append('  *** PLANAR POSE AMBIGUITY: the marker normal is '
-                   'flipping between the two')
-        out.append('      mirror solutions. Tilt magnitude is meaningless '
-                   'and levelling CANNOT')
-        out.append('      converge. Fix the MEASUREMENT (bigger marker / '
-                   'ArUco board / depth')
-        out.append('      plane fit) - the controller is not at fault.')
-    return '\n'.join(out)
+def newest_log():
+    """Newest log by mtime: $FR3_LOG_DIR first, then tools/fr3/logs."""
+    env = os.environ.get('FR3_LOG_DIR')
+    for root in ([pathlib.Path(env)] if env else []) + [LOG_DIR]:
+        found = [f for pat in PATTERNS for f in root.rglob(pat)]
+        if found:
+            return max(found, key=lambda f: f.stat().st_mtime)
+    return None
 
 
-def load(path):
-    recs = []
-    for line in pathlib.Path(path).read_text().splitlines():
-        line = line.strip()
-        if line:
+def records(path):
+    """Each JSON object in turn. A crash can leave a torn last line."""
+    with open(path) as f:
+        for line in f:
             try:
-                recs.append(json.loads(line))
+                yield json.loads(line)
             except json.JSONDecodeError:
-                pass
-    return recs
+                continue
 
 
-def main():
-    if len(sys.argv) > 1:
-        path = pathlib.Path(sys.argv[1])
-    else:
-        d = pathlib.Path(__file__).with_name('logs')
-        files = sorted(d.glob('autoconverge_*.jsonl')) if d.is_dir() else []
-        if not files:
-            print(f'no traces in {d}')
-            return
-        path = files[-1]
-    recs = load(path)
-    if not recs:
-        print(f'{path}: empty')
-        return
-    print(f'=== {path.name}  ({len(recs)} records) ===')
+def mean(values):
+    v = np.array(values, dtype=float)     # None -> nan
+    v = v[np.isfinite(v)]
+    return v.mean() if v.size else float('nan')
 
-    start = next((r for r in recs if r.get('rec') == 'run_start'), {})
-    end = next((r for r in recs if r.get('rec') == 'run_end'), {})
-    for k in ('target_mm', 'pos_tol_mm', 'rot_tol_deg', 'step_mm',
-              'rot_step_deg', 'speed_pct', 'z_floor_mm', 'cap'):
-        if k in start:
-            print(f'  {k:14s} {start[k]}')
-    print(f'  outcome        {end.get("outcome", "?")}')
 
-    iters = [r for r in recs if r.get('rec') == 'iter']
-    if iters:
-        e = np.array([r['err_mm'] for r in iters])
-        t = np.array([r['tilt_deg'] for r in iters])
-        print(f'\n-- {len(iters)} iterations --')
-        print(f'  err  mm : first {e[0]:7.2f}  last {e[-1]:7.2f}  '
-              f'min {e.min():7.2f}')
-        print(f'  tilt deg: first {t[0]:7.2f}  last {t[-1]:7.2f}  '
-              f'min {t.min():7.2f}  max {t.max():7.2f}')
-        if len(t) > 3:
-            slope = np.polyfit(np.arange(len(t)), t, 1)[0]
-            print(f'  tilt trend: {slope:+.4f} deg/iter '
-                  f'({"reducing" if slope < -0.01 else "NOT reducing"})')
-        flip = normal_flip_check(iters)
-        if flip:
-            print(flip)
+def spread(values, unit):
+    v = np.array([x for x in values if x is not None], dtype=float)
+    if not v.size:
+        return 'none'
+    p50, p95 = np.percentile(v, [50, 95])
+    return f'p50 {p50:.2f}  p95 {p95:.2f}  max {v.max():.2f} {unit}'
 
-    levels = [r for r in recs if r.get('rec') == 'level']
-    print(f'\n-- {len(levels)} level steps --')
-    if levels:
-        print(f'  {"cmd":>7} {"achieved":>9} {"tilt_before":>12}'
-              f' {"tilt_after":>11} {"change":>8}  {"dJ5":>7} {"dJ6":>7}'
-              f' {"dJ7":>7}  ok')
-        for r in levels:
-            jb, ja = r.get('joints_before', {}), r.get('joints_after', {})
-            dj = {n: (ja.get(n, float("nan")) - jb.get(n, float("nan")))
-                  for n in ARM}
-            print(f'  {r.get("clamped_cmd_deg", float("nan")):7.3f}'
-                  f' {r.get("achieved_rot_deg", float("nan")):9.3f}'
-                  f' {r.get("tilt_before_deg", float("nan")):12.3f}'
-                  f' {r.get("tilt_after_deg", float("nan")):11.3f}'
-                  f' {r.get("tilt_change_deg", float("nan")):8.3f}'
-                  f'  {np.degrees(dj["fr3_joint5"]):7.3f}'
-                  f' {np.degrees(dj["fr3_joint6"]):7.3f}'
-                  f' {np.degrees(dj["fr3_joint7"]):7.3f}  {r.get("ok")}')
-        cmd = np.array([r.get('clamped_cmd_deg', np.nan) for r in levels])
-        ach = np.array([r.get('achieved_rot_deg', np.nan) for r in levels])
-        chg = np.array([r.get('tilt_change_deg', np.nan) for r in levels])
-        print(f'\n  mean commanded {np.nanmean(cmd):.3f} deg, '
-              f'mean achieved {np.nanmean(ach):.3f} deg '
-              f'(ratio {np.nanmean(ach)/max(np.nanmean(cmd), 1e-9):.2f})')
-        print(f'  mean tilt change {np.nanmean(chg):+.3f} deg '
-              f'(want NEGATIVE)')
-        # verdict
-        # order matters: "barely moves" must be tested before "got worse",
-        # or a tiny positive drift is misreported as a sign error
-        if np.nanmean(ach) < 0.1 * np.nanmean(cmd):
-            print('  VERDICT: rotation commanded but NOT executed '
-                  '-> planner/controller is dropping the orientation change')
-        elif abs(np.nanmean(chg)) < 0.1 * np.nanmean(cmd):
-            print('  VERDICT: rotation executed but tilt barely moves '
-                  '-> marker normal estimate likely dominated by noise/bias')
-        elif np.nanmean(chg) > 0:
-            print('  VERDICT: rotation executed but tilt got WORSE '
-                  '-> sign/frame error in the correction')
+
+def reason_kind(reason):
+    """Numbers out, so 'lead 12.3 mm' and 'lead 14.1 mm' count as one."""
+    return re.sub(r'-?\d+(\.\d+)?', '#', reason or '') or '?'
+
+
+def wrapped(label, text):
+    return textwrap.wrap(text, 76, initial_indent=f'  {label:10s} ',
+                         subsequent_indent=' ' * 13)
+
+
+def summarise_tracking(path):
+    n = published = clamped = 0
+    t0 = t1 = None
+    holds = collections.Counter()
+    pos, rot, lead_mm, lead_deg, buzz, policies = [], [], [], [], [], []
+    for r in records(path):
+        n += 1
+        t0, t1 = (r['t'] if t0 is None else t0), r['t']
+        if r.get('published'):
+            published += 1
+            clamped += bool(r.get('reason'))        # 'clamped: ...'
         else:
-            print('  VERDICT: levelling is working')
+            holds[reason_kind(r.get('reason'))] += 1
+        pos.append(r.get('pos_err_mm'))
+        rot.append(r.get('rot_err_deg'))
+        lead_mm.append(r.get('lead_mm'))
+        lead_deg.append(r.get('lead_deg'))
+        buzz.append(r.get('buzz_nm'))            # absent before the watchdog
+        if not policies or policies[-1][1] != r.get('policy'):
+            policies.append((r['t'], r.get('policy')))
+    out = [f'=== {path.name}  (tracking_node, {n} ticks) ===']
+    if not n:
+        return out
+    dur, held = t1 - t0, n - published
+    out += [f'  duration   {dur:.1f} s',
+            f'  tracking   {dur * published / n:.1f} s ({published / n:.0%}),'
+            f' {clamped} ticks clamped',
+            f'  holding    {dur * held / n:.1f} s ({held / n:.0%})']
+    out += [f'    {k:6d}  {kind}' for kind, k in holds.most_common()]
+    out += [f'  pos error  {spread(pos, "mm")}',
+            f'  rot error  {spread(rot, "deg")}',
+            f'  lead       {spread(lead_mm, "mm")}',
+            f'             {spread(lead_deg, "deg")}',
+            f'  policy     {policies[0][1]}' + ''.join(
+                f', {t - t0:.1f} s -> {p}' for t, p in policies[1:]),
+            f'  buzz       {spread(buzz, "Nm")}']
+    return out
 
-    trans = [r for r in recs if r.get('rec') == 'translate']
-    print(f'\n-- {len(trans)} translate steps --')
-    if trans:
-        ach = np.array([r.get('achieved_trans_mm', np.nan) for r in trans])
-        cmd = np.array([np.linalg.norm(r.get('cmd_d_base_mm', [np.nan] * 3))
-                        for r in trans])
-        print(f'  mean commanded {np.nanmean(cmd):.2f} mm, '
-              f'mean achieved {np.nanmean(ach):.2f} mm '
-              f'(ratio {np.nanmean(ach)/max(np.nanmean(cmd), 1e-9):.2f})')
-        bad = [r for r in trans if not r.get('ok')]
-        if bad:
-            print(f'  {len(bad)} failed: '
-                  f'{sorted({r.get("msg", "?") for r in bad})}')
+
+def summarise_cell(path):
+    counts = collections.Counter()
+    head = end = t0 = t1 = None
+    samples, rate_min, force_max = 0, float('inf'), 0.0
+    iters, steps = [], collections.defaultdict(list)
+    starts, status, policy = [], [], []
+    for r in records(path):
+        rec, t = r.get('rec'), r.get('t')
+        counts[rec] += 1
+        t0, t1 = (t if t0 is None else t0), t
+        if rec == 'session_start':
+            head = r
+        elif rec == 'session_end':
+            end = r
+        elif rec == 'sample':
+            samples += 1
+            rate_min = min(rate_min, r.get('success_rate', rate_min))
+            force_max = max(force_max, float(np.linalg.norm(r['force'])))
+        elif rec == 'iter':
+            iters.append((r.get('err_mm'), r.get('tilt_deg'),
+                          r.get('inplane_err_deg')))
+        elif rec in STEPS:
+            cmd_k, ach_k, _ = STEPS[rec]
+            cmd = r.get(cmd_k)
+            if isinstance(cmd, list):                  # a vector, in mm
+                cmd = float(np.linalg.norm(cmd))
+            elif cmd is not None:                      # signed; achieved is |.|
+                cmd = abs(float(cmd))
+            steps[rec].append((r.get('ok'), cmd, r.get(ach_k)))
+        elif rec == 'track_start':
+            starts.append(bool(r.get('ok')))
+        elif rec == 'track_status':
+            status.append((t, r.get('state'), r.get('reason')))
+        elif rec == 'track_policy':
+            policy.append(f"{r.get('policy')}"
+                          + ('' if r.get('ok') else ' (refused)'))
+    out = [f'=== {path.name}  (cell_panel, {sum(counts.values())} '
+           'records) ===']
+    if t0 is None:
+        return out
+    head = head or {}
+    when = datetime.datetime.fromtimestamp(t0).strftime('%Y-%m-%d %H:%M:%S')
+    out.append(f'  session    {when}, {t1 - t0:.1f} s, '
+               f'tab {head.get("tab", "?")}')
+    out += wrapped('header', '  '.join(
+        f'{k} {v}' for k, v in head.items()
+        if k not in ('rec', 't', 'tab') and not isinstance(v, list)))
+    out.append('  outcome    ' + (str(end.get('outcome') or '-') if end
+                                  else 'no session_end - crashed, or open'))
+    out += wrapped('events', ', '.join(f'{k} {v}' for k, v in counts.items()
+                                       if k != 'sample'))
+    if samples:
+        out.append(f'  samples    {samples}, control success min '
+                   f'{rate_min * 100:.1f}%, |F ext| max {force_max:.1f} N')
+    if iters:
+        out.append(f'-- ALIGN: {len(iters)} iterations --')
+        for name, col, unit in (('|e|', 0, 'mm'), ('tilt', 1, 'deg'),
+                                ('in-plane', 2, 'deg')):
+            v = np.array([it[col] for it in iters], dtype=float)
+            if np.isfinite(v).any():
+                out.append(f'  {name:9s}  first {v[0]:7.2f}  last {v[-1]:7.2f}'
+                           f'  min {np.nanmin(v):7.2f} {unit}')
+    for kind, rows in steps.items():
+        unit = STEPS[kind][2]
+        out.append(f'  {kind:9s}  {len(rows)} steps, '
+                   f'{sum(ok is False for ok, _, _ in rows)} failed; mean '
+                   f'commanded {mean([c for _, c, _ in rows]):.2f} {unit}, '
+                   f'achieved {mean([a for _, _, a in rows]):.2f} {unit}')
+    if starts or status or policy:
+        out.append('-- TRACK, as the panel saw it --')
+        out.append(f'  START      {len(starts)} ({sum(starts)} ok), '
+                   f'STOP {counts["track_stop"]}')
+        dwell = collections.Counter()
+        ends = [s[0] for s in status[1:]] + [t1]
+        for (ta, state, _), tb in zip(status, ends):
+            dwell[state] += tb - ta
+        if dwell:
+            out += wrapped('node state', ', '.join(
+                f'{s} {d:.1f} s' for s, d in dwell.items()))
+        why = collections.Counter(reason_kind(r) for _, _, r in status if r)
+        out += [f'    {k:6d}  {kind}' for kind, k in why.most_common()]
+        if policy:
+            out.append('  policy     ' + ' -> '.join(policy))
+    return out
+
+
+def summarise(path):
+    path = pathlib.Path(path)
+    if path.name.startswith('tracking_'):
+        return summarise_tracking(path)
+    return summarise_cell(path)
+
+
+def main(argv=None):
+    paths = sys.argv[1:] if argv is None else argv
+    if not paths:
+        newest = newest_log()
+        if newest is None:
+            print('no cell_ or tracking_ logs under $FR3_LOG_DIR or', LOG_DIR)
+            return 1
+        paths = [newest]
+    for p in paths:
+        print('\n'.join(summarise(p)))
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

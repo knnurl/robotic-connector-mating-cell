@@ -11,10 +11,17 @@ namespace fr3_mating_controllers
 namespace
 {
 // Read at configure time only. Accepting them while configured would leave
-// the node reporting values the loop is not using.
-constexpr std::array<const char *, 7> kConfigureOnlyParams{
+// the node reporting values the loop is not using. The gains and the slew
+// pair are NOT here: both are live (see adopt_pending_params).
+constexpr std::array kConfigureOnlyParams{
     "arm_id", "max_force_n", "max_torque_nm", "tau_max_nm", "tau_rate_limit",
-    "setpoint_slew_mps", "setpoint_slew_rps"};
+    "joint_lower", "joint_upper", "joint_wall_margin_rad", "joint_wall_k", "joint_wall_d",
+    "joint_speed_frac", "joint_brake_d"};
+
+// FR3 joint limits (franka_description joint_limits.yaml), the defaults the
+// yaml repeats; the wall's 5 deg margin and its gains (impedance_detail.hpp).
+const std::vector<double> kFr3Lower{-2.7437, -1.7837, -2.9007, -3.0421, -2.8065, 0.5445, -3.0159};
+const std::vector<double> kFr3Upper{2.7437, 1.7837, 2.9007, -0.1518, 2.8065, 4.5169, 3.0159};
 }  // namespace
 
 controller_interface::InterfaceConfiguration
@@ -66,6 +73,16 @@ CartesianImpedanceStrokeController::on_init()
             "tau_max_nm", {tau_max_nm_(0), tau_max_nm_(1), tau_max_nm_(2),
                            tau_max_nm_(3), tau_max_nm_(4), tau_max_nm_(5),
                            tau_max_nm_(6)});
+        auto_declare<std::vector<double>>("joint_lower", kFr3Lower);
+        auto_declare<std::vector<double>>("joint_upper", kFr3Upper);
+        auto_declare<double>("joint_wall_margin_rad", 0.14);
+        auto_declare<std::vector<double>>(
+            "joint_wall_k", {600.0, 600.0, 600.0, 600.0, 150.0, 150.0, 150.0});
+        auto_declare<std::vector<double>>(
+            "joint_wall_d", {20.0, 20.0, 20.0, 20.0, 3.0, 3.0, 1.5});
+        auto_declare<double>("joint_speed_frac", 0.7);
+        auto_declare<std::vector<double>>(
+            "joint_brake_d", {120.0, 120.0, 100.0, 100.0, 6.0, 6.0, 3.0});
     } catch (const std::exception &e) {
         RCLCPP_ERROR(get_node()->get_logger(), "on_init failed: %s", e.what());
         return CallbackReturn::ERROR;
@@ -119,10 +136,47 @@ CartesianImpedanceStrokeController::on_configure(const rclcpp_lifecycle::State &
         tau_max_nm_(i) = tau_max[i];
     }
 
+    // The joint-limit wall (detail::joint_wall_torque), in every mode.
+    {
+        const auto lo = get_node()->get_parameter("joint_lower").as_double_array();
+        const auto hi = get_node()->get_parameter("joint_upper").as_double_array();
+        const auto wk = get_node()->get_parameter("joint_wall_k").as_double_array();
+        const auto wd = get_node()->get_parameter("joint_wall_d").as_double_array();
+        const auto bd = get_node()->get_parameter("joint_brake_d").as_double_array();
+        if (lo.size() != 7 || hi.size() != 7 || wk.size() != 7 || wd.size() != 7 ||
+            bd.size() != 7) {
+            RCLCPP_ERROR(logger, "joint_lower, joint_upper, joint_wall_k, joint_wall_d and "
+                                 "joint_brake_d must have 7 entries each");
+            return CallbackReturn::ERROR;
+        }
+        detail::JointWall wall;
+        std::copy(lo.begin(), lo.end(), wall.lower.begin());
+        std::copy(hi.begin(), hi.end(), wall.upper.begin());
+        std::copy(wk.begin(), wk.end(), wall.k.begin());
+        std::copy(wd.begin(), wd.end(), wall.d.begin());
+        std::copy(bd.begin(), bd.end(), wall.brake_d.begin());
+        wall.margin_rad = get_node()->get_parameter("joint_wall_margin_rad").as_double();
+        wall.speed_frac = get_node()->get_parameter("joint_speed_frac").as_double();
+        const std::string wall_error = detail::validate_wall(wall);
+        if (!wall_error.empty()) {
+            RCLCPP_ERROR(logger, "refusing to configure: %s", wall_error.c_str());
+            return CallbackReturn::ERROR;
+        }
+        wall_ = wall;
+        RCLCPP_INFO(logger, "Joint-limit wall: %.1f deg before each limit, k [%.0f..%.0f] "
+                            "Nm/rad, d [%.0f..%.0f] Nm s/rad%s; speed brake beyond %.0f %% of "
+                            "the FR3 envelope%s",
+                    wall_.margin_rad * 180.0 / M_PI, wall_.k[6], wall_.k[0], wall_.d[6],
+                    wall_.d[0], wall_.margin_rad > 0.0 ? "" : " (OFF)",
+                    wall_.speed_frac * 100.0, wall_.speed_frac > 0.0 ? "" : " (OFF)");
+    }
+
     pending_k_pos_tool_ = k_pos_tool_;
     pending_k_rot_tool_ = k_rot_tool_;
     pending_damping_ratio_ = damping_ratio_;
     pending_nullspace_stiffness_ = nullspace_stiffness_;
+    pending_setpoint_slew_mps_ = setpoint_slew_mps_;
+    pending_setpoint_slew_rps_ = setpoint_slew_rps_;
     params_dirty_ = false;
 
     // Live tuning: the ladder adjusts stiffness by +/-50 N/m and toggles
@@ -141,7 +195,10 @@ CartesianImpedanceStrokeController::on_configure(const rclcpp_lifecycle::State &
             Eigen::Vector3d kr_new = pending_k_rot_tool_;
             double zeta_new = pending_damping_ratio_;
             double ns_new = pending_nullspace_stiffness_;
+            double slew_mps_new = pending_setpoint_slew_mps_;
+            double slew_rps_new = pending_setpoint_slew_rps_;
             bool gains_touched = false;
+            bool slew_touched = false;
             int float_request = -1;  // -1 untouched, 0 off, 1 on
 
             for (const auto &p : params) {
@@ -171,9 +228,18 @@ CartesianImpedanceStrokeController::on_configure(const rclcpp_lifecycle::State &
                     }
                     (name == "k_pos_tool" ? kp_new : kr_new) = Eigen::Vector3d(v[0], v[1], v[2]);
                     gains_touched = true;
+                } else if (name == "setpoint_slew_mps") {
+                    slew_mps_new = p.as_double();
+                    slew_touched = true;
+                } else if (name == "setpoint_slew_rps") {
+                    slew_rps_new = p.as_double();
+                    slew_touched = true;
                 }
             }
 
+            // Both validations run before either staging block: a rejected set
+            // must leave pending_* exactly as it found them, or the next valid
+            // set adopts a value this one was told had been refused.
             if (gains_touched) {
                 const std::string err = detail::validate_gains(kp_new, kr_new, zeta_new, ns_new);
                 if (!err.empty()) {
@@ -181,10 +247,26 @@ CartesianImpedanceStrokeController::on_configure(const rclcpp_lifecycle::State &
                     result.reason = err;
                     return result;
                 }
+            }
+            if (slew_touched) {
+                const std::string err = detail::validate_slew(slew_mps_new, slew_rps_new);
+                if (!err.empty()) {
+                    result.successful = false;
+                    result.reason = err;
+                    return result;
+                }
+            }
+            if (gains_touched) {
                 pending_k_pos_tool_ = kp_new;
                 pending_k_rot_tool_ = kr_new;
                 pending_damping_ratio_ = zeta_new;
                 pending_nullspace_stiffness_ = ns_new;
+            }
+            if (slew_touched) {
+                pending_setpoint_slew_mps_ = slew_mps_new;
+                pending_setpoint_slew_rps_ = slew_rps_new;
+            }
+            if (gains_touched || slew_touched) {
                 params_dirty_ = true;
             }
             if (float_request >= 0) {
@@ -310,6 +392,8 @@ void CartesianImpedanceStrokeController::adopt_pending_params()
     k_rot_tool_ = pending_k_rot_tool_;
     damping_ratio_ = pending_damping_ratio_;
     nullspace_stiffness_ = pending_nullspace_stiffness_;
+    setpoint_slew_mps_ = pending_setpoint_slew_mps_;
+    setpoint_slew_rps_ = pending_setpoint_slew_rps_;
     params_dirty_ = false;
 }
 
@@ -406,10 +490,16 @@ CartesianImpedanceStrokeController::update(const rclcpp::Time &,
     }
     was_floating_ = floating;
 
+    // The joint-limit wall and speed brake, in every mode: a stop short of
+    // each limit instead of the robot's reflex taking the driver down. (No
+    // logging here: this is the normal path of the 1 kHz loop.)
+    const Vector7d tau_wall = detail::joint_wall_torque(q_, dq_, wall_);
+
     if (floating) {
         // Build-step-1 skeleton, kept as a commissioning switch: the arm
-        // free-floats (libfranka adds gravity; we add coriolis only).
-        write_torque(saturate_torque_rate(clamp_joint_torque(coriolis)));
+        // free-floats (libfranka adds gravity; we add coriolis only), inside
+        // the joint-limit wall.
+        write_torque(saturate_torque_rate(clamp_joint_torque(coriolis + tau_wall)));
         return controller_interface::return_type::OK;
     }
 
@@ -492,7 +582,7 @@ CartesianImpedanceStrokeController::update(const rclcpp::Time &,
         (nullspace_stiffness_ * (q_nullspace_ - q_) -
          2.0 * std::sqrt(nullspace_stiffness_) * dq_);
 
-    Vector7d tau_raw = tau_task + tau_nullspace + coriolis;
+    Vector7d tau_raw = tau_task + tau_nullspace + coriolis + tau_wall;
     if (!tau_raw.allFinite()) {
         RCLCPP_ERROR_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(),
                               1000, "non-finite torque - commanding zero");

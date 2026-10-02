@@ -7,6 +7,7 @@ __pycache__/
 # Generated knowledge graph (4.6 MB, rebuilt with `graphify update .`)
 graphify-out/
 
-# Per-run alignment traces written by tools/fr3/align_gui.py. Session
-# artifacts, not source; analyse in place with tools/fr3/analyse_trace.py.
+# Per-run traces written by the cell panel (tools/fr3/cell/) when FR3_LOG_DIR is unset
+# (fr3_env.sh sets it, and then they go outside the repo). Session artifacts,
+# not source; analyse in place with tools/fr3/analyse_trace.py.
 tools/fr3/logs/

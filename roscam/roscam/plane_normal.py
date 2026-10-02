@@ -14,8 +14,10 @@ commands alternating corrections and cannot converge.
 
 Depth does not share the ambiguity: a plane fitted to the depth samples on
 the marker has exactly one normal. It is not used as the pose itself (the
-ArUco corner fit is far better for position and in-plane rotation) - only
-to pick WHICH of the two IPPE solutions is real.
+ArUco corner fit is far better for the direction to the marker and the
+in-plane rotation) - only to pick WHICH of the two IPPE solutions is real,
+for the out-of-plane tilt (fuse_orientation) and, optionally, for the
+distance along the ray (range_scale).
 
 Pure numpy/cv2, no ROS, so it unit-tests standalone.
 """
@@ -219,6 +221,31 @@ def fuse_orientation(R_aruco, normal):
     return np.column_stack([x, y / yn, n])
 
 
+def range_scale(t, normal, point, min_cos=0.1):
+    """s such that s * t lies on the plane through point with this normal:
+    where the camera ray through the marker position t meets the depth plane.
+
+    Measured on this cell (runs/2026-09-25/analysis): the ArUco distance
+    reads long by ~1 mm at 100 mm growing to ~10 mm at 300 mm, as distance
+    squared (the marker reads ~0.7 px narrow), while its direction held to
+    ~2 mm over 200 mm and depth tracked the robot kinematics within 1.5 mm.
+    So keep the ray, take the distance from depth.
+
+    None if the ray grazes the plane (|cos| < min_cos) or meets it behind
+    the camera.
+    """
+    t = np.asarray(t, dtype=float).reshape(3)
+    n = np.asarray(normal, dtype=float).reshape(3)
+    tn, nn = np.linalg.norm(t), np.linalg.norm(n)
+    if tn < 1e-12 or nn < 1e-12:
+        return None
+    nt = float(n @ t)
+    if abs(nt) < min_cos * tn * nn:
+        return None
+    s = float(n @ np.asarray(point, dtype=float).reshape(3)) / nt
+    return s if s > 0.0 else None
+
+
 def inplane_angle(R_cam_marker):
     """Angle of the marker X axis in the image, degrees.
 
@@ -281,3 +308,28 @@ def disambiguate_by_normal(candidate_normals, reference_normal):
         dots.append(-np.inf if nn < 1e-12 else float((n / nn) @ ref))
     i = int(np.argmax(dots))
     return i, dots[i]
+
+
+def solve_square_by_depth(obj_pts, img_pts, camera_matrix, dist_coeffs, depth_m,
+                          scale=1.6):
+    """(rvec, tvec, depth_normal, depth_centroid) of a square marker whose
+    IPPE mirror ambiguity is resolved by the depth plane alone - for a STATIC
+    marker (e.g. a place target on the table), where there is no history to
+    lock in on. The depth plane comes back too: IPPE's out-of-plane angle is
+    the badly conditioned part, so callers publish fuse_orientation(R,
+    normal), as the tracked marker does, and may take the distance from it
+    (range_scale). None if there is no depth plane to decide by, or the
+    solve fails; a marker that is never guessed is better than one that is
+    sometimes the mirror."""
+    fit = marker_plane_normal(depth_m, img_pts, camera_matrix[0, 0], camera_matrix[1, 1],
+                              camera_matrix[0, 2], camera_matrix[1, 2], scale=scale)
+    if fit is None:
+        return None
+    n_sol, rvecs, tvecs, _ = cv2.solvePnPGeneric(
+        obj_pts, img_pts, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_IPPE_SQUARE)
+    if not n_sol:
+        return None
+    pick = disambiguate_by_normal([cv2.Rodrigues(r)[0][:, 2] for r in rvecs], fit['normal'])
+    if pick is None:
+        return None
+    return rvecs[pick[0]], tvecs[pick[0]], fit['normal'], fit['centroid']

@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>melfa_cell</name>
+  <version>1.2.0</version>
+  <description>MELFA RV-5AS cell hardware: GPIO/gripper/safety demos from the ROS-I AP Annual Summit 2024 Masterclass, and one legacy demo. Not needed for the FR3.</description>
+  <maintainer email="k.ural1@salford.ac.uk">Kaan Ural</maintainer>
+  <license>Apache License 2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+
+  <!-- melfa_msgs / melfa_masterclass_msgs only exist on the robot PC;
+       plc_ and hmi_ are built conditionally when they are found -->
+  <exec_depend>melfa_masterclass_msgs</exec_depend>
+
+  <!-- only needed with -DBUILD_LEGACY_DEMOS=ON -->
+  <exec_depend>moveit_ros_planning_interface</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

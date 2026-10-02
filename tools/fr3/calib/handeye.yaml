@@ -1,0 +1,35 @@
+# The FR3 cell's hand-eye calibration - the ONE copy. fr3_cell.launch.py
+# publishes it as the static TF fr3_hand_tcp -> camera_color_optical_frame,
+# and cell_panel's ALIGN tab builds its camera rotation from it.
+#
+# Measured 2026-09-15 with roscam.handeye_calib: 21 poses, Tsai selected
+# (all four solvers agreed to 0.05 mm / 0.01 deg), residual 3.17 mm /
+# 1.57 deg. Validated: marker static-point scatter 8.14 mm across the 21
+# poses vs 170.6 mm for the old identity-rotation guess, which had the
+# rotation wrong by 89.94 deg (the camera sits ~90 deg about the optical
+# axis). Cross-checks: optical axis 0.37 deg off TCP Z; |xyz| = 78 mm fits
+# the bracket (hardware/camera_mount/).
+#
+# Re-run handeye_calib if the bracket is reprinted or reseated, re-solve
+# offline with `ros2 run roscam handeye_calib --solve calib/<samples>`, and
+# update this file only.
+#
+# 2026-09-25: xyz re-solved from the same 21 samples with their ArUco
+# distances corrected as cam_pub range_source 'depth' measures it (ArUco
+# read ~3.6 mm long at the samples' 190 mm; runs/2026-09-25/analysis/
+# handeye_resolve.py). The old xyz had absorbed that error: +3.9 mm along
+# the optical axis, rotation unchanged. xyz_aruco_range keeps it for
+# range_source:=aruco, which the launch then uses automatically. A fresh
+# calibration with range_source depth supersedes both.
+parent_frame: fr3_hand_tcp
+child_frame: camera_color_optical_frame
+xyz: [0.060037, -0.010576, -0.042620]                   # m, TCP -> optical (range_source depth)
+xyz_aruco_range: [0.061126, -0.011144, -0.046550]       # m, the 2026-09-15 solve (range_source aruco)
+quat_xyzw: [0.000855, 0.003126, 0.706706, 0.707500]     # TCP -> optical
+method: Tsai
+poses: 21
+residual_mm: 1.97                                       # 3.17 for xyz_aruco_range
+residual_deg: 1.57
+validated_scatter_mm: 8.14
+calibrated: '2026-09-15'
+samples: handeye_samples_20260915.yaml                  # beside this file

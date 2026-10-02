@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.8)
 project(fr3_mating_controllers)
 
+# Release unless told otherwise. colcon passes no build type, and an empty one
+# means no optimisation: on 2026-09-24 an unoptimised controller missed the
+# 1 kHz FCI deadline in HOLD and TRACK (communication_constraints_violation
+# reflexes) until it was rebuilt with -DCMAKE_BUILD_TYPE=Release.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type (default Release)" FORCE)
+endif()
+
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()

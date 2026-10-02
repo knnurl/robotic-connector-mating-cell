@@ -62,7 +62,7 @@ Two properties of this bracket that the numbers confirm:
 - **The optical axis comes out 0.37° off TCP Z** — the mount points the
   camera essentially straight down the tool axis, as its geometry suggests.
 
-An earlier estimate from `align_gui`'s three-probe method (saved in
+An earlier estimate from `cell_panel`'s three-probe method (saved in
 `tools/fr3/handeye_rotation.json`) put that axis at 2.23° and differs from
 the full calibration by 5.20 deg overall. Prefer `handeye_calib`: 21 diverse
 poses beats 3 probe moves for rotation. The probe method remains useful for

@@ -77,8 +77,8 @@ Critical bugs fixed in `b2b0856` — do not reintroduce these patterns:
 
 ```
 camera driver ──image/camera_info──▶ roscam cam_pub ──/aruco/pose (PoseStamped,
-                                                       optical frame)──▶ move_l
-move_l ──LIN pose goals──▶ move_group ──▶ robot driver
+                                                       optical frame)──▶ mating_node
+mating_node ──LIN pose goals──▶ move_group ──▶ robot driver
 ```
 
 ### Vision — `roscam/roscam/cam_pub.py` (entry point `cam_pub`, node `aruco_pose_publisher`)
@@ -92,7 +92,7 @@ move_l ──LIN pose goals──▶ move_group ──▶ robot driver
   within 0.1 mm of ground truth (test script pattern: render marker with
   `cv2.aruco.generateImageMarker`, feed through callbacks, probe output).
 
-### Controller — `melfa_rv5as_masterclass/src/move_l.cpp` (exe `move_l`, node `connector_mating_node`)
+### Controller — `mating_controller/src/mating_node.cpp` (exe `mating_node`, node `connector_mating_node`)
 - Phase machine: `WAIT_FOR_VISION → ALIGN_COARSE → ALIGN_FINE → INSERT →
   MATED` (+ `FAULT`). MATED/FAULT are **latched**; recover via
   `ros2 service call /connector_mating_node/reset std_srvs/srv/Trigger`.
@@ -111,9 +111,9 @@ move_l ──LIN pose goals──▶ move_group ──▶ robot driver
 - Robot-agnostic: `planning_group`, `EEF_FRAME_ID`, `planning_pipeline`
   (default pilz), `planner_id` (default LIN; empty string = pipeline
   default), everything else parameterized in
-  `melfa_rv5as_masterclass/config/rv5as_params.yaml`.
+  `mating_controller/config/rv5as_params.yaml`.
 - `enable_insertion: false` = calibration/teach mode (aligns, hovers, logs).
-- Pose math lives in `include/melfa_rv5as_masterclass/mating_geometry.hpp`
+- Pose math lives in `include/mating_controller/mating_geometry.hpp`
   — pure functions, covered by `test/test_mating_geometry.cpp`
   (**12 gtests, all passing**: clamps exact, shortest-path rotation,
   marker-tilt roll/pitch tracking, offsets in marker frame, insertion along
@@ -130,9 +130,9 @@ move_l ──LIN pose goals──▶ move_group ──▶ robot driver
   recovery with realistic noise → OpenCV conventions confirmed correct.
 
 ### Launch / docs
-- `melfa_rv5as_masterclass/launch/move_l.launch.py`: args `robot_name`,
+- `mating_controller/launch/mating_node.launch.py`: args `robot_name`,
   `moveit_config_package`, `params_file` (defaults = MELFA RV-5AS).
-- `melfa_ros2_bringup.txt`: 6-terminal bringup, new-style
+- `melfa/BRINGUP.txt`: 6-terminal bringup, new-style
   static_transform_publisher syntax.
 - `SETUP_AND_CALIBRATION.md`: full calibration procedure, porting checklist,
   parameter reference, troubleshooting. Keep it in sync with code changes.
@@ -157,7 +157,7 @@ Status when parked (user said "forget franka testing"):
   `fake_components/GenericSystem` (doesn't integrate torques) — that's why
   `fr3_dryrun_controllers.yaml` swaps in a position-command JTC.
 - To resume: `source /opt/ros/humble/setup.sh && source
-  ~/franka_ros2_ws/install/setup.sh && export AMENT_PREFIX_PATH="$PWD/install/melfa_rv5as_masterclass:$AMENT_PREFIX_PATH"
+  ~/franka_ros2_ws/install/setup.sh && export AMENT_PREFIX_PATH="$PWD/install/mating_controller:$AMENT_PREFIX_PATH"
   && ros2 launch tools/dryrun_fr3/fr3_dryrun.launch.py`. Success = log shows
   ALIGN_COARSE → ALIGN_FINE → INSERT → MATED with error converging
   below 2.5 mm / 1°. Expect to tune: FR3 reachability of the fake marker
@@ -216,7 +216,7 @@ Status when parked (user said "forget franka testing"):
   the gripper mid-stroke must NOT abort it.
 - Never plan/execute in a subscription callback; never bypass the step
   clamps; keep every tunable in the params YAML, not in code.
-- Tests: `colcon test --packages-select melfa_rv5as_masterclass`; keep
+- Tests: `colcon test --packages-select mating_controller`; keep
   `mating_geometry.hpp` pure (no ROS node deps) so it stays testable.
 - Commits so far use `git -c user.name="Kaan Ural" -c
   user.email="k.ural1@salford.ac.uk"` since no global git identity is set.

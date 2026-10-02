@@ -7,7 +7,7 @@
 # (--inactive: the mating controller activates it only for the INSERT
 # stroke and hands back to the trajectory controller afterwards.)
 #
-# Commission it with tools/fr3/impedance_panel.py, which walks the README
+# Commission it with the cell panel (tools/fr3/cell/), which walks the README
 # ladder. Every value below is range-checked: out-of-range values make
 # configure fail, and a live change with any value out of range is rejected
 # (all-or-nothing when sent atomically, as the panel does).
@@ -29,8 +29,11 @@
 #  4. Tool-Z stiffness sets insertion drive: it must overcome mating
 #     friction at a lag of F/k (800 N/m at 8 N contact = 10 mm lag - the
 #     equilibrium leads the flange by that much at full preload).
-#  5. damping_ratio: raise toward 1.4 if the hold test rings; drop toward
-#     0.7 only if insertion feels sluggish.
+#  5. damping_ratio stays 1.0: 32 clean steps on 2026-09-22 showed zero
+#     overshoot, because friction is itself a damper (TRACKING_SPEC.md
+#     section 2 finding 3). D = 2*zeta*sqrt(K), per axis. The one open
+#     experiment is zeta 0.5 while walking k_rot above 90 (TRACKING_SPEC.md
+#     O1) - do not raise zeta above 1.0.
 
 cartesian_impedance_stroke_controller:
   ros__parameters:
@@ -47,11 +50,16 @@ cartesian_impedance_stroke_controller:
     damping_ratio: 1.0                  # 0.1-2.0; D = 2*zeta*sqrt(K), per axis
     nullspace_stiffness: 5.0            # Nm/rad, 0-50, toward the activation posture
 
-    # --- configure-time only: clean the controller up to change these ---
     # Equilibrium slew limits (fr3_backend pattern): topic jumps become
-    # bounded ramps. Also caps the effective stroke speed.
-    setpoint_slew_mps: 0.05             # 0.001-0.25
+    # bounded ramps. Also caps the effective stroke speed. Live, so tracking
+    # can raise the cap to 0.10-0.30 m/s without a cleanup and reconfigure
+    # cycle (TRACKING_SPEC.md section 4 C2); ConfigLimits 0.30 / 1.0 stays
+    # the hard bound either way.
+    setpoint_slew_mps: 0.05             # 0.001-0.30
     setpoint_slew_rps: 0.5              # 0.001-1.0
+
+    # --- configure-time only - arm_id above, and the four ceilings below:
+    # --- clean the controller up to change these ---
 
     # Ceilings on the commanded wrench, whatever the pose error. The panel's
     # collision reflex threshold (40 N) sits ~10 N above max_force_n. The
@@ -65,3 +73,23 @@ cartesian_impedance_stroke_controller:
 
     # Torque-rate saturation per 1 ms cycle (FCI discontinuity limit, max 1.0).
     tau_rate_limit: 1.0
+
+    # The joint-limit wall (impedance_detail.hpp joint_wall_torque), in every
+    # mode, FLOAT included, instead of the robot's reflex taking the driver
+    # down. Inside the last joint_wall_margin_rad before a limit a spring
+    # pushes the joint back out and damping (both ways) slows it; anywhere, a
+    # joint moving toward a limit faster than joint_speed_frac of the FR3's
+    # position-dependent speed limit is braked. The wrist (12 Nm) can still be
+    # overpowered by hand. Configure-time only. Reviewed 2026-10-02: a 5 deg
+    # margin is inside the FR3 speed envelope for pushes over ~0.5 rad/s.
+    joint_lower: [-2.7437, -1.7837, -2.9007, -3.0421, -2.8065, 0.5445, -3.0159]   # = fr3_params tracking_joint_lower
+    joint_upper: [2.7437, 1.7837, 2.9007, -0.1518, 2.8065, 4.5169, 3.0159]        # = fr3_params tracking_joint_upper
+    joint_wall_margin_rad: 0.14         # 8 deg, = tracking_joint_margin_rad; 0 = off; 0-0.35
+    joint_wall_k: [600.0, 600.0, 600.0, 600.0, 150.0, 150.0, 150.0]   # Nm/rad
+    joint_wall_d: [20.0, 20.0, 20.0, 20.0, 3.0, 3.0, 1.5]             # Nm s/rad, both ways inside the margin
+    joint_speed_frac: 0.7               # brake beyond 70 % of the FR3 speed envelope; 0 = off
+    # Nm s/rad per rad/s over it. J1-4 hold a 30 Nm hand push under the
+    # envelope at 1 rad/s; the light wrist low, because the brake is a delayed
+    # velocity loop that chattered at 32-80 Hz in simulation with J7's
+    # damping at 9 (I 0.005 kg m^2): the 40 Hz buzz mechanism (TRACKING_SPEC O1).
+    joint_brake_d: [120.0, 120.0, 100.0, 100.0, 6.0, 6.0, 3.0]
