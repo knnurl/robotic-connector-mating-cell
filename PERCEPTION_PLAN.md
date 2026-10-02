@@ -322,6 +322,12 @@ The vision process that owns the camera (`vision_standalone`) publishes:
 > - **Following when a pose came:** no worse than the marker's.
 >
 > Before the Phase 4 exit, the size gate must be understood (3A step 3).
+>
+> **[3A step 3 DONE, 2026-10-02]** The cause: up close the D405's depth breaks the face into islands, and the gate kept one.
+> - **The fix:** the part's other islands are merged when the anchor is on the part and the top plane does not spill past the silhouette. Size is measured as convex-hull extent, with the lower bound raised to 0.7.
+> - **Replay of the 09-29 TRACK runs:** a raw pose on 93.2 % of marker frames (was 69.9 %), with no more false accepts.
+> - **Next cause:** "no colour outline" (109 frames).
+> - **Phase 5 condition:** a confidently wrong prior between two near-flush cubes (`runs/2026-09-30/analysis/step3_result.txt`).
 
 ### Phase 5: the marker is only a seed; the tracked prior carries the pose
 

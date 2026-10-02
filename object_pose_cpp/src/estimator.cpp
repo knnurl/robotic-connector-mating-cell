@@ -535,6 +535,95 @@ bool Estimator::segment(const cv::Mat& depth, const Mat3& K, const VecX& dist,
   cv::Mat region(H, W, CV_8U);
   for (int y = 0; y < H; ++y)
     for (int x = 0; x < W; ++x) region.at<uchar>(y, x) = lab.at<int>(y, x) == best;
+  // _fragments: the part's other fragments, components lying at least
+  // fragment_in on the prior's silhouette (grown by the prior's error), more
+  // than half of whose points are within fragment_tol_m of best's median
+  // distance to the mesh at the prior
+  {
+    const int grow = static_cast<int>(std::ceil(2.0 * err * K(0, 0) / std::max(zmin, 0.01))) + 2;
+    cv::Mat inside;
+    cv::dilate(prior_mask, inside, cv::Mat::ones(2 * grow + 1, 2 * grow + 1, CV_8U));
+    std::vector<long> n_all(n_lab, 0), n_in(n_lab, 0);
+    for (int y = 0; y < H; ++y)
+      for (int x = 0; x < W; ++x) {
+        const int l = lab.at<int>(y, x);
+        ++n_all[l];
+        if (inside.at<uchar>(y, x)) ++n_in[l];
+      }
+    std::vector<char> ok(n_lab, 0);
+    bool any = false;
+    for (int l = 1; l < n_lab; ++l) {
+      ok[l] = l != best && static_cast<double>(n_in[l]) >= p_.fragment_in * n_all[l];
+      any = any || ok[l];
+    }
+    // the spill ring: the part's top plane running on past the silhouette
+    // (a flush neighbour, or a prior straddling two parts) - no merge
+    if (any) {
+      const int band = static_cast<int>(std::ceil(0.004 * K(0, 0) / std::max(zmin, 0.01))) + 1;
+      cv::Mat outer;
+      cv::dilate(inside, outer, cv::Mat::ones(2 * band + 1, 2 * band + 1, CV_8U));
+      long n_ring = 0, n_cand = 0, spill = 0;
+      for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x) {
+          if (!outer.at<uchar>(y, x) || inside.at<uchar>(y, x)) continue;
+          ++n_ring;
+          if (lab.at<int>(y, x) <= 0) continue;
+          ++n_cand;
+          const double zz = z.at<double>(y, x);
+          const cv::Vec2d gg = nrm(y, x);
+          const Vec3 X = R0.transpose() * (Vec3(gg[0] * zz, gg[1] * zz, zz) - t0);
+          if (std::abs(X[2]) < p_.fragment_tol_m) ++spill;
+        }
+      if (n_cand > 0 && static_cast<double>(spill) >= p_.fragment_spill_max * n_cand &&
+          static_cast<double>(spill) >= 0.02 * n_ring)
+        any = false;
+    }
+    if (any) {
+      std::vector<std::pair<int, int>> px;       // row-major, as np.nonzero
+      for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x) {
+          const int l = lab.at<int>(y, x);
+          if (ok[l] || l == best) px.emplace_back(y, x);
+        }
+      const std::size_t step = std::max<std::size_t>(1, px.size() / 2000);
+      std::vector<double> d_b;
+      std::vector<std::pair<int, Vec3>> others;
+      for (std::size_t i = 0; i < px.size(); i += step) {
+        const int y = px[i].first, x = px[i].second;
+        const double zz = z.at<double>(y, x);
+        const cv::Vec2d gg = nrm(y, x);
+        const Vec3 X = R0.transpose() * (Vec3(gg[0] * zz, gg[1] * zz, zz) - t0);
+        const int l = lab.at<int>(y, x);
+        if (l != best) {
+          others.emplace_back(l, X);
+          continue;
+        }
+        double d2 = 0.0;
+        d_b.push_back(tree_.nearest(X.data(), 0.05, &d2) >= 0
+                          ? std::sqrt(d2) : std::numeric_limits<double>::infinity());
+      }
+      double d_best = std::numeric_limits<double>::infinity();
+      if (!d_b.empty()) {                          // np.median
+        std::sort(d_b.begin(), d_b.end());
+        const std::size_t n = d_b.size();
+        d_best = n % 2 ? d_b[n / 2] : 0.5 * (d_b[n / 2 - 1] + d_b[n / 2]);
+      }
+      if (d_best < p_.fragment_on_part_m) {        // else best is not on the part itself
+        std::vector<long> n_pts(n_lab, 0), n_near(n_lab, 0);
+        for (const auto& o : others) {
+          double d2 = 0.0;
+          ++n_pts[o.first];
+          if (tree_.nearest(o.second.data(), d_best + p_.fragment_tol_m, &d2) >= 0)
+            ++n_near[o.first];
+        }
+        std::vector<char> join(n_lab, 0);
+        for (int l = 1; l < n_lab; ++l) join[l] = ok[l] && 2 * n_near[l] > n_pts[l];
+        for (int y = 0; y < H; ++y)
+          for (int x = 0; x < W; ++x)
+            if (join[lab.at<int>(y, x)]) region.at<uchar>(y, x) = 1;
+      }
+    }
+  }
   // fill its holes (a marker's black cells give no depth)
   cv::Mat pad = cv::Mat::zeros(H + 2, W + 2, CV_8U);
   region.copyTo(pad(cv::Rect(1, 1, W, H)));
@@ -550,7 +639,18 @@ bool Estimator::segment(const cv::Mat& depth, const Mat3& K, const VecX& dist,
       mask.at<uchar>(y, x) = m;
       mask_n += m;
     }
-  const double ratio = static_cast<double>(mask_n) / std::max(1, prior_n);
+  // the size: the region's extent (convex hull) against the prior's, not
+  // its pixel count (that measured the depth's fill)
+  auto hull_area = [](const cv::Mat& m) {      // _hull_area
+    std::vector<std::vector<cv::Point>> cont;
+    cv::findContours(m, cont, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    std::vector<cv::Point> p, hull;
+    for (const auto& c : cont) p.insert(p.end(), c.begin(), c.end());
+    if (p.size() < 3) return 0.0;
+    cv::convexHull(p, hull);
+    return cv::contourArea(hull);
+  };
+  const double ratio = hull_area(filled) / std::max(1.0, hull_area(prior_mask));
   q.size_ratio = ratio;
   if (!(p_.size_lo <= ratio && ratio <= p_.size_hi)) {
     char buf[64];

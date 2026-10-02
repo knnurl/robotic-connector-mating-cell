@@ -147,6 +147,17 @@ def pose_error(T_est, T_ref, sym_order=1):
 
 # ----------------------------------------------------------------- estimator
 
+def _hull_area(mask):
+    """Area (px) of the convex hull of a mask's pixels (of its outer
+    contours' points: the same hull, from far fewer points)."""
+    cont, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL,
+                               cv2.CHAIN_APPROX_SIMPLE)
+    if not cont:
+        return 0.0
+    pts = np.concatenate(cont)
+    return float(cv2.contourArea(cv2.convexHull(pts))) if len(pts) >= 3 else 0.0
+
+
 class ObjectPoseEstimator:
     """process(depth, bgr_clean, K, dist, prior) -> (T, valid, quality).
 
@@ -160,10 +171,33 @@ class ObjectPoseEstimator:
                  max_incidence_deg=86.0, rim_max_incidence_deg=75.0, outline_offset_px=0.5,
                  max_iter=30, min_points=200, max_rms_m=0.0015, min_inlier_frac=0.8,
                  min_outline_frac=0.6, max_shift_m=0.010, max_shift_deg=10.0,
-                 size_ratio=(0.5, 1.6), weak_rel=1e-3, use_outline=True,
+                 size_ratio=(0.7, 1.6), weak_rel=1e-3, use_outline=True,
                  outline_weight=0.1, colour_edges=True, edge_min_step=6.0, edge_rel=0.3,
-                 depth_fallback=True):
+                 depth_fallback=True, fragment_in=0.9, fragment_tol_m=0.003,
+                 fragment_on_part_m=0.004, fragment_spill_max=0.5):
         self.part = part
+        # The part's depth region is the component nearest the prior plus
+        # its other fragments: components lying at least fragment_in on the
+        # prior's silhouette (grown by the prior's error), more than half of
+        # whose points sit on the part's surface at the prior within
+        # fragment_tol_m of the first component's median distance. The D405
+        # is passive stereo: plain plastic and paper return no depth, so up
+        # close the part's depth breaks into islands (3A step 3: 476 of the
+        # 479 "size" refusals in the 09-29 TRACK runs, at 60-115 mm, were one
+        # island of such a face). A finger over the part, or the hand beside
+        # it, sits off the part's surface and stays out.
+        # No merge unless the first component is itself on the part (its
+        # median within fragment_on_part_m of the mesh at the prior: a finger
+        # over the face must not become the anchor), and unless the part's
+        # top plane does NOT run on past the prior's silhouette (at least
+        # fragment_spill_max of the depth in a thin ring around it on that
+        # plane, and that depth at least 2 % of the ring: a neighbouring part
+        # flush with this one, or a prior straddling two).
+        # Review 2026-09-30.
+        self.fragment_in = fragment_in
+        self.fragment_tol_m = fragment_tol_m
+        self.fragment_on_part_m = fragment_on_part_m
+        self.fragment_spill_max = fragment_spill_max
         self.use_outline = use_outline            # False: the surface term alone
         # When the colour outline is not found (motion blur, no contrast):
         # True = finish with the depth outline (stage A, 30-65 ms more on an
@@ -339,6 +373,54 @@ class ObjectPoseEstimator:
 
     # ---------------------------------------------------------------- scene
 
+    def _fragments(self, lab, n_lab, best, prior_mask, points, R0, t0, err, fx, z_near):
+        """The component best with the part's other fragments (see
+        fragment_in), as a boolean mask."""
+        grow = int(np.ceil(2.0 * err * fx / max(z_near, 0.01))) + 2
+        inside = cv2.dilate(prior_mask.astype(np.uint8),
+                            np.ones((2 * grow + 1, 2 * grow + 1), np.uint8)) > 0
+        n_all = np.bincount(lab.ravel(), minlength=n_lab)
+        n_in = np.bincount(lab[inside], minlength=n_lab)
+        ok = n_in >= self.fragment_in * n_all
+        ok[0] = ok[best] = False
+        region = lab == best
+        if not ok.any():
+            return region
+        # the spill ring: fragment_tol_m-ish wide band just outside 'inside'
+        band = int(np.ceil(0.004 * fx / max(z_near, 0.01))) + 1
+        outer = cv2.dilate(inside.astype(np.uint8),
+                           np.ones((2 * band + 1, 2 * band + 1), np.uint8)) > 0
+        ring = outer & ~inside
+        n_ring = int(ring.sum())
+        cand = ring & (lab > 0)
+        if n_ring and cand.any():
+            Xr = (points(cand) - t0) @ R0
+            spill = int(np.count_nonzero(np.abs(Xr[:, 2]) < self.fragment_tol_m))
+            if spill >= self.fragment_spill_max * len(Xr) and spill >= 0.02 * n_ring:
+                return region
+        # Distances to the mesh at the prior, from at most about 2000 of
+        # their pixels: best's median, then for each other component whether
+        # more than half of its points are within fragment_tol_m of that.
+        sel = ok[lab] | region
+        ys, xs = np.nonzero(sel)
+        step = max(1, len(ys) // 2000)
+        sel = np.zeros_like(sel)
+        sel[ys[::step], xs[::step]] = True
+        labs = lab[sel]                                 # the order points() uses
+        X = (points(sel) - t0) @ R0
+        is_best = labs == best
+        if not is_best.any():
+            return region
+        d_best = float(np.median(self.tree.query(X[is_best], distance_upper_bound=0.05)[0]))
+        if not d_best < self.fragment_on_part_m:        # best is not on the part itself
+            return region
+        near = np.isfinite(self.tree.query(X[~is_best], distance_upper_bound=d_best
+                                           + self.fragment_tol_m)[0])
+        n_pts = np.bincount(labs[~is_best], minlength=len(ok))
+        n_near = np.bincount(labs[~is_best][near], minlength=len(ok))
+        join = ok & (2 * n_near > n_pts)
+        return region | join[lab]
+
     def _segment(self, depth, K, dist, prior, q, err):
         """(points (N,3), outline uv pinhole (M,2), outline normals (M,2),
         roi, the region mask (ROI-local, holes filled)) of the part's depth
@@ -445,7 +527,8 @@ class ObjectPoseEstimator:
         if overlap[best] == 0:
             q['reason'] = 'nothing where the prior is'
             return None
-        region = (lab == best).astype(np.uint8)
+        region = self._fragments(lab, n_lab, best, prior_mask, points, R0, t0, err, K[0, 0],
+                                 Pv[:, 2].min()).astype(np.uint8)
         # Fill its holes (a marker's black cells give no depth) and take
         # back any candidate depth inside them.
         pad = np.pad(region, 1)                   # the corner is always outside
@@ -453,7 +536,13 @@ class ObjectPoseEstimator:
         filled = region.copy()
         filled[pad[1:-1, 1:-1] == 0] = 1
         mask = (filled.astype(bool) & cand) | region.astype(bool)
-        ratio = mask.sum() / max(1, prior_mask.sum())
+        # The size: the region's extent (convex hull) against the prior's.
+        # A pixel count here measured the depth's fill instead: plain plastic
+        # has holes, and the part is no smaller for them. The extent reads
+        # ~1 when the whole part is there, so its lower bound is 0.7 (the
+        # count's was 0.5): at 0.5, half the part under a prior 35 mm off
+        # (and the fit pulled 4-8 mm onto it) passed as the part.
+        ratio = _hull_area(filled) / max(1.0, _hull_area(prior_mask))
         q['size_ratio'] = float(ratio)
         lo, hi = self.gates['size_ratio']
         if not lo <= ratio <= hi:
@@ -960,7 +1049,10 @@ class CppObjectPoseEstimator(ObjectPoseEstimator):
                   'depth_fallback': self.depth_fallback, 'edge_min_step': self.edge_min_step,
                   'edge_rel': self.edge_rel, 'min_points': g['min_points'],
                   'size_lo': g['size_ratio'][0], 'size_hi': g['size_ratio'][1],
-                  'weak_rel': g['weak_rel'], 'min_outline_frac': g['min_outline_frac']}
+                  'weak_rel': g['weak_rel'], 'min_outline_frac': g['min_outline_frac'],
+                  'fragment_in': self.fragment_in, 'fragment_tol_m': self.fragment_tol_m,
+                  'fragment_on_part_m': self.fragment_on_part_m,
+                  'fragment_spill_max': self.fragment_spill_max}
         self._core = Estimator(model, params)
 
     def warm(self, K, dist, shape):

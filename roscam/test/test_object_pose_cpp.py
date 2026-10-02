@@ -13,8 +13,8 @@ pytest.importorskip('object_pose_cpp')
 
 from roscam.object_pose import (CppObjectPoseEstimator, ObjectPoseEstimator,  # noqa: E402
                                 box_mesh, pose_error, rpy_matrix)
-from test_object_pose import (CUBE, K, PART, R_DOWN, _plain_plastic, colour_scene,  # noqa: E402
-                              cube_scene, perturbed, pose, raycast)
+from test_object_pose import (CUBE, K, PART, R_DOWN, _islands, _plain_plastic,  # noqa: E402
+                              colour_scene, cube_scene, perturbed, pose, raycast)
 
 DIST = np.array([-0.0545, 0.0569, 0.0006, 0.0006, -0.0187])   # the D405's, near enough
 
@@ -55,6 +55,28 @@ def test_the_marker_seeded_fast_path_with_distortion():
     T = pose([0.004, -0.003, 0.150], yaw=10.0, tilt=2.0)
     depth, bgr = colour_scene(T)
     run_both(depth, bgr, perturbed(T, 0.6, 0.4), dist=DIST, err=0.0015, depth_fallback=False)
+
+
+def test_a_face_broken_into_islands():
+    T = pose([0.004, -0.003, 0.100], yaw=12.0, tilt=2.0)
+    depth, bgr = colour_scene(T, hole=_islands)
+    _, valid, q = run_both(depth, bgr, perturbed(T, 0.6, 0.4), dist=DIST, err=0.0015,
+                           depth_fallback=False)
+    assert valid, q['reason']
+
+
+def test_half_a_face_and_a_straddled_neighbour_refuse_alike():
+    """The review cases of 2026-09-30 (test_object_pose.py), in both."""
+    from test_object_pose import _flush_neighbour, _half_face
+    T = pose([0.004, -0.003, 0.100], yaw=12.0, tilt=2.0)
+    depth, bgr = colour_scene(T, hole=_half_face(0.005), patch=False)
+    _, valid, q = run_both(depth, bgr, perturbed(T, 0.6, 0.4), err=0.0015, depth_fallback=False)
+    assert not valid and q['reason'].startswith('size')
+    depth, bgr = _flush_neighbour(T)
+    prior = T.copy()
+    prior[:3, 3] = T[:3, 3] + T[:3, 1] * 0.020
+    _, valid, _ = run_both(depth, bgr, prior, err=0.0015, depth_fallback=True)
+    assert not valid
 
 
 def test_a_dark_band_and_the_patch_near_the_outline():

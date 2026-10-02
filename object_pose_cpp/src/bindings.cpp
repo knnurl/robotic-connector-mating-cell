@@ -83,6 +83,10 @@ PYBIND11_MODULE(_object_pose_cpp, m) {
              p.size_hi = d("size_hi");
              p.weak_rel = d("weak_rel");
              p.min_outline_frac = d("min_outline_frac");
+             p.fragment_in = d("fragment_in");
+             p.fragment_tol_m = d("fragment_tol_m");
+             p.fragment_on_part_m = d("fragment_on_part_m");
+             p.fragment_spill_max = d("fragment_spill_max");
              return new Estimator(std::move(md), p);
            }),
            py::arg("model"), py::arg("params"))

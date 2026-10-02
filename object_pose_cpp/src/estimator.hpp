@@ -46,8 +46,12 @@ struct Params {
   double edge_min_step = 6.0;
   double edge_rel = 0.3;
   int min_points = 200;
-  double size_lo = 0.5;
+  double size_lo = 0.7;
   double size_hi = 1.6;
+  double fragment_in = 0.9;       // the part's other fragments: see _fragments
+  double fragment_tol_m = 0.003;
+  double fragment_on_part_m = 0.004;  // best must be on the part to anchor a merge
+  double fragment_spill_max = 0.5;   // share of the ring's depth on the top plane: no merge
   double weak_rel = 1e-3;
   double min_outline_frac = 0.6;
 };

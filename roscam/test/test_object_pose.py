@@ -229,18 +229,23 @@ def trace(meshes, table, us, vs):
     return best, mid, fid, d
 
 
-def colour_scene(T, hole=None, patch=True, plain=False, band_mm=0.0, ss=2, seed=0):
+def colour_scene(T, hole=None, patch=True, plain=False, band_mm=0.0, ss=2, seed=0, extra=()):
     """(depth, bgr) of the cube on its black stand over a striped table.
     The top face is yellow with a white label, the black marker and, when
     patch, a blue patch ending 2 mm short of the +x edge. hole(x, y) (top
     face, object frame, m) marks plain plastic: no depth there. plain: one
     grey everywhere (no colour contrast at all). band_mm: a dark band that
     wide in the image just outside the -x edge (seen on the cell from 200 mm
-    up: the stand and its shadow coming into view beside the cube)."""
+    up: the stand and its shadow coming into view beside the cube). extra:
+    more boxes, (size xyz, T_camera_box with its origin at the box's
+    top-face centre, bgr, hole or None), e.g. a finger or a second cube."""
     V, F = box_mesh([CUBE] * 3)
     Vs, Fs = box_mesh([CUBE, 2 * CUBE, 0.03])
     Vs = Vs + [0.0, 0.0, -CUBE]
     meshes = [(V @ T[:3, :3].T + T[:3, 3], F, False), (Vs @ T[:3, :3].T + T[:3, 3], Fs, True)]
+    for size, Tx, _, _ in extra:
+        Vx, Fx = box_mesh(size)
+        meshes.append((Vx @ Tx[:3, :3].T + Tx[:3, 3], Fx, False))
     n = T[:3, 2]
     table = (n, float(n @ (T[:3, 3] + T[:3, :3] @ [0.0, 0.0, -CUBE - 0.03])))
     Ti = np.linalg.inv(T)
@@ -267,6 +272,8 @@ def colour_scene(T, hole=None, patch=True, plain=False, band_mm=0.0, ss=2, seed=
     if patch:
         face[(x > 0.018) & (x < 0.0255) & (np.abs(y) < 0.010)] = BLUE
     col[top] = face[top]
+    for k, (_, _, c, _) in enumerate(extra):
+        col[mid == 2 + k] = c
     if band_mm:
         # where each ray meets the top face's plane, object frame
         do = d @ Ti[:3, :3].T
@@ -288,6 +295,12 @@ def colour_scene(T, hole=None, patch=True, plain=False, band_mm=0.0, ss=2, seed=
     if hole is not None:
         Po = obj(np.where(np.isfinite(z), z, 0.0), d)
         depth[(mid == 0) & (fid <= 1) & hole(Po[:, 0], Po[:, 1])] = 0.0
+    zz = np.where(np.isfinite(z), z, 0.0)
+    for k, (_, Tx, _, hx) in enumerate(extra):
+        if hx is not None:
+            Tix = np.linalg.inv(Tx)
+            Px = (d * zz[:, None]) @ Tix[:3, :3].T + Tix[:3, 3]
+            depth[(mid == 2 + k) & (fid <= 1) & hx(Px[:, 0], Px[:, 1])] = 0.0
     return depth.reshape(h, w), bgr
 
 
@@ -295,6 +308,109 @@ def _plain_plastic(x, y):
     """No depth along most of the +y edge and the lower -x edge, as on the
     real cube's bare yellow (the D405 needs texture)."""
     return ((y > 0.018) & (np.abs(x) < 0.02)) | ((x < -0.020) & (y < 0.0))
+
+
+def _islands(x, y):
+    """No depth along a cross through the top face, 8 mm wide: plain plastic
+    and paper as the D405 sees them up close (09-29, 70-110 mm), leaving the
+    face's depth in four islands of a fifth of it each."""
+    return (np.abs(x) < 0.004) | (np.abs(y) < 0.004)
+
+
+def test_a_face_broken_into_islands_is_still_the_part():
+    """3A step 3: the size check measures the part's extent, not the one
+    island nearest the prior, nor how much of it returned depth."""
+    T = pose([0.004, -0.003, 0.100], yaw=12.0, tilt=2.0)
+    depth, bgr = colour_scene(T, hole=_islands)
+    T_est, valid, q = ObjectPoseEstimator(PART, depth_fallback=False).process(
+        depth, bgr, K, None, perturbed(T, 0.6, 0.4), prior_err_m=0.0015)
+    assert valid, q['reason']
+    assert 0.9 < q['size_ratio'] < 1.1
+    check(T_est, T, mm=0.5, deg=0.5)
+
+
+def _fragment_case():
+    """A 100 x 100 px label image for _fragments, with the prior at the
+    object frame (R0 = I, t0 = 0), so a pixel's point is in the object frame:
+    label 1 (the anchor) a plate 6 mm over the top face, labels 2 and 3
+    islands on the face, all inside the prior's silhouette."""
+    lab = np.zeros((100, 100), np.int32)
+    lab[45:55, 30:70] = 1
+    lab[25:40, 25:45] = 2
+    lab[60:75, 55:75] = 3
+    prior = np.zeros((100, 100), bool)
+    prior[20:80, 20:80] = True
+
+    def points(sel):
+        ys, xs = np.nonzero(sel)                 # row-major, as _fragments reads lab[sel]
+        z = np.where(lab[ys, xs] == 1, 0.006, 0.0)
+        return np.column_stack([(xs - 50) * 0.0005, (ys - 50) * 0.0005, z])
+    return lab, prior, points
+
+
+def test_an_anchor_off_the_part_merges_nothing():
+    """Review 2026-09-30: a finger over the face, picked as the anchor, must
+    not pull the part's islands into its region."""
+    lab, prior, points = _fragment_case()
+    args = (lab, 4, 1, prior, points, np.eye(3), np.zeros(3), 0.0015, 400.0, 0.1)
+    region = ObjectPoseEstimator(PART)._fragments(*args)
+    assert np.array_equal(region, lab == 1)
+    loose = ObjectPoseEstimator(PART, fragment_on_part_m=0.05)._fragments(*args)
+    assert loose[lab == 2].all() and loose[lab == 3].all()     # what the gate stops
+
+
+def test_an_anchor_on_the_part_merges_its_islands():
+    lab, prior, points = _fragment_case()
+
+    def on_face(sel):
+        p = points(sel)
+        p[:, 2] = 0.0
+        return p
+    region = ObjectPoseEstimator(PART)._fragments(
+        lab, 4, 1, prior, on_face, np.eye(3), np.zeros(3), 0.0015, 400.0, 0.1)
+    assert region[lab > 0].all()
+
+
+def _half_face(cut):
+    return lambda x, y: x > cut
+
+
+def test_half_a_face_is_not_the_part():
+    """Review 2026-09-30: the size lower bound is 0.7 of the prior's extent;
+    at the old 0.5 half a face (58 % here) passed."""
+    T = pose([0.004, -0.003, 0.100], yaw=12.0, tilt=2.0)
+    depth, bgr = colour_scene(T, hole=_half_face(0.005), patch=False)
+    prior = perturbed(T, 0.6, 0.4)
+    _, valid, q = ObjectPoseEstimator(PART, depth_fallback=False).process(
+        depth, bgr, K, None, prior, prior_err_m=0.0015)
+    assert not valid and q['reason'].startswith('size')
+    assert 0.5 < q['size_ratio'] < 0.7
+    _, valid, _ = ObjectPoseEstimator(PART, depth_fallback=False, size_ratio=(0.5, 1.6)).process(
+        depth, bgr, K, None, prior, prior_err_m=0.0015)
+    assert valid                                               # what the bound stops
+
+
+def _flush_neighbour(T):
+    nb_pose = T.copy()
+    nb_pose[:3, 3] = T[:3, 3] + T[:3, 1] * CUBE
+    return colour_scene(T, hole=_islands, extra=[([CUBE] * 3, nb_pose, YELLOW, _islands)])
+
+
+def test_a_prior_straddling_a_flush_neighbour_is_refused():
+    """Review 2026-09-30: with a second cube flush against the first and the
+    prior 20 mm towards it, the islands of both lie inside the prior's
+    silhouette. The top plane running on past the silhouette (the spill
+    ring) stops the merge; without it the pose came out 23 mm off."""
+    T = pose([0.004, -0.003, 0.100], yaw=12.0, tilt=2.0)
+    depth, bgr = _flush_neighbour(T)
+    prior = T.copy()
+    prior[:3, 3] = T[:3, 3] + T[:3, 1] * 0.020
+    _, valid, q = ObjectPoseEstimator(PART, depth_fallback=True).process(
+        depth, bgr, K, None, prior, prior_err_m=0.0015)
+    assert not valid, q
+    no_ring = ObjectPoseEstimator(PART, depth_fallback=True, fragment_spill_max=1.01)
+    T_bad, valid, _ = no_ring.process(depth, bgr, K, None, prior, prior_err_m=0.0015)
+    assert valid and np.linalg.norm(pose_error(T_bad, T, 4)[0]) > 0.015   # what the ring stops
 
 
 def test_colour_edges_take_over_where_plain_plastic_has_no_depth():
