@@ -14,6 +14,10 @@ file's T_marker_object):
 --mask-marker blanks the marker's square out of the depth image, roughly as
 a bare cube would read (the colour image keeps it: the outline uses the
 cube's edges, not the marker's).
+--all-frames also runs on frames with no marker (a bare or upside-down cube,
+distractors): those count as found / none, with nothing to score against.
+--overlay DIR writes every Nth result drawn on the colour image (green: the
+acquired outline; red: the marker's), for checking by eye.
 """
 import argparse
 import csv
@@ -50,6 +54,9 @@ def main():
     ap.add_argument('--impl', default='cpp', choices=('cpp', 'python'))
     ap.add_argument('--part', default=str(SRC / 'tools' / 'fr3' / 'parts' / 'cube55.yaml'))
     ap.add_argument('--csv')
+    ap.add_argument('--all-frames', action='store_true')
+    ap.add_argument('--overlay')
+    ap.add_argument('--overlay-every', type=int, default=10)
     a = ap.parse_args()
     part = load_part(a.part)
     est = (CppObjectPoseEstimator if a.impl == 'cpp' else ObjectPoseEstimator)(
@@ -62,20 +69,24 @@ def main():
         dist = np.asarray(it['coeffs'], float)
         scale = float(meta['capture']['depth_scale'])
         half = float(meta.get('marker_size_m', 0.021)) / 2.0
-        counts = {'correct': 0, 'false': 0, 'none': 0}
+        counts = {'correct': 0, 'false': 0, 'none': 0, 'found (no marker)': 0,
+                  'none (no marker)': 0}
+        if a.overlay:
+            pathlib.Path(a.overlay).mkdir(parents=True, exist_ok=True)
+        n_drawn = 0
         reasons, ms = {}, []
         for text in (ses / 'frames.jsonl').open():
             line = json.loads(text)
             p = line['poses'].get('/aruco/pose_raw')
-            if p is None or not line.get('depth') or line['i'] % a.every:
+            if not line.get('depth') or line['i'] % a.every or (p is None and not a.all_frames):
                 continue
             name = f"{line['i']:06d}.png"
             raw = cv2.imread(str(ses / 'depth' / name), cv2.IMREAD_UNCHANGED)
             depth = raw.astype(np.float64) * scale
             bgr = cv2.imread(str(ses / 'color' / name))
-            T_marker = pose_matrix(p['t'], p['q'])
-            T_ref = T_marker @ part['T_marker_object']
-            if a.mask_marker:
+            T_marker = pose_matrix(p['t'], p['q']) if p is not None else None
+            T_ref = T_marker @ part['T_marker_object'] if p is not None else None
+            if a.mask_marker and p is not None:
                 sq = np.array([[-half, -half, 0], [half, -half, 0],
                                [half, half, 0], [-half, half, 0]])
                 uv, _ = cv2.projectPoints(sq @ T_marker[:3, :3].T + T_marker[:3, 3],
@@ -87,13 +98,17 @@ def main():
             T, valid, q = est.acquire(depth, bgr, K, dist)
             ms.append((time.perf_counter() - t0) * 1e3)
             row = {'session': ses.name, 'i': line['i'], 'stamp': line['stamp'],
-                   'range_mm': float(p['t'][2]) * 1e3,
+                   'range_mm': float(p['t'][2]) * 1e3 if p is not None else None,
                    'valid': bool(valid), 'reason': q['reason'],
                    'n_cand': len(q.get('candidates', [])),
                    'whys': ' | '.join(
                        f"{[round(x) for x in c.get('side_mm', [])]} {c.get('why', '')}"
                        for c in q.get('acquire', []))}
-            if valid:
+            if T_ref is None:
+                cat = 'found (no marker)' if valid else 'none (no marker)'
+                if valid:
+                    row.update(found_t_mm=[round(float(v) * 1e3, 1) for v in T[:3, 3]])
+            elif valid:
                 d, tilt, yaw = pose_error(T, T_ref, part['sym_order'])
                 err = float(np.linalg.norm(d)) * 1e3
                 rot = max(abs(float(tilt)), abs(float(yaw)))
@@ -111,7 +126,28 @@ def main():
             row['cat'] = cat
             counts[cat] += 1
             rows.append(row)
-        n = sum(counts.values())
+            if a.overlay and (valid or T_ref is not None):
+                n_drawn += 1
+                if n_drawn % a.overlay_every == 0:
+                    img = bgr.copy()
+                    for Tx, col in ((T_ref, (0, 0, 255)), (T if valid else None, (0, 255, 0))):
+                        if Tx is None:
+                            continue
+                        Vc = part['V'] @ Tx[:3, :3].T + Tx[:3, 3]
+                        uv, _ = cv2.projectPoints(Vc, np.zeros(3), np.zeros(3), K, dist)
+                        uv = np.round(uv.reshape(-1, 2)).astype(int)
+                        for f in part['F']:
+                            cv2.polylines(img, [uv[f].reshape(-1, 1, 2)], True, col, 1,
+                                          cv2.LINE_AA)
+                    cv2.putText(img, f"{line['i']} {cat} {q['reason'][:50]}", (6, 18),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+                    out = pathlib.Path(a.overlay) / f"{ses.name}_{line['i']:06d}.png"
+                    cv2.imwrite(str(out), img)
+        n = counts['correct'] + counts['false'] + counts['none']
+        nm = counts['found (no marker)'] + counts['none (no marker)']
+        if nm:
+            print(f"{ses.name}: {nm} frames without the marker: found "
+                  f"{counts['found (no marker)']}, none {counts['none (no marker)']}")
         if not n:
             print(f'{ses.name}: no frames with the marker')
             continue
